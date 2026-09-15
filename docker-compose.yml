@@ -23,8 +23,9 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       KIE_API_KEY: ${KIE_API_KEY}
-      KIE_MODEL: gpt-5-6-terra
-      KIE_OPUS_MODEL: ${KIE_OPUS_MODEL:-gpt-5-6-terra}
+      KIE_MODEL: ${KIE_MODEL:-gpt-5-6-luna}
+      KIE_FALLBACK_MODELS: ${KIE_FALLBACK_MODELS:-gemini-3-8-flash-openai,claude-haiku-4-5}
+      KIE_OPUS_MODEL: ${KIE_OPUS_MODEL:-}
       LITELLM_API_KEY: ${LITELLM_API_KEY}
       # PRIMARY LLM: OmniRoute auto-router (Kie is a fallback in backend.llm.router)
       PERSONA_LLM_PROVIDER: ${PERSONA_LLM_PROVIDER:-omniroute}
@@ -115,8 +116,9 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       KIE_API_KEY: ${KIE_API_KEY}
       KIE_BEARER_TOKEN: "Bearer ${KIE_API_KEY}"
-      KIE_MODEL: gpt-5-6-terra
-      KIE_OPUS_MODEL: ${KIE_OPUS_MODEL:-gpt-5-6-terra}
+      KIE_MODEL: ${KIE_MODEL:-gpt-5-6-luna}
+      KIE_FALLBACK_MODELS: ${KIE_FALLBACK_MODELS:-gemini-3-8-flash-openai,claude-haiku-4-5}
+      KIE_OPUS_MODEL: ${KIE_OPUS_MODEL:-}
       LITELLM_MODEL_FALLBACK: true
       LITELLM_MASTER_KEY: ${LITELLM_API_KEY:?LITELLM_API_KEY must be set}
     command: --config /tmp/litellm-config.yaml --port 4000
