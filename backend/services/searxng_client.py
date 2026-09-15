@@ -15,7 +15,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SEARXNG_URL = "http://searxng:8080"
+DEFAULT_SEARXNG_URL = "http://ai-trading-searxng:8080"
 
 
 def url_hash(url: str) -> str:

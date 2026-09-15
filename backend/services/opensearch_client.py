@@ -15,7 +15,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_OPENSEARCH_URL = "http://opensearch:9200"
+DEFAULT_OPENSEARCH_URL = "http://ai-trading-opensearch:9200"
 
 
 class OpenSearchClient:
