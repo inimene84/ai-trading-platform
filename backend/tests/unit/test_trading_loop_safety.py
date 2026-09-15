@@ -74,24 +74,57 @@ def test_chunk_symbols_handles_remainder():
 
 def test_status_uses_broker_balance():
     loop = TradingLoopService()
-    mock_broker = MagicMock()
-    mock_broker.get_balance.return_value = {
+    mock_balance = {
         "available": 44.0,
         "equity": 91.5,
         "margin_used": 47.0,
+        "balance": 91.5,
+        "broker": "ctrader",
     }
-    # status() reads paper portfolio unless trading mode is LIVE.
     with patch(
         "backend.services.trading_loop.get_trading_mode",
         return_value=TradingMode.LIVE,
+    ), patch.object(
+        loop, "_is_live_binance", return_value=False,
     ), patch(
-        "backend.services.trading_loop.get_active_broker",
-        return_value=mock_broker,
+        "backend.services.trading_loop.ctrader_broker.get_balance",
+        return_value=mock_balance,
+    ), patch(
+        "backend.services.trading_loop.get_active_broker_name",
+        return_value="ctrader",
     ):
         st = loop.status
     assert st["cash"] == 44.0
     assert st["equity"] == 91.5
     assert st["margin_used"] == 47.0
+    assert st["split_book"] is False
+    assert st["risk_broker"] in {"ctrader", "cTrader"}
+
+
+def test_status_uses_binance_equity_on_split_book(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("ACTIVE_BROKER", "ctrader")
+    monkeypatch.setenv("CTRADER_ENV", "sandbox")
+    monkeypatch.setenv("CTRADER_PAPER_MODE", "false")
+    monkeypatch.setenv("BINANCE_TESTNET", "false")
+    monkeypatch.setenv("BINANCE_PAPER_PARALLEL", "false")
+    loop = TradingLoopService()
+    with patch(
+        "backend.services.trading_loop.ctrader_broker.get_balance",
+        return_value={"broker": "ctrader", "equity": 150.0, "balance": 150.0, "available": 150.0},
+    ), patch(
+        "backend.services.trading_loop.binance_futures_broker.get_balance",
+        return_value={
+            "broker": "binance_futures",
+            "equity": 918.0,
+            "balance": 900.0,
+            "available": 800.0,
+        },
+    ):
+        st = loop.status
+    assert st["equity"] == 918.0
+    assert st["split_book"] is True
+    assert st["risk_broker"] == "binance_futures"
 
 
 def test_status_uses_paper_portfolio_in_paper_mode():

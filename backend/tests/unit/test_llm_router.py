@@ -13,6 +13,7 @@ from backend.llm.router import (
     build_provider_chain,
     classify_llm_error,
     call_llm_resilient,
+    get_llm_router_status,
     resolve_kie_route,
     sanitize_provider_config,
 )
@@ -206,6 +207,11 @@ async def test_all_providers_exhausted_raises_chain_error(monkeypatch):
     with patch("backend.llm.router._invoke_provider", new=fake_invoke):
         with pytest.raises(LLMChainExhausted, match="All LLM providers in the chain failed"):
             await call_llm_resilient("general", prompt="hi")
+    status = get_llm_router_status()
+    assert status["degraded"] is True
+    assert status["chain_exhausted"] is True
+    assert status["last_error"]
+    assert status["last_error_provider"] in {"omniroute", "kie"}
 
 
 @pytest.mark.asyncio

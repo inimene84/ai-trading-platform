@@ -4,8 +4,15 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
 
 from backend.services.risk_config import RiskConfig
+from backend.services.equity_scope import (
+    ctrader_money_mode,
+    drawdown_suppressed_by_sandbox,
+    is_split_book,
+    risk_broker_name,
+)
 from backend.services.trading_mode import TradingMode, get_trading_mode
 from backend.database.models import Trade, PortfolioSnapshot
+from backend.services.ledger import is_binance_paper_fill
 
 
 def _snapshot_risk_equity(snapshot: PortfolioSnapshot | None) -> float:
@@ -21,6 +28,13 @@ def _snapshot_risk_equity(snapshot: PortfolioSnapshot | None) -> float:
     cash = float(getattr(snapshot, "cash", 0.0) or 0.0)
     total_value = float(getattr(snapshot, "total_value", 0.0) or 0.0)
     positions_value = float(getattr(snapshot, "positions_value", 0.0) or 0.0)
+    broker = (getattr(snapshot, "broker", None) or "").lower()
+    mode = (getattr(snapshot, "mode", None) or "").lower()
+    # Live USDT-M notional >> NAV. The paper inflation heuristic would
+    # rewrite a live Binance snapshot to ``cash`` and trip drawdown.
+    # Unlabeled / cTrader rows can still be leftover paper $198k books.
+    if mode == "live" and "binance" in broker:
+        return total_value
     inflated = total_value - cash
     if cash > 0 and inflated > 0 and positions_value >= inflated * 0.9:
         return cash
@@ -30,12 +44,13 @@ def _snapshot_risk_equity(snapshot: PortfolioSnapshot | None) -> float:
 
 
 def _filter_snapshots_for_risk(rows: list[PortfolioSnapshot]) -> list[PortfolioSnapshot]:
-    """Scope snapshot rows to active broker and trading mode when partitioned.
-    
+    """Scope snapshot rows to the risk broker book (live-cash when split).
+
     In live mode, strictly enforce mode='live' and match broker/account_id.
     Never fallback to paper or unpartitioned rows in live mode.
+    Demo cTrader rows are ignored when the risk book is live Binance.
     """
-    active = _active_broker_name()
+    active = risk_broker_name() if is_split_book() else _active_broker_name()
     aliases = {
         "ctrader": {"ctrader", "ctrader:paper", "ic", "icmarkets"},
         "binance_futures": {"binance_futures", "binance", "binanceusdm"},
@@ -43,7 +58,9 @@ def _filter_snapshots_for_risk(rows: list[PortfolioSnapshot]) -> list[PortfolioS
     wanted = aliases.get(active, {active})
     current_mode = get_trading_mode().value if hasattr(get_trading_mode(), "value") else str(get_trading_mode())
     is_live = (current_mode.lower() == "live")
-    active_account = os.getenv("CTRADER_ACCOUNT_ID") if active == "ctrader" else None
+    active_account = os.getenv("CTRADER_ACCOUNT_ID") if active.startswith("ctrader") else None
+    split = is_split_book()
+    skip_broker_filter = (not split) and active in {"all", "dual", "both", "*"}
 
     scoped = []
     for r in rows:
@@ -55,7 +72,9 @@ def _filter_snapshots_for_risk(rows: list[PortfolioSnapshot]) -> list[PortfolioS
             # In live mode, strict matching: mode must be explicitly 'live', never null or paper
             if row_mode != "live":
                 continue
-            if row_broker and row_broker not in wanted:
+            if split and not row_broker:
+                continue
+            if row_broker and not skip_broker_filter and row_broker not in wanted:
                 continue
             if active_account and row_account and str(row_account).strip() != str(active_account).strip():
                 continue
@@ -64,7 +83,7 @@ def _filter_snapshots_for_risk(rows: list[PortfolioSnapshot]) -> list[PortfolioS
             # In paper/backtest mode:
             if row_mode and row_mode != current_mode.lower() and row_mode != "paper":
                 continue
-            if row_broker and row_broker not in wanted:
+            if row_broker and not skip_broker_filter and row_broker not in wanted:
                 continue
             if active_account and row_account and str(row_account).strip() != str(active_account).strip():
                 continue
@@ -73,6 +92,35 @@ def _filter_snapshots_for_risk(rows: list[PortfolioSnapshot]) -> list[PortfolioS
     if is_live:
         return scoped
     return scoped if scoped else rows
+
+
+def latest_snapshot_for_risk(db: Session) -> PortfolioSnapshot | None:
+    """Newest snapshot that belongs to the risk book (live-cash when split).
+
+    Trading-loop kill/drawdown must not key off a demo cTrader row while
+    Binance is the live-cash book. Bounded query — never load the full table.
+    """
+    q = (
+        db.query(PortfolioSnapshot)
+        .filter(PortfolioSnapshot.total_value > 0)
+        .order_by(PortfolioSnapshot.timestamp.desc())
+    )
+    if is_split_book():
+        risk = risk_broker_name()
+        if risk == "binance_futures":
+            q = q.filter(
+                PortfolioSnapshot.broker.in_(("binance_futures", "binance", "binanceusdm"))
+            )
+        elif str(risk).startswith("ctrader"):
+            q = q.filter(
+                PortfolioSnapshot.broker.in_(("ctrader", "ctrader:paper", "ic", "icmarkets"))
+            )
+        if get_trading_mode() == TradingMode.LIVE:
+            q = q.filter(PortfolioSnapshot.mode == "live")
+        return q.first()
+    raw_rows = q.limit(200).all()
+    scoped = _filter_snapshots_for_risk(raw_rows)
+    return scoped[0] if scoped else None
 
 
 def _peak_risk_equity(db: Session, window_start: datetime, current_value: float) -> float:
@@ -213,12 +261,13 @@ def _active_broker_name() -> str:
 
 
 def _trades_for_risk(open_trades: list[Trade]) -> list[Trade]:
-    """Only count the active broker book for exposure / position caps.
+    """Only count the risk-broker book for exposure / position caps.
 
-    Stale Binance paper rows (huge coin qtys) used to trip Max directional
-    exposure while IC demo FX was the live book.
+    Split-book (cTrader demo + Binance live) must count live Binance fills,
+    not the demo FX book. Dual-live (ACTIVE_BROKER=dual) still counts both
+    live-cash books. Stale paper rows are still skipped in live mode.
     """
-    active = _active_broker_name()
+    active = risk_broker_name() if is_split_book() else _active_broker_name()
     if active in {"all", "dual", "both", "*"} or not active:
         return list(open_trades)
     aliases = {
@@ -228,13 +277,15 @@ def _trades_for_risk(open_trades: list[Trade]) -> list[Trade]:
     wanted = aliases.get(active, {active})
     scoped = []
     live_mode = get_trading_mode() == TradingMode.LIVE
+    split = is_split_book()
     for t in open_trades:
         if live_mode:
-            from backend.services.ledger import is_binance_paper_fill
             if is_binance_paper_fill(t):
                 continue
         broker = str(getattr(t, "broker", "") or getattr(t, "exchange", "") or "").lower()
         if not broker:
+            if live_mode and split:
+                continue
             scoped.append(t)
             continue
         if broker in wanted:
@@ -266,9 +317,7 @@ def is_drawdown_suppressed_in_testing() -> bool:
         return True
     if os.getenv("TESTING_MODE", "false").lower() == "true":
         return True
-    if os.getenv("CTRADER_ENV", "").lower() == "sandbox" and os.getenv("ENFORCE_SANDBOX_DRAWDOWN", "false").lower() != "true":
-        return True
-    if os.getenv("CTRADER_PAPER_MODE", "false").lower() == "true":
+    if drawdown_suppressed_by_sandbox():
         return True
     if get_trading_mode() in (TradingMode.PAPER, TradingMode.BACKTEST) and os.getenv("ENFORCE_TESTING_DRAWDOWN", "false").lower() != "true":
         return True
@@ -358,7 +407,12 @@ def enforce_risk_limits(
         # If the latest snapshot is still a paper $100k row while the live
         # broker book is ~$1k, prefer the live cTrader equity when available.
         try:
-            if _active_broker_name().startswith("ctrader"):
+            # Demo cTrader equity must not replace a live Binance snapshot.
+            if (
+                _active_broker_name().startswith("ctrader")
+                and ctrader_money_mode() == "live_cash"
+                and not is_split_book()
+            ):
                 from backend.services.ctrader_service import ctrader_service
                 live_eq = float(getattr(ctrader_service, "equity", 0) or 0)
                 if live_eq > 0 and (current_value <= 0 or current_value > live_eq * 5.0):
