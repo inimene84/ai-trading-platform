@@ -155,8 +155,10 @@ The platform embeds financial machine learning practices inspired by Marcos Lóp
 | **API Boundary Lockdown** | Constant-time HMAC on all `/trading/*` routes | Blocks unauthorized information dumps of positions, balances, or bot telemetry (401/403). |
 | **Image Worker Ceiling** | Dockerfile CMD set to `--workers 1` | Prevents split-brain loops, duplicate pyramid maps, and concurrency collisions. |
 | **Fail-Safe Testnet Fallback** | Compose default `${BINANCE_TESTNET:-true}` | If `.env` omits the testnet flag, the platform defaults to simulated execution. |
-| **Rolling Peak Drawdown** | Lookback window of 72 hours (configurable) | Halts new entries when equity drops below limit (20%) in live production; safely suppressed during testing/sandbox (`DISABLE_DRAWDOWN_IN_TESTING=true` or sandbox broker). Exits continue running. |
-| **Multi-Broker Isolation** | `broker + account_id + mode` partitioning | Paper Binance fills never alter cTrader live equity or trip live risk boundaries. |
+| **Rolling Peak Drawdown** | Lookback window of 72 hours (configurable) | Halts new entries when equity drops below limit (20%) in live production; sandbox suppress is ignored if any live-cash book exists (split cTrader demo + Binance live stays fail-closed on the live book). Exits continue running. |
+| **Multi-Broker Isolation** | `broker + account_id + mode` partitioning | Paper Binance fills never alter cTrader live equity or trip live risk boundaries. Demo cTrader + live Binance is labeled `split_book`; kill/drawdown use the live-cash book only (`EQUITY_RISK_SCOPE=broker`). |
+| **Sentry Auto-Resume** | `SENTRY_AUTO_RESUME_LIVE_CONFIRM=I_UNDERSTAND` | Paper defaults ON. Live cash defaults OFF even if `SENTRY_AUTO_RESUME_ENABLED=true`. |
+| **Sentiment Gate** | `SENTIMENT_FILTER_ENABLED` (default `false`) | n8n / native sentiment_loop are dashboards + opinion context only unless this flag is explicitly enabled. |
 | **Maker GTX Execution** | Post-only orders with market fallback | Captures maker rebates (0.02% vs 0.05% taker fees); cancels orders that would cross the spread. |
 | **Broker Clamp Guard** | Minimum stop-pip distance & effective R:R gate | Rejects trade setups whose planned risk:reward is crushed by broker-enforced minimum stops. |
 

@@ -122,7 +122,14 @@ def _reviewer_gate_fail_open() -> bool:
 
 
 def _sentiment_filter_enabled() -> bool:
-    """Whether the soft news sentiment gate is enabled."""
+    """Optional news-sentiment veto/dampen on Decision Engine entries.
+
+    Default OFF. Native sentiment_loop and n8n still write Influx/Qdrant for
+    Grafana dashboards and the opinion layer's social weight; they do not
+    gate size or entries unless SENTIMENT_FILTER_ENABLED=true. That is
+    intentional — do not force-enable on live. Fail-closed entry filters
+    (Kronos, Jesse, geometry, risk guard) stay independent of this flag.
+    """
     return os.getenv("SENTIMENT_FILTER_ENABLED", "false").lower() == "true"
 
 
