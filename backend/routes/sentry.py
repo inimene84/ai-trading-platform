@@ -12,13 +12,14 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from backend.services.sentry_emergency import emergency_halt
-from backend.services.sentry_resume import safe_resume
+from backend.services.sentry_resume import auto_resume_policy, safe_resume
 from backend.services.sentry_state import (
     TradingStatus,
     halt_trading,
     is_trading_allowed,
     read_state,
 )
+from backend.services.ops_status import trading_ops_snapshot
 
 router = APIRouter(prefix="/sentry", tags=["sentry"])
 
@@ -73,10 +74,14 @@ def _validate_sentry_token(request: Request) -> None:
 @router.get("/status")
 async def sentry_status() -> dict[str, Any]:
     state = read_state()
+    ops = trading_ops_snapshot()
     return {
         "trading_allowed": is_trading_allowed(),
         "status": state.get("status", TradingStatus.ACTIVE.value),
         "state": state,
+        "equity_books": ops["equity_books"],
+        "llm_router": ops["llm_router"],
+        "sentry_auto_resume": ops["sentry_auto_resume"],
     }
 
 
@@ -110,7 +115,20 @@ async def sentry_resume(body: ResumeRequest, request: Request) -> dict[str, Any]
 
 @router.post("/auto-resume")
 async def sentry_auto_resume(body: AutoResumeRequest, request: Request) -> dict[str, Any]:
-    """Resume after sentry halt once backend is stable. Skips HALTED_MANUAL."""
+    """Resume after sentry halt once backend is stable. Skips HALTED_MANUAL.
+
+    Live cash requires SENTRY_AUTO_RESUME_ENABLED=true and
+    SENTRY_AUTO_RESUME_LIVE_CONFIRM=I_UNDERSTAND. Paper/backtest keep the
+    existing default-on behavior.
+    """
     _validate_sentry_token(request)
+    policy = auto_resume_policy()
+    if not policy["enabled"]:
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": policy["reason"],
+            "sentry_auto_resume": policy,
+        }
     result = await safe_resume(resumed_by=body.source, reconcile=True)
     return result
