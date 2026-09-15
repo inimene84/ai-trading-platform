@@ -22,7 +22,15 @@ from backend.services.binance_websocket import binance_ws
 from backend.services.multi_provider_data import multi_provider_data
 
 from backend.strategies.market_regime import MarketRegimeDetector
+from backend.llm.router import LLMChainExhausted
 from backend.services.decision_engine import DecisionEngine
+from backend.services.equity_scope import (
+    compose_balance_payload,
+    effective_risk_scope,
+    is_split_book,
+    risk_broker_name,
+)
+from backend.services.market_hours import is_venue_open
 from backend.services.unified_trading import UnifiedTrading, UnifiedOrder, OrderSide, OrderType
 from backend.services.position_manager import get_position_manager
 from backend.services.sentry_state import get_trading_status, is_trading_allowed
@@ -320,12 +328,38 @@ class TradingLoopService:
                 return last_book
             starting = paper_starting_balance()
             return self._paper_balance_payload(starting, starting, 0.0)
-        broker = get_active_broker()
-        return (
-            broker.get_balance()
-            if hasattr(broker, "get_balance")
-            else {"balance": 0.0, "available": 0.0, "equity": 0.0, "margin_used": 0.0}
-        )
+        books: list[dict] = []
+        try:
+            if hasattr(ctrader_broker, "get_balance"):
+                ct = ctrader_broker.get_balance() or {}
+                if ct:
+                    books.append({**ct, "broker": ct.get("broker") or "ctrader"})
+        except Exception as exc:
+            logger.warning("cTrader get_balance failed: %s", exc)
+            books.append({"broker": "ctrader", "error": type(exc).__name__})
+
+        if (
+            self._is_live_binance()
+            or get_active_broker_name() == "binance_futures"
+            or risk_broker_name() == "binance_futures"
+        ):
+            try:
+                bn = binance_futures_broker.get_balance(
+                    raise_on_error=bool(
+                        self._is_live_binance()
+                        or risk_broker_name() == "binance_futures"
+                    )
+                ) or {}
+                if bn:
+                    books.append({**bn, "broker": bn.get("broker") or "binance_futures"})
+            except Exception as exc:
+                logger.warning("Binance get_balance failed (not treating as $0): %s", exc)
+                books.append({"broker": "binance_futures", "error": type(exc).__name__})
+
+        payload = compose_balance_payload(books)
+        if not books:
+            payload["error"] = payload.get("error") or "no_live_broker_balance"
+        return payload
 
     def _kill_switch_action(self, equity: float, balance: dict) -> str:
         """Return 'halt', 'block_entries', or 'ok'.
@@ -391,6 +425,13 @@ class TradingLoopService:
             "cash": float(balance_info.get("available", balance_info.get("balance", 0.0))),
             "equity": float(balance_info.get("equity", balance_info.get("balance", 0.0))),
             "margin_used": float(balance_info.get("margin_used", 0.0)),
+            "equity_scope": balance_info.get("equity_scope") or effective_risk_scope(),
+            "split_book": bool(balance_info.get("split_book") or is_split_book()),
+            "risk_broker": balance_info.get("risk_broker") or risk_broker_name(),
+            "ctrader_env": balance_info.get("ctrader_env"),
+            "binance_env": balance_info.get("binance_env"),
+            "split_book_warning": balance_info.get("split_book_warning"),
+            "books": balance_info.get("books"),
             "trading_allowed": allowed,
             "trading_status": get_trading_status().value,
         }
@@ -658,16 +699,15 @@ class TradingLoopService:
         self._state = "running"
 
         # ── RISK GUARD GATEKEEPER ──────────────────────────────────────────
-        from backend.services.risk_guard import enforce_risk_limits, RiskBreach
+        from backend.services.risk_guard import (
+            enforce_risk_limits,
+            latest_snapshot_for_risk,
+            RiskBreach,
+        )
         db_risk = SessionLocal()
         try:
             open_trades = db_risk.query(Trade).filter(Trade.status.in_(["open", "filled"])).all()
-            latest_snapshot = (
-                db_risk.query(PortfolioSnapshot)
-                .filter(PortfolioSnapshot.total_value > 0)  # skip zero-value race condition snapshots
-                .order_by(PortfolioSnapshot.timestamp.desc())
-                .first()
-            )
+            latest_snapshot = latest_snapshot_for_risk(db_risk)
             enforce_risk_limits(db_risk, self.risk_config, open_trades, latest_snapshot)
         except RiskBreach as rb:
             logger.critical(
@@ -1289,15 +1329,22 @@ class TradingLoopService:
                     decision_engine.account_leverage = 10.0
                 if decision_engine.account_leverage <= 0:
                     decision_engine.account_leverage = 10.0
-            decision = await decision_engine.evaluate_symbol(
-                symbol=symbol,
-                bars=bars,
-                existing_position=existing,
-                open_count=self._open_count,
-                pyramid_layers=self._pyramid_layers.get(symbol, []),
-                cooldown_active=cooldown_active,
-                current_funding_rate=current_funding_rate
-            )
+            try:
+                decision = await decision_engine.evaluate_symbol(
+                    symbol=symbol,
+                    bars=bars,
+                    existing_position=existing,
+                    open_count=self._open_count,
+                    pyramid_layers=self._pyramid_layers.get(symbol, []),
+                    cooldown_active=cooldown_active,
+                    current_funding_rate=current_funding_rate
+                )
+            except LLMChainExhausted:
+                logger.error(
+                    "  [ %s ] LLM chain exhausted; continuing cycle without LLM-dependent entry",
+                    symbol,
+                )
+                decision = None
 
             ev = getattr(decision_engine, "last_evaluation", None) or {}
             signal_status = "evaluated"
@@ -1332,7 +1379,7 @@ class TradingLoopService:
                     signal_reason = "opposing flatten"
                 elif not decision.is_pyramid:
                     all_open = db.query(Trade).filter(Trade.status.in_(["open", "filled"])).all()
-                    scoped_open = trades_for_direction_cap(all_open, get_active_broker_name())
+                    scoped_open = trades_for_direction_cap(all_open, risk_broker_name())
                     _long_notional = sum(
                         t.quantity * (t.entry_price or 0.0)
                         for t in scoped_open if t.direction == "BUY"
@@ -1672,22 +1719,25 @@ class TradingLoopService:
             
             # Compute realized P&L from all closed trades
             from sqlalchemy import func as _func
-            realized_pnl = db.query(_func.coalesce(_func.sum(Trade.pnl), 0.0)).filter(
+            snapshot_broker = risk_broker_name()
+            risk_open = trades_for_direction_cap(open_trades, snapshot_broker)
+            closed_q = db.query(_func.coalesce(_func.sum(Trade.pnl), 0.0)).filter(
                 Trade.status == "closed"
-            ).scalar() or 0.0
+            )
+            if snapshot_broker == "binance_futures":
+                closed_q = closed_q.filter(Trade.broker != "ctrader")
+            elif str(snapshot_broker).startswith("ctrader"):
+                closed_q = closed_q.filter(Trade.broker == "ctrader")
+            realized_pnl = closed_q.scalar() or 0.0
 
-            distinct_open_symbols = len({t.symbol for t in open_trades if getattr(t, "symbol", None)})
-
-            # Compute positions value from open trades
             positions_val = sum(
                 (t.quantity or 0) * (t.entry_price or 0)
-                for t in open_trades
+                for t in risk_open
             )
-            distinct_open_symbols = len({t.symbol for t in open_trades if t.symbol})
+            distinct_open_symbols = len({t.symbol for t in risk_open if t.symbol})
 
             # Save snapshot
             from backend.services.trading_mode import get_trading_mode
-            active_broker = get_active_broker_name()
             current_mode = get_trading_mode().value if hasattr(get_trading_mode(), "value") else str(get_trading_mode())
 
             snapshot = PortfolioSnapshot(
@@ -1697,8 +1747,12 @@ class TradingLoopService:
                 total_pnl=round(float(realized_pnl), 4),
                 open_positions=distinct_open_symbols,
                 cycle_number=self._cycle_count,
-                broker=active_broker,
-                account_id=os.getenv("CTRADER_ACCOUNT_ID") if active_broker.startswith("ctrader") else "binance_main",
+                broker=snapshot_broker,
+                account_id=(
+                    os.getenv("CTRADER_ACCOUNT_ID")
+                    if snapshot_broker.startswith("ctrader")
+                    else "binance_main"
+                ),
                 mode=current_mode,
             )
             db.add(snapshot)
@@ -1837,32 +1891,8 @@ class TradingLoopService:
                     trade.notes = (trade.notes or "") + f" | SL/TP close FAILED: {res.message}"
 
     def _is_market_open(self, symbol: str) -> bool:
-        """Check if the market is open for the given symbol.
-        Crypto: always open (24/7)
-        Forex: Mon 21:00 UTC - Fri 21:00 UTC (approximate)
-        """
-        from datetime import datetime, timezone
-        # Crypto is always open - detect USDT pairs and common crypto
-        s = symbol.upper()
-        if s.endswith('USDT') or s.endswith('USDC') or s.endswith('BUSD') or s.endswith('BTC'):
-            return True
-        crypto = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'BNB-USD', 'XRP-USD']
-        if symbol in crypto or (symbol.endswith('-USD') and '=' not in symbol):
-            return True
-        
-        # Forex hours check
-        now = datetime.now(timezone.utc)
-        weekday = now.weekday()  # Mon=0, Fri=4, Sat=5, Sun=6
-        
-        if weekday == 4 and now.hour >= 21:  # Fri after 21:00 UTC
-            return False
-        if weekday == 5:  # Saturday
-            return False
-        if weekday == 6 and now.hour < 21:  # Sun before 21:00 UTC
-            return False
-        
-        # Mon-Thu: always open
-        return True
+        """Crypto is 24/7; FX/metals follow Sun 21:00–Fri 21:00 UTC."""
+        return is_venue_open(symbol)
 
     @staticmethod
     def _to_yfinance_symbol(symbol: str) -> str:
