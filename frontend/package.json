@@ -12,7 +12,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@google/genai": "^1.29.0",
+    "@google/genai": "^2.21.0",
     "@influxdata/influxdb-client": "^1.35.0",
     "@tailwindcss/postcss": "^4.2.2",
     "@tailwindcss/vite": "^4.2.2",
