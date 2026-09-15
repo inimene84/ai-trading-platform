@@ -20,6 +20,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any, Literal, Never, Optional
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,51 @@ def list_models() -> dict[str, dict]:
 
 class LLMChainExhausted(RuntimeError):
     """Raised when every configured LLM provider failed within the chain budget."""
+
+
+# Last-error summary for /trading/status — no response bodies, no keys.
+_llm_router_status: dict[str, Any] = {
+    "degraded": False,
+    "chain_exhausted": False,
+    "last_success_at": None,
+    "last_success_provider": None,
+    "last_success_model": None,
+    "last_error": None,
+    "last_error_at": None,
+    "last_error_provider": None,
+    "last_error_task": None,
+}
+
+
+def get_llm_router_status() -> dict[str, Any]:
+    """Ops snapshot of the last LLM success/failure (safe to expose)."""
+    return dict(_llm_router_status)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _record_llm_success(task_type: str, provider: str, model: str) -> None:
+    _llm_router_status["degraded"] = False
+    _llm_router_status["chain_exhausted"] = False
+    _llm_router_status["last_success_at"] = _utc_now_iso()
+    _llm_router_status["last_success_provider"] = provider
+    _llm_router_status["last_success_model"] = model
+    _llm_router_status["last_error"] = None
+    _llm_router_status["last_error_at"] = None
+    _llm_router_status["last_error_provider"] = None
+    _llm_router_status["last_error_task"] = task_type
+
+
+def _record_llm_failure(task_type: str, provider: str, summary: str, *, exhausted: bool = False) -> None:
+    _llm_router_status["last_error"] = summary
+    _llm_router_status["last_error_at"] = _utc_now_iso()
+    _llm_router_status["last_error_provider"] = provider
+    _llm_router_status["last_error_task"] = task_type
+    if exhausted:
+        _llm_router_status["degraded"] = True
+        _llm_router_status["chain_exhausted"] = True
 
 
 # ── Timeouts, error classification, catalog sanitization ─────────────────────
@@ -1169,6 +1215,7 @@ async def call_llm_resilient(
     budget = _chain_budget_seconds(task_type)
     started = time.monotonic()
     last_error: Optional[BaseException] = None
+    last_provider = "none"
 
     async with _LLM_SEMAPHORE:
         for attempt_name, cfg in configs_to_try:
@@ -1222,16 +1269,20 @@ async def call_llm_resilient(
                         parsed = _clean_and_parse_json(text)
                         text = json.dumps(parsed)
                     logger.info("LLM Router: Success using %s", attempt_name)
+                    _record_llm_success(task_type, cfg.provider, cfg.name)
                     return text
                 except Exception as e:
                     last_error = e
+                    last_provider = cfg.provider
                     action = classify_llm_error(e)
+                    summary = _error_summary(e)
+                    _record_llm_failure(task_type, cfg.provider, summary)
                     logger.warning(
                         "LLM Router: %s attempt %s failed (%s): %s",
                         attempt_name,
                         attempt,
                         action,
-                        _error_summary(e),
+                        summary,
                     )
                     if action == "retry" and attempt <= extra_retries:
                         backoff = _retry_backoff_seconds()
@@ -1248,6 +1299,7 @@ async def call_llm_resilient(
             logger.error("LLM Router: giving up on %s; moving to next fallback.", attempt_name)
 
         summary = _error_summary(last_error) if last_error else "no providers attempted"
+        _record_llm_failure(task_type, last_provider, summary, exhausted=True)
         err_msg = f"All LLM providers in the chain failed. Last error: {summary}"
         logger.critical(err_msg)
         raise LLMChainExhausted(err_msg)
