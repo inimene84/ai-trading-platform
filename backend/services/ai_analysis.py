@@ -61,7 +61,7 @@ class AIAnalysisService:
 
         # Fallback: direct Kie.ai proxy
         self.kieai_api_key = _env("KIE_API_KEY", "")
-        self.kieai_model = _env("KIE_MODEL", "gpt-5-6-terra")
+        self.kieai_model = _env("KIE_MODEL", "gpt-5-6-luna")
 
         # Fallback: xAI
         self.xai_model = _env("XAI_MODEL", "grok-4-1-fast-reasoning")

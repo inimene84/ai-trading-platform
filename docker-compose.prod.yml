@@ -41,8 +41,9 @@ services:
       OMNIROUTE_DEFAULT_MODEL: ${OMNIROUTE_DEFAULT_MODEL:-auto/fast}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       PERSONA_LLM_BASE_URL: ${PERSONA_LLM_BASE_URL:-https://omni.allikas.online/v1}
-      KIE_MODEL: gpt-5-6-terra
-      KIE_OPUS_MODEL: ${KIE_OPUS_MODEL:-gpt-5-6-terra}
+      KIE_MODEL: ${KIE_MODEL:-gpt-5-6-luna}
+      KIE_FALLBACK_MODELS: ${KIE_FALLBACK_MODELS:-gemini-3-8-flash-openai,claude-haiku-4-5}
+      KIE_OPUS_MODEL: ${KIE_OPUS_MODEL:-}
       # OmniRoute — primary LLM provider (https://omni.allikas.online)
       # auto/* presets automatically pick best/free model for each task
       OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY}

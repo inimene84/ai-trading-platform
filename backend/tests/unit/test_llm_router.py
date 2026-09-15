@@ -13,6 +13,7 @@ from backend.llm.router import (
     build_provider_chain,
     classify_llm_error,
     call_llm_resilient,
+    resolve_kie_route,
     sanitize_provider_config,
 )
 from backend.services.persona_adapter import (
@@ -384,6 +385,9 @@ def test_build_provider_chain_drops_slashy_kie_catalog(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OMNIROUTE_DEFAULT_MODEL", raising=False)
+    monkeypatch.delenv("KIE_MODEL", raising=False)
+    monkeypatch.setenv("KIE_FALLBACK_MODELS", "")
+    monkeypatch.delenv("KIE_OPUS_MODEL", raising=False)
     monkeypatch.setattr(router_mod._DEFAULT_REGISTRY["fallback_kie"], "name", "kie/openrouter/free")
 
     chain = build_provider_chain("persona_analysis")
@@ -492,4 +496,235 @@ def test_sanitize_appends_v1_to_omniroute_host():
     out = sanitize_provider_config(cfg, "persona_analysis")
     assert out is not None
     assert out.base_url == "https://omni.allikas.online/v1"
+
+
+@pytest.mark.parametrize(
+    ("model", "kind", "path_suffix", "canonical"),
+    [
+        ("gpt-5-6-luna", "codex_responses", "/codex/v1/responses", "gpt-5-6-luna"),
+        ("gpt-5-6-terra", "codex_responses", "/codex/v1/responses", "gpt-5-6-terra"),
+        ("gpt-5-5", "codex_responses", "/codex/v1/responses", "gpt-5-5"),
+        ("gpt-5.1-codex", "gpt_codex", "/api/v1/responses", "gpt-5.1-codex"),
+        ("gpt-5-codex", "gpt_codex", "/api/v1/responses", "gpt-5-codex"),
+        ("claude-haiku-4-5", "claude", "/claude/v1/messages", "claude-haiku-4-5"),
+        ("gemini-3-8-flash-openai", "openai_chat", "/gemini-3-8-flash-openai/v1/chat/completions", "gemini-3-8-flash-openai"),
+        ("gemini-3-8-flash", "openai_chat", "/gemini-3-8-flash-openai/v1/chat/completions", "gemini-3-8-flash-openai"),
+        ("gemini-3-pro", "openai_chat", "/gemini-3-pro/v1/chat/completions", "gemini-3-pro"),
+        ("gemini-3-pro-openai", "openai_chat", "/gemini-3-pro/v1/chat/completions", "gemini-3-pro"),
+        ("grok-4-6", "grok_responses", "/grok/v1/responses", "grok-4-6"),
+        ("gpt-5-2", "openai_chat", "/gpt-5-2/v1/chat/completions", "gpt-5-2"),
+        ("gpt-5.2", "openai_chat", "/gpt-5-2/v1/chat/completions", "gpt-5-2"),
+    ],
+)
+def test_resolve_kie_route_matches_docs(model, kind, path_suffix, canonical):
+    route = resolve_kie_route(model)
+    assert route.kind == kind
+    assert route.path == path_suffix
+    assert route.model == canonical
+
+
+def _install_fake_client(monkeypatch, body: dict, captured: dict):
+    class FakeResp:
+        is_success = True
+        status_code = 200
+        text = "{}"
+        headers = {}
+
+        def json(self):
+            return body
+
+        @property
+        def request(self):
+            return httpx.Request("POST", captured.get("url") or "https://api.kie.ai/")
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+
+def _kie_cfg(name: str) -> ModelConfig:
+    return ModelConfig(
+        name=name,
+        provider="kie",
+        base_url="https://api.kie.ai",
+        api_key_env="KIE_API_KEY",
+    )
+
+
+@pytest.mark.asyncio
+async def test_kie_gemini_posts_to_slug_chat_completions(monkeypatch):
+    captured: dict = {}
+    _install_fake_client(
+        monkeypatch,
+        {"choices": [{"message": {"content": "gemini-ok"}}]},
+        captured,
+    )
+    text = await _invoke_provider(
+        _kie_cfg("gemini-3-8-flash-openai"), "k" * 32, "hello", "sys", 0.3, 128, False, timeout=5
+    )
+    assert text == "gemini-ok"
+    assert captured["url"] == "https://api.kie.ai/gemini-3-8-flash-openai/v1/chat/completions"
+    assert captured["json"]["stream"] is False
+    assert captured["json"]["messages"][0]["role"] == "system"
+    assert captured["json"]["messages"][1]["content"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_kie_claude_sets_stream_false(monkeypatch):
+    captured: dict = {}
+    _install_fake_client(
+        monkeypatch,
+        {"content": [{"type": "text", "text": "haiku-ok"}], "stop_reason": "end_turn", "usage": {}},
+        captured,
+    )
+    text = await _invoke_provider(
+        _kie_cfg("claude-haiku-4-5"), "k" * 32, "hello", "sys", 0.3, 128, False, timeout=5
+    )
+    assert text == "haiku-ok"
+    assert captured["url"] == "https://api.kie.ai/claude/v1/messages"
+    assert captured["json"]["stream"] is False
+    assert captured["json"]["model"] == "claude-haiku-4-5"
+
+
+@pytest.mark.asyncio
+async def test_kie_gpt_codex_uses_api_v1_responses(monkeypatch):
+    captured: dict = {}
+    _install_fake_client(
+        monkeypatch,
+        {"output": [{"content": [{"type": "output_text", "text": "codex-ok"}]}]},
+        captured,
+    )
+    text = await _invoke_provider(
+        _kie_cfg("gpt-5.1-codex"), "k" * 32, "hello", "sys", 0.3, 128, False, timeout=5
+    )
+    assert text == "codex-ok"
+    assert captured["url"] == "https://api.kie.ai/api/v1/responses"
+    assert captured["json"]["stream"] is False
+    assert captured["json"]["input"][1]["content"][0]["type"] == "input_text"
+
+
+@pytest.mark.asyncio
+async def test_kie_grok_uses_grok_responses(monkeypatch):
+    captured: dict = {}
+    _install_fake_client(
+        monkeypatch,
+        {"output": [{"content": [{"type": "output_text", "text": "grok-ok"}]}]},
+        captured,
+    )
+    text = await _invoke_provider(
+        _kie_cfg("grok-4-6"), "k" * 32, "hello", "", 0.3, 128, False, timeout=5
+    )
+    assert text == "grok-ok"
+    assert captured["url"] == "https://api.kie.ai/grok/v1/responses"
+    assert captured["json"]["stream"] is False
+
+
+@pytest.mark.asyncio
+async def test_kie_gpt52_uses_slug_chat_completions(monkeypatch):
+    captured: dict = {}
+    _install_fake_client(
+        monkeypatch,
+        {"choices": [{"message": {"content": "gpt52-ok"}}]},
+        captured,
+    )
+    text = await _invoke_provider(
+        _kie_cfg("gpt-5-2"), "k" * 32, "hello", "", 0.3, 128, False, timeout=5
+    )
+    assert text == "gpt52-ok"
+    assert captured["url"] == "https://api.kie.ai/gpt-5-2/v1/chat/completions"
+    assert captured["json"]["stream"] is False
+
+
+def test_build_provider_chain_expands_kie_fallback_models(monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_API_KEY", "k" * 32)
+    monkeypatch.setenv("KIE_API_KEY", "k" * 32)
+    monkeypatch.setenv("KIE_MODEL", "gpt-5-6-luna")
+    monkeypatch.setenv("KIE_FALLBACK_MODELS", "gemini-3-8-flash-openai,claude-haiku-4-5")
+    monkeypatch.delenv("KIE_OPUS_MODEL", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    chain = build_provider_chain("persona_analysis")
+    kie_names = [cfg.name for _, cfg in chain if cfg.provider == "kie"]
+    assert kie_names == ["gpt-5-6-luna", "gemini-3-8-flash-openai", "claude-haiku-4-5"]
+    assert chain[0][1].provider == "omniroute"
+    assert chain[0][1].name == "auto/fast"
+
+
+def test_build_provider_chain_skips_duplicate_kie_fallback(monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_API_KEY", "k" * 32)
+    monkeypatch.setenv("KIE_API_KEY", "k" * 32)
+    monkeypatch.setenv("KIE_MODEL", "gpt-5-6-luna")
+    monkeypatch.setenv("KIE_FALLBACK_MODELS", "gpt-5-6-luna,gemini-3-8-flash-openai")
+    monkeypatch.delenv("KIE_OPUS_MODEL", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    chain = build_provider_chain("general")
+    kie_names = [cfg.name for _, cfg in chain if cfg.provider == "kie"]
+    assert kie_names == ["gpt-5-6-luna", "gemini-3-8-flash-openai"]
+
+
+@pytest.mark.asyncio
+async def test_kie_gemini_alias_sends_canonical_model_in_body(monkeypatch):
+    captured: dict = {}
+    _install_fake_client(
+        monkeypatch,
+        {"choices": [{"message": {"content": "alias-ok"}}]},
+        captured,
+    )
+    text = await _invoke_provider(
+        _kie_cfg("gemini-3-8-flash"), "k" * 32, "hello", "", 0.3, 128, False, timeout=5
+    )
+    assert text == "alias-ok"
+    assert captured["url"] == "https://api.kie.ai/gemini-3-8-flash-openai/v1/chat/completions"
+    assert captured["json"]["model"] == "gemini-3-8-flash-openai"
+    assert captured["json"]["temperature"] == 0.3
+
+
+@pytest.mark.asyncio
+async def test_kie_empty_responses_fails_closed(monkeypatch):
+    captured: dict = {}
+    _install_fake_client(
+        monkeypatch,
+        {"output": [{"type": "reasoning", "summary": []}], "status": "completed"},
+        captured,
+    )
+    with pytest.raises(ValueError, match="no output text"):
+        await _invoke_provider(
+            _kie_cfg("gpt-5-6-luna"), "k" * 32, "hello", "sys", 0.3, 128, False, timeout=5
+        )
+
+
+def test_sanitize_remaps_kie_family_ids_on_omniroute(monkeypatch):
+    monkeypatch.delenv("OMNIROUTE_DEFAULT_MODEL", raising=False)
+    for name in ("grok-4-6", "gemini-3-pro", "gpt-5.1-codex", "claude-sonnet-4-6"):
+        cfg = ModelConfig(name=name, provider="omniroute", api_key_env="OMNIROUTE_API_KEY")
+        out = sanitize_provider_config(cfg, "persona_analysis")
+        assert out is not None
+        assert out.name == "auto/fast"
+
+
+def test_sanitize_skips_invalid_kie_slug():
+    cfg = ModelConfig(name="gemini-bad slug?", provider="kie", api_key_env="KIE_API_KEY")
+    assert sanitize_provider_config(cfg, "persona_analysis") is None
+
 
