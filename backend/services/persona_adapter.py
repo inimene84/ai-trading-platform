@@ -326,11 +326,11 @@ async def run_all_personas(
     """
     personas = selected or _registry.active_ids()
     try:
-        enrichment_timeout = float(os.getenv("PERSONA_ENRICHMENT_TIMEOUT_SECONDS", "20"))
+        enrichment_timeout = float(os.getenv("PERSONA_ENRICHMENT_TIMEOUT_SECONDS", "70"))
         if enrichment_timeout <= 0:
-            enrichment_timeout = 20.0
+            enrichment_timeout = 70.0
     except (TypeError, ValueError):
-        enrichment_timeout = 20.0
+        enrichment_timeout = 70.0
     tasks = [run_persona(p, symbol, bars, metrics) for p in personas]
     try:
         results = await asyncio.wait_for(

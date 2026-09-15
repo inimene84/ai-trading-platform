@@ -7,7 +7,9 @@ import pytest
 from backend.llm.router import (
     LLMChainExhausted,
     ModelConfig,
+    _OMNIROUTE_TIMEOUT_FLOOR,
     _invoke_provider,
+    _provider_timeout,
     build_provider_chain,
     classify_llm_error,
     call_llm_resilient,
@@ -68,7 +70,7 @@ def test_sanitize_remaps_dead_kie_catalog_on_omniroute(monkeypatch):
     cfg = ModelConfig(name="kie/claude-opus-4", provider="omniroute", api_key_env="OMNIROUTE_API_KEY")
     out = sanitize_provider_config(cfg, "persona_analysis")
     assert out is not None
-    assert out.name == "auto/smart"
+    assert out.name == "auto/fast"
     assert out.provider == "omniroute"
 
 
@@ -269,7 +271,7 @@ async def test_dead_catalog_model_is_not_sent_to_omniroute(monkeypatch):
         text = await call_llm_resilient("persona_analysis", prompt="hi")
 
     assert text == "ok"
-    assert seen == ["auto/smart"]
+    assert seen == ["auto/fast"]
 
 
 @pytest.mark.asyncio
@@ -450,4 +452,44 @@ def test_http_error_message_does_not_embed_response_body():
     with pytest.raises(httpx.HTTPStatusError, match="HTTP 401 from kie") as exc_info:
         _raise_http_status(response, "kie")
     assert "sk-secret-key" not in str(exc_info.value)
+
+
+def test_omniroute_timeout_covers_measured_allikas_latency(monkeypatch):
+    monkeypatch.delenv("LLM_PROVIDER_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("LLM_OMNIROUTE_TIMEOUT_SECONDS", raising=False)
+    timeout = _provider_timeout("omniroute")
+    assert timeout >= _OMNIROUTE_TIMEOUT_FLOOR
+    assert timeout >= 20.0
+
+
+def test_global_eight_second_timeout_does_not_clip_omniroute(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER_TIMEOUT_SECONDS", "8")
+    monkeypatch.delenv("LLM_OMNIROUTE_TIMEOUT_SECONDS", raising=False)
+    assert _provider_timeout("omniroute") >= _OMNIROUTE_TIMEOUT_FLOOR
+    assert _provider_timeout("kie") == 8.0
+
+
+def test_sanitize_rewrites_kie_endpoint_used_as_omniroute_base():
+    cfg = ModelConfig(
+        name="auto/fast",
+        provider="omniroute",
+        base_url="https://api.kie.ai",
+        api_key_env="OMNIROUTE_API_KEY",
+    )
+    out = sanitize_provider_config(cfg, "persona_analysis")
+    assert out is not None
+    assert out.name == "auto/fast"
+    assert out.base_url == "https://omni.allikas.online/v1"
+
+
+def test_sanitize_appends_v1_to_omniroute_host():
+    cfg = ModelConfig(
+        name="auto/fast",
+        provider="omniroute",
+        base_url="https://omni.allikas.online",
+        api_key_env="OMNIROUTE_API_KEY",
+    )
+    out = sanitize_provider_config(cfg, "persona_analysis")
+    assert out is not None
+    assert out.base_url == "https://omni.allikas.online/v1"
 

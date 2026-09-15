@@ -28,7 +28,8 @@ services:
       LITELLM_API_KEY: ${LITELLM_API_KEY}
       # PRIMARY LLM: OmniRoute auto-router (Kie is a fallback in backend.llm.router)
       PERSONA_LLM_PROVIDER: ${PERSONA_LLM_PROVIDER:-omniroute}
-      PERSONA_LLM_MODEL: ${PERSONA_LLM_MODEL:-auto/smart}
+      PERSONA_LLM_MODEL: ${PERSONA_LLM_MODEL:-auto/fast}
+      OMNIROUTE_DEFAULT_MODEL: ${OMNIROUTE_DEFAULT_MODEL:-auto/fast}
       PERSONA_LLM_BASE_URL: ${PERSONA_LLM_BASE_URL:-https://omni.allikas.online/v1}
       OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
       OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-https://omni.allikas.online/v1}

@@ -41,18 +41,17 @@ class ModelConfig:
 # These can be overridden via environment variables per task type.
 #
 # PRIMARY PROVIDER: OmniRoute (https://omni.allikas.online)
-#   Automatically selects the best free/cheapest available model per task.
-#   auto/smart   → highest quality (default for analysis)
-#   auto/coding  → best for code tasks
-#   auto/reasoning → best for complex multi-step reasoning
-#   auto/fast    → lowest latency
-#   auto/cheap   → lowest cost
-#   auto/best-free → best completely free model available
+#   auto/fast is the QT default — Allikas measured HTTP 200 in ~7–8s
+#   (kilocode/openrouter/free). auto/smart is slower and can miss a tight
+#   client deadline from the QT VPS.
+#   auto/cheap, auto/reasoning, auto/coding, auto/best-free also valid.
 #
 # Fallback chain: OmniRoute → KieAI → OpenRouter → xAI → OpenAI → Anthropic → Gemini
 
-# OmniRoute config
-_OMNIROUTE_BASE_URL = os.getenv("OMNIROUTE_BASE_URL", "https://omni.allikas.online/v1")
+# OmniRoute config (OpenAI-compatible /v1/chat/completions — not Kie /codex)
+_OMNIROUTE_CANONICAL_BASE = "https://omni.allikas.online/v1"
+_OMNIROUTE_BASE_URL = os.getenv("OMNIROUTE_BASE_URL", _OMNIROUTE_CANONICAL_BASE)
+_OMNIROUTE_DEFAULT_PRESET = "auto/fast"
 
 # Kie.ai direct model IDs (fallback)
 _KIE_MODEL = os.getenv("KIE_MODEL", "gpt-5-6-terra")
@@ -61,10 +60,10 @@ _KIE_BASE_URL = os.getenv("KIE_BASE_URL", "https://api.kie.ai")
 _LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", os.getenv("PERSONA_LLM_BASE_URL", "http://litellm:4000/v1"))
 
 _DEFAULT_REGISTRY: dict[str, ModelConfig] = {
-    # PRIMARY: OmniRoute auto/smart — selects the best available LLM automatically
+    # PRIMARY: OmniRoute auto/fast — Allikas-verified low-latency preset
     # Task-specific presets give the router hints for optimal model selection.
     "persona_analysis": ModelConfig(
-        name=os.getenv("PERSONA_LLM_MODEL", "auto/smart"),
+        name=os.getenv("PERSONA_LLM_MODEL", "auto/fast"),
         provider="omniroute",
         tier="balanced",
         base_url=_OMNIROUTE_BASE_URL,
@@ -73,9 +72,9 @@ _DEFAULT_REGISTRY: dict[str, ModelConfig] = {
         api_key_env="OMNIROUTE_API_KEY",
     ),
 
-    # Deep trading analysis — OmniRoute auto/smart for robust analysis
+    # Deep trading analysis — OmniRoute auto/fast (measured healthy path)
     "deep_analysis": ModelConfig(
-        name=os.getenv("DEEP_ANALYSIS_LLM_MODEL", "auto/smart"),
+        name=os.getenv("DEEP_ANALYSIS_LLM_MODEL", "auto/fast"),
         provider="omniroute",
         tier="balanced",
         base_url=_OMNIROUTE_BASE_URL,
@@ -84,9 +83,9 @@ _DEFAULT_REGISTRY: dict[str, ModelConfig] = {
         api_key_env="OMNIROUTE_API_KEY",
     ),
 
-    # Premium/complex reasoning — OmniRoute auto/smart (highest quality preset)
+    # Premium/complex reasoning — still auto/fast unless env pins another preset
     "premium_analysis": ModelConfig(
-        name=os.getenv("PREMIUM_ANALYSIS_LLM_MODEL", "auto/smart"),
+        name=os.getenv("PREMIUM_ANALYSIS_LLM_MODEL", "auto/fast"),
         provider="omniroute",
         tier="premium",
         base_url=_OMNIROUTE_BASE_URL,
@@ -108,7 +107,7 @@ _DEFAULT_REGISTRY: dict[str, ModelConfig] = {
 
     # Dashboard assistant (Gemini UI → OmniRoute)
     "assistant_chat": ModelConfig(
-        name=os.getenv("ASSISTANT_LLM_MODEL", "auto/smart"),
+        name=os.getenv("ASSISTANT_LLM_MODEL", "auto/fast"),
         provider="omniroute",
         tier="balanced",
         base_url=_OMNIROUTE_BASE_URL,
@@ -231,21 +230,26 @@ _OMNIROUTE_PRESETS = {
 _KIE_NATIVE_MODELS = {"gpt-5-6-terra", "gpt-5-6-luna", "gpt-5-6-sol"}
 _DEAD_CATALOG_PREFIXES = ("kie/", "litellm/")
 
-# Per-provider read timeouts. Kept short so a dead primary cannot consume a
-# trading cycle. Override with LLM_PROVIDER_TIMEOUT_SECONDS (global) or
+# Per-provider read timeouts.
+# OmniRoute auto/fast is healthy (~7–8s on Allikas; plan 7–15s+ from QT VPS).
+# 8s was too tight and clipped live successes. 25s is one attempt with margin,
+# then fail over — not 90s × 3 retries. Override with
 # LLM_<PROVIDER>_TIMEOUT_SECONDS (e.g. LLM_OMNIROUTE_TIMEOUT_SECONDS).
+# LLM_PROVIDER_TIMEOUT_SECONDS is a fallback for unknown providers only; it
+# cannot shrink OmniRoute below _OMNIROUTE_TIMEOUT_FLOOR.
+_OMNIROUTE_TIMEOUT_FLOOR = 20.0
 _PROVIDER_TIMEOUT_DEFAULTS = {
-    "omniroute": 8.0,
-    "kie": 8.0,
-    "openrouter": 10.0,
-    "openrouter-gemini": 10.0,
-    "xai": 10.0,
-    "openai": 10.0,
-    "anthropic": 10.0,
-    "google": 10.0,
-    "gemini": 10.0,
-    "groq": 8.0,
-    "litellm": 10.0,
+    "omniroute": 25.0,
+    "kie": 10.0,
+    "openrouter": 12.0,
+    "openrouter-gemini": 12.0,
+    "xai": 12.0,
+    "openai": 12.0,
+    "anthropic": 12.0,
+    "google": 12.0,
+    "gemini": 12.0,
+    "groq": 10.0,
+    "litellm": 12.0,
     "ollama": 20.0,
 }
 
@@ -269,31 +273,45 @@ def _env_float(name: str, default: float, *, allow_zero: bool = False) -> float:
 
 def _provider_timeout(provider: str) -> float:
     """Bounded HTTP timeout for one provider attempt."""
-    global_override = os.getenv("LLM_PROVIDER_TIMEOUT_SECONDS")
-    if global_override:
-        return _env_float("LLM_PROVIDER_TIMEOUT_SECONDS", 8.0)
-    key = f"LLM_{provider.upper().replace('-', '_')}_TIMEOUT_SECONDS"
+    prov = provider.lower()
+    default = _PROVIDER_TIMEOUT_DEFAULTS.get(prov, 12.0)
+    key = f"LLM_{prov.upper().replace('-', '_')}_TIMEOUT_SECONDS"
     per = os.getenv(key)
     if per:
-        return _env_float(key, _PROVIDER_TIMEOUT_DEFAULTS.get(provider.lower(), 10.0))
-    return _PROVIDER_TIMEOUT_DEFAULTS.get(provider.lower(), 10.0)
+        value = _env_float(key, default)
+        if prov == "omniroute":
+            return max(value, _OMNIROUTE_TIMEOUT_FLOOR) if value > 0 else default
+        return value
+    # Global override does not apply to OmniRoute — a copied .env with
+    # LLM_PROVIDER_TIMEOUT_SECONDS=8 would clip the measured 7–15s path.
+    if prov != "omniroute":
+        global_override = os.getenv("LLM_PROVIDER_TIMEOUT_SECONDS")
+        if global_override:
+            return _env_float("LLM_PROVIDER_TIMEOUT_SECONDS", default)
+    return default
 
 
 def _chain_budget_seconds(task_type: str) -> float:
     """Hard cap for the whole fallback chain so the trading loop is not stalled."""
+    # Must exceed OmniRoute's 25s attempt so a healthy auto/fast call can finish.
     if task_type == "persona_analysis":
-        return _env_float("LLM_PERSONA_CHAIN_BUDGET_SECONDS", 16.0)
-    return _env_float("LLM_CHAIN_BUDGET_SECONDS", 24.0)
+        return _env_float("LLM_PERSONA_CHAIN_BUDGET_SECONDS", 32.0)
+    return _env_float("LLM_CHAIN_BUDGET_SECONDS", 40.0)
 
 
 def _retry_backoff_seconds() -> float:
     return _env_float("LLM_RETRY_BACKOFF_SECONDS", 0.35, allow_zero=True)
 
 
-def _httpx_timeout(seconds: float) -> httpx.Timeout:
+def _httpx_timeout(seconds: float, provider: str = "") -> httpx.Timeout:
     read = max(1.0, float(seconds))
-    connect = min(3.0, read)
-    write = min(5.0, read)
+    if provider.lower() == "omniroute":
+        # QT VPS → omni.allikas.online may need more than 3s for TLS.
+        connect = min(8.0, read)
+        write = min(8.0, read)
+    else:
+        connect = min(3.0, read)
+        write = min(5.0, read)
     return httpx.Timeout(connect=connect, read=read, write=write, pool=3.0)
 
 
@@ -348,9 +366,31 @@ def _omniroute_preset_for_task(task_type: str) -> str:
     configured = (os.getenv("OMNIROUTE_DEFAULT_MODEL") or "").strip()
     if configured in _OMNIROUTE_PRESETS:
         return configured
-    if task_type == "general":
-        return "auto/fast"
-    return "auto/smart"
+    return _OMNIROUTE_DEFAULT_PRESET
+
+
+def _sanitize_omniroute_base_url(url: Optional[str]) -> str:
+    """Keep OmniRoute on the OpenAI-compatible Allikas /v1 host, not Kie/codex."""
+    raw = (url or "").strip().rstrip("/")
+    lower = raw.lower()
+    looks_wrong = (
+        not raw
+        or "api.kie.ai" in lower
+        or "openrouter.ai" in lower
+        or "/codex/" in lower
+        or ":4000" in raw
+    )
+    if looks_wrong:
+        if raw and raw != _OMNIROUTE_CANONICAL_BASE:
+            logger.warning(
+                "LLM Router: remapping OmniRoute base_url %r → %s",
+                url,
+                _OMNIROUTE_CANONICAL_BASE,
+            )
+        return _OMNIROUTE_CANONICAL_BASE
+    if "omni.allikas.online" in lower and not lower.endswith("/v1"):
+        return raw + "/v1"
+    return raw
 
 
 def sanitize_provider_config(cfg: ModelConfig, task_type: str = "general") -> Optional[ModelConfig]:
@@ -371,15 +411,18 @@ def sanitize_provider_config(cfg: ModelConfig, task_type: str = "general") -> Op
             or lower.startswith(_DEAD_CATALOG_PREFIXES)
             or lower in _KIE_NATIVE_MODELS
         )
+        preset_name = name
         if looks_dead:
-            preset = _omniroute_preset_for_task(task_type)
-            if name != preset:
+            preset_name = _omniroute_preset_for_task(task_type)
+            if name != preset_name:
                 logger.warning(
                     "LLM Router: remapping model %r → OmniRoute %s (dead kie/catalog id)",
                     name,
-                    preset,
+                    preset_name,
                 )
-            return replace(cfg, name=preset)
+        base_url = _sanitize_omniroute_base_url(cfg.base_url or _OMNIROUTE_BASE_URL)
+        if preset_name != cfg.name or base_url != cfg.base_url:
+            return replace(cfg, name=preset_name, base_url=base_url)
         return cfg
 
     if provider == "kie":
@@ -449,7 +492,10 @@ async def _invoke_provider(
     prov = cfg.provider.lower()
     temp = temperature if temperature is not None else cfg.temperature
     tokens = max_tokens if max_tokens is not None else cfg.max_tokens
-    client_timeout = _httpx_timeout(timeout if timeout is not None else _provider_timeout(prov))
+    client_timeout = _httpx_timeout(
+        timeout if timeout is not None else _provider_timeout(prov),
+        provider=prov,
+    )
 
     if prov == "omniroute":
         # OmniRoute — OpenAI-compatible endpoint that auto-selects the best available model.
