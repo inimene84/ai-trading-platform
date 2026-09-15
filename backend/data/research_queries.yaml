@@ -1,0 +1,28 @@
+# Fixed research queries for SearXNG news fetcher
+# Each item contains search query and relevant symbol tags for routing & index filtering
+
+queries:
+  - query: "Bitcoin crypto market news"
+    symbol: "BTCUSDC"
+    category: "crypto"
+  - query: "Ethereum network development ETF news"
+    symbol: "ETHUSDC"
+    category: "crypto"
+  - query: "EUR USD foreign exchange ECB policy news"
+    symbol: "EURUSD"
+    category: "forex"
+  - query: "Gold spot price market XAU USD inflation"
+    symbol: "XAUUSD"
+    category: "metals"
+  - query: "Federal Reserve FOMC rate decision interest rate"
+    symbol: "MACRO_USD"
+    category: "macro"
+  - query: "Consumer Price Index CPI inflation rate report"
+    symbol: "MACRO_USD"
+    category: "macro"
+  - query: "European Central Bank ECB interest rate decision"
+    symbol: "MACRO_EUR"
+    category: "macro"
+  - query: "Non Farm Payrolls NFP jobs labor report"
+    symbol: "MACRO_USD"
+    category: "macro"

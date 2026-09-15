@@ -1,0 +1,24 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "ts": { "type": "date" },
+      "symbol": { "type": "keyword" },
+      "broker": { "type": "keyword" },
+      "mode": { "type": "keyword" },
+      "signal": { "type": "keyword" },
+      "confidence": { "type": "float" },
+      "promotion_verdict": { "type": "keyword" },
+      "promotion_reason": { "type": "text" },
+      "gate_id": { "type": "keyword" },
+      "reason": { "type": "text" },
+      "shadow": { "type": "boolean" },
+      "rejected": { "type": "boolean" },
+      "prompt_version": { "type": "keyword" },
+      "model_id": { "type": "keyword" }
+    }
+  }
+}

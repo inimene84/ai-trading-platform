@@ -414,6 +414,91 @@ class DecisionEngine:
         Evaluate market data and return a trading Decision.
         Does NOT execute trades or interact with the database.
         """
+        decision = await self._evaluate_symbol_internal(
+            symbol=symbol,
+            bars=bars,
+            existing_position=existing_position,
+            open_count=open_count,
+            pyramid_layers=pyramid_layers,
+            cooldown_active=cooldown_active,
+            current_funding_rate=current_funding_rate,
+        )
+        try:
+            self._dispatch_research_ingest(symbol, decision)
+        except Exception as exc:
+            logger.warning(f"Swallowed decision ingest dispatch exception for {symbol}: {exc}")
+        return decision
+
+    def _dispatch_research_ingest(self, symbol: str, decision: Optional[Decision]) -> None:
+        """Non-blocking fire-and-forget background task dispatch.
+
+        Never awaits or blocks the trading loop event cycle.
+        """
+        try:
+            from backend.services.research_ingest import ingest_decision, is_research_ingest_enabled
+            if not is_research_ingest_enabled():
+                return
+            eval_data = getattr(self, "last_evaluation", None) or {}
+            promo = getattr(self, "promotion_state", None)
+            promo_verdict = getattr(promo, "verdict", None) or eval_data.get("promotion_verdict")
+            promo_reason = getattr(promo, "reason", None) or eval_data.get("promotion_reason")
+            is_shadow = bool(getattr(promo, "shadow", False))
+            is_rejected = (decision is None) or not bool(eval_data.get("approved", False))
+
+            gate_id = eval_data.get("gate_id")
+            reason_str = str(eval_data.get("reason", ""))
+            if not gate_id and is_rejected and reason_str:
+                lower_reason = reason_str.lower()
+                if "risk reviewer" in lower_reason:
+                    gate_id = "RISK_REVIEWER"
+                elif "event risk" in lower_reason:
+                    gate_id = "EVENT_RISK_FILTER"
+                elif "promotion" in lower_reason:
+                    gate_id = "QTP_PROMOTION"
+                elif "jesse" in lower_reason:
+                    gate_id = "JESSE_ML"
+                elif "max positions" in lower_reason:
+                    gate_id = "MAX_POSITIONS"
+                elif "pyramid" in lower_reason:
+                    gate_id = "PYRAMID_GATE"
+                elif "ranging" in lower_reason:
+                    gate_id = "REGIME_RANGING"
+
+            payload = {
+                "symbol": symbol,
+                "broker": "binance",
+                "mode": str(get_trading_mode().value if hasattr(get_trading_mode(), "value") else get_trading_mode()),
+                "signal": str(eval_data.get("direction", "HOLD")),
+                "confidence": float(eval_data.get("confidence", 0.0)),
+                "promotion_verdict": promo_verdict,
+                "promotion_reason": promo_reason,
+                "gate_id": gate_id,
+                "reason": reason_str,
+                "shadow": is_shadow,
+                "rejected": is_rejected,
+            }
+
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(ingest_decision(payload))
+            except RuntimeError:
+                pass
+        except Exception as exc:
+            logger.warning(f"Error in decision ingest dispatch for {symbol}: {exc}")
+
+
+    async def _evaluate_symbol_internal(
+        self,
+        symbol: str,
+        bars: List[Dict[str, Any]],
+        existing_position: Optional[Any],  # DB Trade object or dict
+        open_count: int,
+        pyramid_layers: List[float],
+        cooldown_active: bool,
+        current_funding_rate: float = 0.0
+    ) -> Optional[Decision]:
+
         if not bars or len(bars) < 50:
             self._record_eval(symbol, "HOLD", 0.0, "insufficient bars")
             return None

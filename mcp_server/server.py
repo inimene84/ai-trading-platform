@@ -356,7 +356,47 @@ async def run_sentiment_loop(dry_run: bool = True) -> dict:
     return await _post("/news/sentiment-loop/run", params={"dry_run": dry_run})
 
 
+# ---- Research Plane (read-only search) ---------------------------------------
+@mcp.tool
+async def search_research(
+    kind: str = "decisions",
+    symbol: Optional[str] = None,
+    q: Optional[str] = None,
+    verdict: Optional[str] = None,
+    from_date: Optional[str] = None,
+    limit: int = 50,
+) -> Any:
+    """Search the read-only Research Plane for news or trading decisions.
+
+    kind: 'news' or 'decisions' (news and decisions search only).
+    symbol: filter by ticker symbol (e.g. BTCUSDC).
+    q: keyword search query (for news).
+    verdict: filter by decision or promotion verdict (e.g. REJECT, SHADOW, PROMOTE, BUY, SELL).
+    from_date: ISO datetime start filter.
+    """
+    kind_lower = kind.strip().lower()
+    params: Dict[str, Any] = {"limit": min(100, max(1, limit))}
+    if from_date:
+        params["from"] = from_date
+
+    if kind_lower == "news":
+        if symbol:
+            params["symbol"] = symbol.upper()
+        if q:
+            params["q"] = q
+        return await _get("/research/news", params=params)
+    elif kind_lower in ("decisions", "decision"):
+        if symbol:
+            params["symbol"] = symbol.upper()
+        if verdict:
+            params["verdict"] = verdict.upper()
+        return await _get("/research/decisions", params=params)
+    else:
+        return {"error": f"Unsupported research search kind '{kind}'. Must be 'news' or 'decisions'."}
+
+
 # ---- Health / escape hatch ---------------------------------------------------
+
 @mcp.tool
 async def backend_health() -> dict:
     """Backend health check."""

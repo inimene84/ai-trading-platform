@@ -123,3 +123,27 @@ async def test_research_fetch_posts_to_scrapling_sidecar(monkeypatch):
     assert args[1].endswith("/api/research/fetch")
     assert kwargs["json"]["url"] == "https://example.com"
     assert kwargs["json"]["css_selector"] == "h1"
+
+
+@pytest.mark.asyncio
+async def test_search_research_news_and_decisions(monkeypatch):
+    mod = _load_mcp_server(monkeypatch)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = [{"symbol": "BTCUSDC", "verdict": "REJECT"}]
+    mock_resp.raise_for_status = MagicMock()
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.request = AsyncMock(return_value=mock_resp)
+
+    with patch.object(mod.httpx, "AsyncClient", return_value=mock_client):
+        res = await mod.search_research(kind="decisions", symbol="BTCUSDC", verdict="REJECT")
+    assert len(res) == 1
+    assert res[0]["verdict"] == "REJECT"
+    args, kwargs = mock_client.request.call_args
+    assert args[0] == "GET"
+    assert args[1].endswith("/api/research/decisions")
+    assert kwargs["params"]["symbol"] == "BTCUSDC"
+    assert kwargs["params"]["verdict"] == "REJECT"
+

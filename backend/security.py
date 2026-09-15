@@ -23,6 +23,9 @@ SENSITIVE_PREFIXES = (
     # Signal candidates expose live trade intent (entries, stops, sizing).
     "/signals",
     "/api/signals",
+    # Research plane endpoints expose proprietary market research & decisions.
+    "/research",
+    "/api/research",
 )
 SENTRY_PREFIXES = ("/sentry",)
 TRADING_PREFIXES = ("/trading", "/api/trading")

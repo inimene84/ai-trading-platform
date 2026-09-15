@@ -1,0 +1,28 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "ts": { "type": "date" },
+      "symbol": { "type": "keyword" },
+      "source": { "type": "keyword" },
+      "title": { "type": "text" },
+      "url": { "type": "keyword" },
+      "snippet": { "type": "text" },
+      "query": { "type": "keyword" },
+      "engine": { "type": "keyword" },
+      "sentiment": {
+        "properties": {
+          "stance": { "type": "keyword" },
+          "event_type": { "type": "keyword" },
+          "severity": { "type": "integer" },
+          "confidence": { "type": "integer" },
+          "should_block_entry": { "type": "boolean" },
+          "summary": { "type": "text" }
+        }
+      }
+    }
+  }
+}

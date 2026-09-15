@@ -128,6 +128,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠ Qdrant initialization warning: {e}")
 
+    # 0b. Initialize OpenSearch Research Indices (if enabled)
+    try:
+        from backend.services.research_indices import init_research_indices
+        await init_research_indices()
+    except Exception as e:
+        logger.warning(f"⚠ OpenSearch research indices initialization skipped/failed: {e}")
+
+
     # 1. Startup Logic
     try:
         logger.info("Checking Ollama availability...")
@@ -312,7 +320,17 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("ℹ Feed scheduler disabled (FEED_SCHEDULER_ENABLED=false)")
 
+    # 9. Research Plane Scheduler (SearXNG news, calendar events, MT bars)
+    if os.getenv("RESEARCH_INGEST_ENABLED", "false").lower() in ("true", "1", "yes"):
+        from backend.services.research_scheduler import research_scheduler_loop
+        task = asyncio.create_task(run_supervised_task("Research Scheduler", research_scheduler_loop))
+        background_tasks.append(task)
+        logger.info("✓ Research Plane scheduler auto-started under supervisor")
+    else:
+        logger.info("ℹ Research Plane scheduler disabled (RESEARCH_INGEST_ENABLED=false)")
+
     yield
+
 
     # 2. Shutdown Logic
     logger.info("Application shutdown: Cancelling all background tasks...")

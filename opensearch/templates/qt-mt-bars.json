@@ -1,0 +1,18 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "properties": {
+      "ts": { "type": "date" },
+      "symbol": { "type": "keyword" },
+      "tf": { "type": "keyword" },
+      "o": { "type": "float" },
+      "h": { "type": "float" },
+      "l": { "type": "float" },
+      "c": { "type": "float" },
+      "v": { "type": "float" }
+    }
+  }
+}
