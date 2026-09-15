@@ -21,8 +21,14 @@ from typing import Dict, List, Optional
 import yaml
 import time
 
+from backend.llm.router import call_llm_resilient
+
 
 logger = logging.getLogger(__name__)
+
+# Reasoning prefix used when the LLM chain is down. Callers can detect a skipped
+# enrichment without treating it as a real persona vote. Not cached.
+_LLM_UNAVAILABLE_PREFIX = "LLM unavailable:"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -138,7 +144,6 @@ class PersonaOpinion:
 async def _call_llm(system: str, user: str) -> dict:
     """Call the LLM and return parsed JSON with signal, confidence, reasoning."""
     try:
-        from backend.llm.router import call_llm_resilient
         res_str = await call_llm_resilient(
             task_type="persona_analysis",
             prompt=user,
@@ -152,8 +157,16 @@ async def _call_llm(system: str, user: str) -> dict:
             "reasoning": parsed.get("reasoning", ""),
         }
     except Exception as e:
-        logger.warning(f"Persona LLM call failed: {e}")
-        return {"signal": "neutral", "confidence": 0.0, "reasoning": f"Error: {e}"}
+        logger.error(
+            "Persona LLM call failed; skipping persona enrichment this cycle: %s",
+            type(e).__name__,
+        )
+        return {
+            "signal": "neutral",
+            "confidence": 0.0,
+            "reasoning": f"{_LLM_UNAVAILABLE_PREFIX} {type(e).__name__}",
+            "_llm_failed": True,
+        }
 
 
 
@@ -287,7 +300,9 @@ async def run_persona(
         confidence=min(max(result.get("confidence", 0.0), 0.0), 1.0),
         reasoning=result.get("reasoning", ""),
     )
-    _PERSONA_OPINION_CACHE[cache_key] = (now, opinion)
+    # Do not cache LLM outages — the next cycle should retry providers.
+    if not result.get("_llm_failed"):
+        _PERSONA_OPINION_CACHE[cache_key] = (now, opinion)
     return opinion
 
 
@@ -310,19 +325,53 @@ async def run_all_personas(
         List of PersonaOpinion
     """
     personas = selected or _registry.active_ids()
+    try:
+        enrichment_timeout = float(os.getenv("PERSONA_ENRICHMENT_TIMEOUT_SECONDS", "70"))
+        if enrichment_timeout <= 0:
+            enrichment_timeout = 70.0
+    except (TypeError, ValueError):
+        enrichment_timeout = 70.0
     tasks = [run_persona(p, symbol, bars, metrics) for p in personas]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=max(1.0, enrichment_timeout),
+        )
+    except asyncio.TimeoutError:
+        logger.error(
+            "Persona enrichment timed out after %.1fs; skipping so the trading loop can continue",
+            enrichment_timeout,
+        )
+        return []
 
     opinions = []
+    skipped = 0
     for persona, result in zip(personas, results):
         if isinstance(result, Exception):
-            logger.warning(f"Persona {persona} failed: {result}")
-            opinions.append(PersonaOpinion(
-                persona=persona, signal="neutral", confidence=0.0,
-                reasoning=f"Error: {result}"
-            ))
-        else:
-            opinions.append(result)
+            skipped += 1
+            logger.error(
+                "Persona %s failed; skipping enrichment for this agent: %s",
+                persona,
+                type(result).__name__,
+            )
+            continue
+        if result.signal == "neutral" and str(result.reasoning).startswith(_LLM_UNAVAILABLE_PREFIX):
+            skipped += 1
+            continue
+        opinions.append(result)
+
+    if skipped and not opinions:
+        logger.error(
+            "All persona LLM calls failed; continuing trading cycle without persona enrichment"
+        )
+        return []
+    if skipped:
+        logger.warning(
+            "Skipped %s/%s persona agents after LLM failure; using %s successful opinions",
+            skipped,
+            len(personas),
+            len(opinions),
+        )
 
     return opinions
 

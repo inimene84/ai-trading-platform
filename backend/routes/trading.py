@@ -567,7 +567,7 @@ async def get_status():
     if os.getenv('OMNIROUTE_API_KEY') and os.getenv('OMNIROUTE_API_KEY') != 'omni_live_key_placeholder':
         llm_providers.append({
             'name': 'OmniRoute',
-            'model': os.getenv('PERSONA_LLM_MODEL', 'auto/smart'),
+            'model': os.getenv('PERSONA_LLM_MODEL', 'auto/fast'),
             'status': 'configured',
             'type': 'cloud',
             'role': 'Primary (Auto-Select Routing)',

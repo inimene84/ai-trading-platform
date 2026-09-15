@@ -779,7 +779,7 @@ async def analyze_symbol(
                     metadata={"persona": po.persona},
                 ))
         except Exception as e:
-            logger.warning(f"Persona agents failed for {symbol}: {e}")
+            logger.error(f"Persona agents failed for {symbol}: {e}")
 
     # FINMEM Cognitive Agent (Stevens Institute of Technology / arXiv:2311.13743v2)
     # Stratified layered memory (shallow/intermediate/deep) + self-adaptive dynamic character

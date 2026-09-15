@@ -26,10 +26,13 @@ services:
       KIE_MODEL: gpt-5-6-terra
       KIE_OPUS_MODEL: ${KIE_OPUS_MODEL:-gpt-5-6-terra}
       LITELLM_API_KEY: ${LITELLM_API_KEY}
-      # PRIMARY LLM: GPT-5.6 Terra via Kie.ai
-      PERSONA_LLM_PROVIDER: ${PERSONA_LLM_PROVIDER:-kie}
-      PERSONA_LLM_MODEL: ${PERSONA_LLM_MODEL:-gpt-5-6-terra}
-      PERSONA_LLM_BASE_URL: ${PERSONA_LLM_BASE_URL:-https://api.kie.ai}
+      # PRIMARY LLM: OmniRoute auto-router (Kie is a fallback in backend.llm.router)
+      PERSONA_LLM_PROVIDER: ${PERSONA_LLM_PROVIDER:-omniroute}
+      PERSONA_LLM_MODEL: ${PERSONA_LLM_MODEL:-auto/fast}
+      OMNIROUTE_DEFAULT_MODEL: ${OMNIROUTE_DEFAULT_MODEL:-auto/fast}
+      PERSONA_LLM_BASE_URL: ${PERSONA_LLM_BASE_URL:-https://omni.allikas.online/v1}
+      OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY:-}
+      OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-https://omni.allikas.online/v1}
       # Safety: risk guard ENABLED by default. Only disable for explicit testing by setting DISABLE_RISK_GUARD=true in .env
       DISABLE_RISK_GUARD: ${DISABLE_RISK_GUARD:-false}
       # MiCA/EEA: trade USDC-margined perpetuals (USDT restricted for EU users).
