@@ -1,0 +1,179 @@
+{
+  "name": "07 - OpenSearch CRUD Demo",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "os-crud-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "idx",
+              "name": "indexId",
+              "value": "qt-demo",
+              "type": "string"
+            },
+            {
+              "id": "doc",
+              "name": "documentId",
+              "value": "demo-1",
+              "type": "string"
+            },
+            {
+              "id": "text",
+              "name": "text",
+              "value": "QuantumTrade OpenSearch CRUD smoke test",
+              "type": "string"
+            },
+            {
+              "id": "src",
+              "name": "source",
+              "value": "n8n-crud-demo",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "os-crud-set",
+      "name": "Demo Values",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "resource": "index",
+        "operation": "create",
+        "indexId": "={{ $json.indexId }}",
+        "additionalFields": {
+          "skipIfExists": true
+        }
+      },
+      "id": "os-crud-create-index",
+      "name": "Create Index",
+      "type": "n8n-nodes-opensearch.opensearch",
+      "typeVersion": 1,
+      "position": [680, 180],
+      "continueOnFail": true,
+      "credentials": {
+        "openSearchApi": {
+          "id": "XppZPpbkZfdbJ9oO",
+          "name": "OpenSearch account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "document",
+        "operation": "create",
+        "indexId": "={{ $json.indexId }}",
+        "dataToSend": "defineBelow",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "text",
+              "fieldValue": "={{ $json.text }}"
+            },
+            {
+              "fieldId": "source",
+              "fieldValue": "={{ $json.source }}"
+            },
+            {
+              "fieldId": "ingested_at",
+              "fieldValue": "={{ $now.toISO() }}"
+            }
+          ]
+        },
+        "additionalFields": {
+          "documentId": "={{ $json.documentId }}"
+        },
+        "options": {
+          "refresh": "wait_for"
+        }
+      },
+      "id": "os-crud-create-doc",
+      "name": "Create Document",
+      "type": "n8n-nodes-opensearch.opensearch",
+      "typeVersion": 1,
+      "position": [680, 420],
+      "credentials": {
+        "openSearchApi": {
+          "id": "XppZPpbkZfdbJ9oO",
+          "name": "OpenSearch account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "document",
+        "operation": "get",
+        "indexId": "qt-demo",
+        "documentId": "demo-1",
+        "simple": true
+      },
+      "id": "os-crud-get-doc",
+      "name": "Get Document",
+      "type": "n8n-nodes-opensearch.opensearch",
+      "typeVersion": 1,
+      "position": [920, 420],
+      "credentials": {
+        "openSearchApi": {
+          "id": "XppZPpbkZfdbJ9oO",
+          "name": "OpenSearch account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "document",
+        "operation": "search",
+        "indexId": "qt-demo",
+        "query": "={ \"query\": { \"match\": { \"source\": \"n8n-crud-demo\" } } }",
+        "returnAll": false,
+        "limit": 5,
+        "simple": true
+      },
+      "id": "os-crud-search",
+      "name": "Search Documents",
+      "type": "n8n-nodes-opensearch.opensearch",
+      "typeVersion": 1,
+      "position": [1160, 420],
+      "credentials": {
+        "openSearchApi": {
+          "id": "XppZPpbkZfdbJ9oO",
+          "name": "OpenSearch account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "Demo Values", "type": "main", "index": 0 }]]
+    },
+    "Demo Values": {
+      "main": [
+        [
+          { "node": "Create Index", "type": "main", "index": 0 },
+          { "node": "Create Document", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Create Document": {
+      "main": [[{ "node": "Get Document", "type": "main", "index": 0 }]]
+    },
+    "Get Document": {
+      "main": [[{ "node": "Search Documents", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
