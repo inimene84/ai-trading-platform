@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import httpx
 import asyncio
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Optional
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,6 @@ class ModelConfig:
 
 # OmniRoute config
 _OMNIROUTE_BASE_URL = os.getenv("OMNIROUTE_BASE_URL", "https://omni.allikas.online/v1")
-_OMNIROUTE_DEFAULT_MODEL = os.getenv("OMNIROUTE_DEFAULT_MODEL", "auto/smart")
 
 # Kie.ai direct model IDs (fallback)
 _KIE_MODEL = os.getenv("KIE_MODEL", "gpt-5-6-terra")
@@ -210,6 +210,192 @@ def list_models() -> dict[str, dict]:
     }
 
 
+class LLMChainExhausted(RuntimeError):
+    """Raised when every configured LLM provider failed within the chain budget."""
+
+
+# ── Timeouts, error classification, catalog sanitization ─────────────────────
+
+# OmniRoute auto-router presets. Dead kie/* / LiteLLM catalog ids must never be
+# sent to OmniRoute — they hang or 400 while the trading cycle waits.
+_OMNIROUTE_PRESETS = {
+    "auto/smart",
+    "auto/fast",
+    "auto/cheap",
+    "auto/reasoning",
+    "auto/coding",
+    "auto/best-free",
+    "auto/chat",
+    "auto/best-coding",
+}
+_KIE_NATIVE_MODELS = {"gpt-5-6-terra", "gpt-5-6-luna", "gpt-5-6-sol"}
+_DEAD_CATALOG_PREFIXES = ("kie/", "litellm/")
+
+# Per-provider read timeouts. Kept short so a dead primary cannot consume a
+# trading cycle. Override with LLM_PROVIDER_TIMEOUT_SECONDS (global) or
+# LLM_<PROVIDER>_TIMEOUT_SECONDS (e.g. LLM_OMNIROUTE_TIMEOUT_SECONDS).
+_PROVIDER_TIMEOUT_DEFAULTS = {
+    "omniroute": 8.0,
+    "kie": 8.0,
+    "openrouter": 10.0,
+    "openrouter-gemini": 10.0,
+    "xai": 10.0,
+    "openai": 10.0,
+    "anthropic": 10.0,
+    "google": 10.0,
+    "gemini": 10.0,
+    "groq": 8.0,
+    "litellm": 10.0,
+    "ollama": 20.0,
+}
+
+_RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_TIMEOUT_ERRORS = (httpx.TimeoutException, TimeoutError, asyncio.TimeoutError)
+_CONNECT_ERRORS = (httpx.ConnectError, httpx.NetworkError)
+
+
+def _env_float(name: str, default: float, *, allow_zero: bool = False) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if allow_zero:
+        return value if value >= 0 else default
+    return value if value > 0 else default
+
+
+def _provider_timeout(provider: str) -> float:
+    """Bounded HTTP timeout for one provider attempt."""
+    global_override = os.getenv("LLM_PROVIDER_TIMEOUT_SECONDS")
+    if global_override:
+        return _env_float("LLM_PROVIDER_TIMEOUT_SECONDS", 8.0)
+    key = f"LLM_{provider.upper().replace('-', '_')}_TIMEOUT_SECONDS"
+    per = os.getenv(key)
+    if per:
+        return _env_float(key, _PROVIDER_TIMEOUT_DEFAULTS.get(provider.lower(), 10.0))
+    return _PROVIDER_TIMEOUT_DEFAULTS.get(provider.lower(), 10.0)
+
+
+def _chain_budget_seconds(task_type: str) -> float:
+    """Hard cap for the whole fallback chain so the trading loop is not stalled."""
+    if task_type == "persona_analysis":
+        return _env_float("LLM_PERSONA_CHAIN_BUDGET_SECONDS", 16.0)
+    return _env_float("LLM_CHAIN_BUDGET_SECONDS", 24.0)
+
+
+def _retry_backoff_seconds() -> float:
+    return _env_float("LLM_RETRY_BACKOFF_SECONDS", 0.35, allow_zero=True)
+
+
+def _httpx_timeout(seconds: float) -> httpx.Timeout:
+    read = max(1.0, float(seconds))
+    connect = min(3.0, read)
+    write = min(5.0, read)
+    return httpx.Timeout(connect=connect, read=read, write=write, pool=3.0)
+
+
+def _http_status_code(exc: BaseException) -> Optional[int]:
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        return exc.response.status_code
+    match = re.search(r"HTTP\s+(\d{3})", str(exc))
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _error_summary(exc: BaseException) -> str:
+    """Short, body-free error label for logs and raised chain failures."""
+    status = _http_status_code(exc)
+    if status is not None:
+        return f"{type(exc).__name__} HTTP {status}"
+    return type(exc).__name__
+
+
+def _raise_http_status(resp: httpx.Response, provider: str) -> None:
+    """Raise HTTPStatusError without embedding provider response bodies (keys, etc.)."""
+    preview = (resp.text or "")[:200]
+    if preview:
+        logger.debug("LLM %s HTTP %s body: %s", provider, resp.status_code, preview)
+    raise httpx.HTTPStatusError(
+        f"HTTP {resp.status_code} from {provider}",
+        request=resp.request,
+        response=resp,
+    )
+
+
+def classify_llm_error(exc: BaseException) -> Literal["retry", "failover"]:
+    """
+    Decide whether to retry the current provider once, or fail over immediately.
+
+    Timeouts and connection failures fail over immediately (do not burn the cycle
+    on a dead primary). HTTP 5xx / 429 get one short retry, then the next provider.
+    Other 4xx skip remaining retries for this provider.
+    """
+    if isinstance(exc, _TIMEOUT_ERRORS) or isinstance(exc, _CONNECT_ERRORS):
+        return "failover"
+    status = _http_status_code(exc)
+    if status is None:
+        return "retry"
+    if status in _RETRYABLE_STATUS:
+        return "retry"
+    return "failover"
+
+
+def _omniroute_preset_for_task(task_type: str) -> str:
+    configured = (os.getenv("OMNIROUTE_DEFAULT_MODEL") or "").strip()
+    if configured in _OMNIROUTE_PRESETS:
+        return configured
+    if task_type == "general":
+        return "auto/fast"
+    return "auto/smart"
+
+
+def sanitize_provider_config(cfg: ModelConfig, task_type: str = "general") -> Optional[ModelConfig]:
+    """
+    Drop or remap unusable catalog ids.
+
+    OmniRoute must receive auto/* (or a real OmniRoute model), never kie/* LiteLLM
+    aliases or Kie-native ids like gpt-5-6-terra. Kie fallbacks keep native ids
+    and strip a leading kie/ prefix; unknown catalog paths are skipped.
+    """
+    name = (cfg.name or "").strip()
+    lower = name.lower()
+    provider = cfg.provider.lower()
+
+    if provider == "omniroute":
+        looks_dead = (
+            not name
+            or lower.startswith(_DEAD_CATALOG_PREFIXES)
+            or lower in _KIE_NATIVE_MODELS
+        )
+        if looks_dead:
+            preset = _omniroute_preset_for_task(task_type)
+            if name != preset:
+                logger.warning(
+                    "LLM Router: remapping model %r → OmniRoute %s (dead kie/catalog id)",
+                    name,
+                    preset,
+                )
+            return replace(cfg, name=preset)
+        return cfg
+
+    if provider == "kie":
+        cleaned = name[4:] if lower.startswith("kie/") else name
+        cleaned = cleaned.strip()
+        if not cleaned or "/" in cleaned:
+            logger.warning("LLM Router: skipping Kie fallback with unusable model %r", name)
+            return None
+        if cleaned != name:
+            logger.info("LLM Router: stripping kie/ prefix → %s", cleaned)
+            return replace(cfg, name=cleaned)
+        return cfg
+
+    return cfg
+
+
 # ── Resilient LLM Execution Engine ────────────────────────────────────────────
 
 _LLM_SEMAPHORE = asyncio.Semaphore(3)
@@ -258,10 +444,12 @@ async def _invoke_provider(
     temperature: Optional[float],
     max_tokens: Optional[int],
     response_json: bool,
+    timeout: Optional[float] = None,
 ) -> str:
     prov = cfg.provider.lower()
     temp = temperature if temperature is not None else cfg.temperature
     tokens = max_tokens if max_tokens is not None else cfg.max_tokens
+    client_timeout = _httpx_timeout(timeout if timeout is not None else _provider_timeout(prov))
 
     if prov == "omniroute":
         # OmniRoute — OpenAI-compatible endpoint that auto-selects the best available model.
@@ -292,18 +480,14 @@ async def _invoke_provider(
             "HTTP-Referer": "https://ai-trading-platform.local",
             "X-Title": "AI Trading Platform",
         }
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with httpx.AsyncClient(timeout=client_timeout) as client:
             resp = await client.post(
                 f"{base_url.rstrip('/')}/chat/completions",
                 headers=headers,
                 json=payload,
             )
             if not resp.is_success:
-                raise httpx.HTTPStatusError(
-                    f"HTTP {resp.status_code}: {resp.text[:300]}",
-                    request=resp.request,
-                    response=resp,
-                )
+                _raise_http_status(resp, "omniroute")
 
             content_type = resp.headers.get("content-type", "")
 
@@ -335,7 +519,7 @@ async def _invoke_provider(
                 data = resp.json()
             except Exception:
                 raise ValueError(
-                    f"OmniRoute returned non-JSON body (status={resp.status_code}): {resp.text[:200]}"
+                    f"OmniRoute returned non-JSON body (status={resp.status_code})"
                 )
             choices = data.get("choices", [])
             if not choices:
@@ -373,10 +557,10 @@ async def _invoke_provider(
             "Content-Type": "application/json",
         }
         
-        async with httpx.AsyncClient(timeout=45.0) as client:
+        async with httpx.AsyncClient(timeout=client_timeout) as client:
             resp = await client.post(f"{base_url.rstrip('/')}/chat/completions", headers=headers, json=payload)
             if not resp.is_success:
-                raise httpx.HTTPStatusError(f"HTTP {resp.status_code}: {resp.text[:200]}", request=resp.request, response=resp)
+                _raise_http_status(resp, prov)
             return resp.json()["choices"][0]["message"]["content"]
             
     elif prov == "kie":
@@ -398,12 +582,12 @@ async def _invoke_provider(
                 payload["system"] = [
                     {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
                 ]
-            async with httpx.AsyncClient(timeout=45.0) as client:
+            async with httpx.AsyncClient(timeout=client_timeout) as client:
                 for attempt_tokens in (tokens, tokens * 2):
                     payload["max_tokens"] = attempt_tokens
                     resp = await client.post(url, headers=headers, json=payload)
                     if not resp.is_success:
-                        raise httpx.HTTPStatusError(f"HTTP {resp.status_code}: {resp.text[:200]}", request=resp.request, response=resp)
+                        _raise_http_status(resp, prov)
                     data = resp.json()
                     text = ""
                     for block in data.get("content", []):
@@ -433,21 +617,22 @@ async def _invoke_provider(
             if system:
                 input_msgs.append({
                     "role": "system",
-                    "content": [{"type": "text", "text": system}]
+                    "content": [{"type": "input_text", "text": system}]
                 })
             input_msgs.append({
                 "role": "user",
-                "content": [{"type": "text", "text": prompt}]
+                "content": [{"type": "input_text", "text": prompt}]
             })
             payload = {
                 "model": cfg.name,
                 "stream": False,
                 "input": input_msgs,
+                "reasoning": {"effort": "low"},
             }
-            async with httpx.AsyncClient(timeout=45.0) as client:
+            async with httpx.AsyncClient(timeout=client_timeout) as client:
                 resp = await client.post(url, headers=headers, json=payload)
                 if not resp.is_success:
-                    raise httpx.HTTPStatusError(f"HTTP {resp.status_code}: {resp.text[:200]}", request=resp.request, response=resp)
+                    _raise_http_status(resp, prov)
                 data = resp.json()
                 text = ""
                 if isinstance(data.get("output"), list):
@@ -490,12 +675,12 @@ async def _invoke_provider(
                 {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
             ]
             
-        async with httpx.AsyncClient(timeout=45.0) as client:
+        async with httpx.AsyncClient(timeout=client_timeout) as client:
             for attempt_tokens in (tokens, tokens * 2):
                 payload["max_tokens"] = attempt_tokens
                 resp = await client.post(url, headers=headers, json=payload)
                 if not resp.is_success:
-                    raise httpx.HTTPStatusError(f"HTTP {resp.status_code}: {resp.text[:200]}", request=resp.request, response=resp)
+                    _raise_http_status(resp, prov)
                 data = resp.json()
                 text = ""
                 for block in data.get("content", []):
@@ -535,10 +720,10 @@ async def _invoke_provider(
         if response_json:
             payload["generationConfig"]["responseMimeType"] = "application/json"
             
-        async with httpx.AsyncClient(timeout=45.0) as client:
+        async with httpx.AsyncClient(timeout=client_timeout) as client:
             resp = await client.post(url, json=payload)
             if not resp.is_success:
-                raise httpx.HTTPStatusError(f"HTTP {resp.status_code}: {resp.text[:200]}", request=resp.request, response=resp)
+                _raise_http_status(resp, prov)
             data = resp.json()
             candidates = data.get("candidates", [])
             if not candidates:
@@ -559,14 +744,77 @@ async def _invoke_provider(
             "stream": False,
         }
         
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=client_timeout) as client:
             resp = await client.post(f"{base_url.rstrip('/')}/api/chat", json=payload)
             if not resp.is_success:
-                raise httpx.HTTPStatusError(f"HTTP {resp.status_code}: {resp.text[:200]}", request=resp.request, response=resp)
+                _raise_http_status(resp, prov)
             return resp.json().get("message", {}).get("content", "")
             
     else:
         raise ValueError(f"Unsupported LLM provider: {prov}")
+
+
+def _provider_configured(cfg: ModelConfig) -> bool:
+    if cfg.provider in ("ollama",):
+        return True
+    key = get_api_key(cfg)
+    if not key:
+        return False
+    if len(key) < 20 and cfg.api_key_env in ("XAI_API_KEY", "GOOGLE_API_KEY"):
+        return False
+    if any(marker in key.lower() for marker in ("changeme", "placeholder", "your_", "xxx")):
+        return False
+    if cfg.provider == "anthropic" and not key.startswith("sk-ant-"):
+        logger.warning("LLM Router: skipping malformed Anthropic API key")
+        return False
+    return True
+
+
+def build_provider_chain(task_type: str) -> list[tuple[str, ModelConfig]]:
+    """Primary + configured fallbacks, with dead catalog ids remapped/skipped."""
+    primary_cfg = pick_model(task_type)
+    raw_chain: list[tuple[str, ModelConfig]] = [
+        ("Primary (OmniRoute)", primary_cfg),
+        ("Fallback 1 (KieAI)", _DEFAULT_REGISTRY["fallback_kie"]),
+        ("Fallback 2 (OpenRouter)", _DEFAULT_REGISTRY["fallback_1"]),
+        ("Fallback 3 (xAI)", ModelConfig(
+            name=os.getenv("XAI_MODEL", "grok-4-1-fast-reasoning"),
+            provider="xai",
+            base_url=os.getenv("XAI_BASE_URL", "https://api.x.ai/v1"),
+            api_key_env="XAI_API_KEY",
+        )),
+        ("Fallback 4 (OpenAI)", ModelConfig(
+            name=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            provider="openai",
+            base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            api_key_env="OPENAI_API_KEY",
+        )),
+        ("Fallback 5 (Anthropic)", _DEFAULT_REGISTRY["fallback_2"]),
+        ("Fallback 6 (Gemini)", _DEFAULT_REGISTRY["fallback_3"]),
+    ]
+    if os.getenv("OLLAMA_ENABLED", "false").lower() == "true":
+        raw_chain.append(("Fallback 7 (Ollama)", ModelConfig(
+            name=os.getenv("OLLAMA_PRIMARY_MODEL", "phi3.5"),
+            provider="ollama",
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        )))
+
+    configs_to_try: list[tuple[str, ModelConfig]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for idx, (label, cfg) in enumerate(raw_chain):
+        sanitized = sanitize_provider_config(cfg, task_type)
+        if sanitized is None:
+            continue
+        is_primary = idx == 0
+        if not is_primary and not _provider_configured(sanitized):
+            continue
+        identity = (sanitized.provider.lower(), sanitized.name)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        configs_to_try.append((label, sanitized))
+    return configs_to_try
 
 
 async def call_llm_resilient(
@@ -579,103 +827,96 @@ async def call_llm_resilient(
 ) -> str:
     """
     Highly resilient LLM executor.
-    
+
     1. Acquires a semaphore to limit concurrency.
-    2. Tries the primary model configuration with 3 retries (exponential backoff).
-    3. If primary fails, cascades through fallback configurations sequentially.
-    4. Cleans and parses output (removing <think> tags, extracting JSON if requested).
+    2. Tries the primary model once; timeouts/connect errors fail over immediately.
+    3. HTTP 5xx / 429 get one short retry, then the next fallback.
+    4. Stops when the chain budget is exhausted so the trading loop is not stalled.
+    5. Cleans and parses output (removing <think> tags, extracting JSON if requested).
     """
-    global _LLM_SEMAPHORE
-    
-    primary_cfg = pick_model(task_type)
-    
-    chain = [
-        # ── PRIMARY: OmniRoute (auto-selects best available model / free tier) ──
-        ("Primary (OmniRoute)", primary_cfg),
-        # ── FALLBACK 1: KieAI direct (Kie.ai GPT-5.6 Terra / Luna) ──────────────
-        ("Fallback 1 (KieAI)", _DEFAULT_REGISTRY["fallback_kie"]),
-        # ── FALLBACK 2: OpenRouter multi-model gateway ────────────────────────
-        ("Fallback 2 (OpenRouter)", _DEFAULT_REGISTRY["fallback_1"]),
-        # ── FALLBACK 3: xAI Grok ─────────────────────────────────────────────
-        ("Fallback 3 (xAI)", ModelConfig(
-            name=os.getenv('XAI_MODEL', 'grok-4-1-fast-reasoning'),
-            provider='xai',
-            base_url=os.getenv('XAI_BASE_URL', 'https://api.x.ai/v1'),
-            api_key_env='XAI_API_KEY'
-        )),
-        # ── FALLBACK 4: OpenAI GPT ────────────────────────────────────────────
-        ("Fallback 4 (OpenAI)", ModelConfig(
-            name=os.getenv('OPENAI_MODEL', 'gpt-4o-mini'),
-            provider='openai',
-            base_url=os.getenv('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
-            api_key_env='OPENAI_API_KEY'
-        )),
-        # ── FALLBACK 5: Anthropic direct ──────────────────────────────────────
-        ("Fallback 5 (Anthropic)", _DEFAULT_REGISTRY["fallback_2"]),
-        # ── FALLBACK 6: Gemini via OpenRouter ─────────────────────────────────
-        ("Fallback 6 (Gemini)", _DEFAULT_REGISTRY["fallback_3"]),
-    ]
-    if os.getenv("OLLAMA_ENABLED", "false").lower() == "true":
-        chain.append(("Fallback 7 (Ollama)", ModelConfig(
-            name=os.getenv('OLLAMA_PRIMARY_MODEL', 'phi3.5'),
-            provider='ollama',
-            base_url=os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434'),
-        )))
-    
-    configs_to_try = []
-    seen_models: set[str] = set()
-    
-    # Primary is always first
-    configs_to_try.append((chain[0][0], chain[0][1]))
-    seen_models.add(chain[0][1].name)
-    
-    for name, cfg in chain[1:]:
-        key = get_api_key(cfg)
-        is_configured = True
-        if cfg.provider not in ("ollama",) and not key:
-            is_configured = False
-        if key and len(key) < 20 and cfg.api_key_env in ("XAI_API_KEY", "GOOGLE_API_KEY"):
-            is_configured = False
-        if key and any(marker in key.lower() for marker in (
-            "changeme", "placeholder", "your_", "xxx",
-        )):
-            is_configured = False
-        if cfg.provider == "anthropic" and key and not key.startswith("sk-ant-"):
-            logger.warning("LLM Router: skipping malformed Anthropic API key")
-            is_configured = False
-            
-        if is_configured and cfg.name not in seen_models:
-            configs_to_try.append((name, cfg))
-            seen_models.add(cfg.name)
-            
+    configs_to_try = build_provider_chain(task_type)
+    budget = _chain_budget_seconds(task_type)
+    started = time.monotonic()
+    last_error: Optional[BaseException] = None
+
     async with _LLM_SEMAPHORE:
-        last_error = None
         for attempt_name, cfg in configs_to_try:
+            remaining = budget - (time.monotonic() - started)
+            if remaining <= 1.0:
+                logger.error(
+                    "LLM Router: chain budget exhausted (%.1fs) before %s; skipping remaining providers",
+                    budget,
+                    attempt_name,
+                )
+                break
+
             api_key = get_api_key(cfg)
-            max_retries = 3
-            backoff = 1.0
-            
-            for attempt in range(max_retries):
+            timeout = min(_provider_timeout(cfg.provider), max(1.0, remaining - 0.2))
+            extra_retries = 1  # one extra attempt only when classify_llm_error == retry
+            attempt = 0
+            while attempt <= extra_retries:
+                attempt += 1
+                remaining = budget - (time.monotonic() - started)
+                if remaining <= 0.5:
+                    logger.error(
+                        "LLM Router: chain budget exhausted (%.1fs) during %s",
+                        budget,
+                        attempt_name,
+                    )
+                    break
+                timeout = min(timeout, max(1.0, remaining - 0.2))
                 try:
-                    logger.info(f"LLM Router: Trying {attempt_name} (model={cfg.name}, attempt={attempt+1}/{max_retries})")
-                    text = await _invoke_provider(cfg, api_key, prompt, system, temperature, max_tokens, response_json)
-                    
+                    logger.info(
+                        "LLM Router: Trying %s (model=%s, provider=%s, attempt=%s, timeout=%.1fs)",
+                        attempt_name,
+                        cfg.name,
+                        cfg.provider,
+                        attempt,
+                        timeout,
+                    )
+                    text = await asyncio.wait_for(
+                        _invoke_provider(
+                            cfg,
+                            api_key,
+                            prompt,
+                            system,
+                            temperature,
+                            max_tokens,
+                            response_json,
+                            timeout=timeout,
+                        ),
+                        timeout=timeout + 0.75,
+                    )
                     if response_json:
                         parsed = _clean_and_parse_json(text)
                         text = json.dumps(parsed)
-                        
-                    logger.info(f"LLM Router: Success using {attempt_name}")
+                    logger.info("LLM Router: Success using %s", attempt_name)
                     return text
                 except Exception as e:
                     last_error = e
-                    logger.warning(f"LLM Router: {attempt_name} attempt {attempt+1} failed: {type(e).__name__}: {e}")
-                    
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(backoff)
-                        backoff *= 2
-                        
-            logger.error(f"LLM Router: All {max_retries} attempts failed for {attempt_name}. Moving to next fallback.")
-            
-        err_msg = f"All LLM providers in the chain failed. Last error: {last_error}"
+                    action = classify_llm_error(e)
+                    logger.warning(
+                        "LLM Router: %s attempt %s failed (%s): %s",
+                        attempt_name,
+                        attempt,
+                        action,
+                        _error_summary(e),
+                    )
+                    if action == "retry" and attempt <= extra_retries:
+                        backoff = _retry_backoff_seconds()
+                        logger.info(
+                            "LLM Router: retrying %s in %.2fs then failing over if it fails again",
+                            attempt_name,
+                            backoff,
+                        )
+                        if backoff:
+                            await asyncio.sleep(backoff)
+                        continue
+                    break
+
+            logger.error("LLM Router: giving up on %s; moving to next fallback.", attempt_name)
+
+        summary = _error_summary(last_error) if last_error else "no providers attempted"
+        err_msg = f"All LLM providers in the chain failed. Last error: {summary}"
         logger.critical(err_msg)
-        raise RuntimeError(err_msg)
+        raise LLMChainExhausted(err_msg)
