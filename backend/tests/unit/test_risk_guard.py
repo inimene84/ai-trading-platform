@@ -391,6 +391,32 @@ def test_risk_guard_allows_20_positions_across_dual_brokers(db_session, monkeypa
         enforce_risk_limits(db_session, cfg, trades, None)
 
 
+def test_risk_guard_split_book_counts_only_live_binance_positions(db_session, monkeypatch):
+    monkeypatch.setenv("ACTIVE_BROKER", "ctrader")
+    monkeypatch.setenv("CTRADER_ENV", "sandbox")
+    monkeypatch.setenv("BINANCE_TESTNET", "false")
+    cfg = RiskConfig(
+        max_positions=2,
+        max_open_positions=2,
+        max_portfolio_drawdown_pct=99.0,
+        max_daily_loss_pct=99.0,
+        max_directional_exposure_usdt=0,
+    )
+    trades = [
+        Trade(symbol="EURUSD", direction="BUY", quantity=0.1, entry_price=1.0, broker="ctrader", status="open"),
+        Trade(symbol="GBPUSD", direction="BUY", quantity=0.1, entry_price=1.0, broker="ctrader", status="open"),
+        Trade(symbol="XAUUSD", direction="BUY", quantity=0.1, entry_price=1.0, broker="ctrader", status="open"),
+        Trade(symbol="BTCUSDC", direction="BUY", quantity=0.1, entry_price=1.0, broker="binance_futures", status="open"),
+        Trade(symbol="ETHUSDC", direction="BUY", quantity=0.1, entry_price=1.0, broker="binance_futures", status="open"),
+    ]
+    enforce_risk_limits(db_session, cfg, trades, None)
+    trades.append(
+        Trade(symbol="SOLUSDC", direction="BUY", quantity=0.1, entry_price=1.0, broker="binance_futures", status="open")
+    )
+    with pytest.raises(RiskBreach, match="Max open positions exceeded: 3 > 2"):
+        enforce_risk_limits(db_session, cfg, trades, None)
+
+
 def test_risk_guard_suppresses_drawdown_when_testing_flag_enabled(db_session, monkeypatch):
     monkeypatch.setenv("DISABLE_DRAWDOWN_IN_TESTING", "true")
     cfg = RiskConfig(
@@ -420,6 +446,7 @@ def test_risk_guard_suppresses_drawdown_when_testing_flag_enabled(db_session, mo
 
 def test_risk_guard_suppresses_drawdown_in_ctrader_sandbox(db_session, monkeypatch):
     monkeypatch.setenv("CTRADER_ENV", "sandbox")
+    monkeypatch.setenv("BINANCE_TESTNET", "true")
     monkeypatch.setenv("DISABLE_DRAWDOWN_IN_TESTING", "false")
     cfg = RiskConfig(
         max_position_risk_pct=1.0,
@@ -448,6 +475,7 @@ def test_risk_guard_suppresses_drawdown_in_ctrader_sandbox(db_session, monkeypat
 
 def test_risk_guard_enforces_sandbox_drawdown_when_explicitly_configured(db_session, monkeypatch):
     monkeypatch.setenv("CTRADER_ENV", "sandbox")
+    monkeypatch.setenv("BINANCE_TESTNET", "true")
     monkeypatch.setenv("ENFORCE_SANDBOX_DRAWDOWN", "true")
     monkeypatch.setenv("DISABLE_DRAWDOWN_IN_TESTING", "false")
     cfg = RiskConfig(
@@ -516,5 +544,64 @@ def test_filter_snapshots_account_id_isolation(monkeypatch):
     filtered = _filter_snapshots_for_risk([snap_acc1, snap_acc2])
     assert len(filtered) == 1
     assert filtered[0].account_id == "12345"
+
+
+def test_filter_snapshots_split_book_ignores_demo_ctrader(monkeypatch):
+    from backend.services.risk_guard import _filter_snapshots_for_risk, latest_snapshot_for_risk
+
+    snap_ctrader = PortfolioSnapshot(
+        id=1,
+        broker="ctrader",
+        mode="live",
+        total_value=150.0,
+        cash=150.0,
+        timestamp=datetime.now(timezone.utc),
+    )
+    snap_binance = PortfolioSnapshot(
+        id=2,
+        broker="binance_futures",
+        mode="live",
+        total_value=918.0,
+        cash=900.0,
+        timestamp=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("ACTIVE_BROKER", "ctrader")
+    monkeypatch.setenv("CTRADER_ENV", "sandbox")
+    monkeypatch.setenv("BINANCE_TESTNET", "false")
+
+    filtered = _filter_snapshots_for_risk([snap_ctrader, snap_binance])
+    assert [s.id for s in filtered] == [2]
+
+
+def test_latest_snapshot_for_risk_skips_newer_demo_row(db_session, monkeypatch):
+    from backend.services.risk_guard import latest_snapshot_for_risk
+
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("ACTIVE_BROKER", "ctrader")
+    monkeypatch.setenv("CTRADER_ENV", "sandbox")
+    monkeypatch.setenv("BINANCE_TESTNET", "false")
+
+    demo = PortfolioSnapshot(
+        broker="ctrader",
+        mode="live",
+        total_value=150.0,
+        cash=150.0,
+        timestamp=datetime.now(timezone.utc),
+    )
+    live_bn = PortfolioSnapshot(
+        broker="binance_futures",
+        mode="live",
+        total_value=918.0,
+        cash=900.0,
+        timestamp=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+    db_session.add_all([demo, live_bn])
+    db_session.commit()
+
+    latest = latest_snapshot_for_risk(db_session)
+    assert latest is not None
+    assert latest.broker == "binance_futures"
+    assert latest.total_value == 918.0
 
 

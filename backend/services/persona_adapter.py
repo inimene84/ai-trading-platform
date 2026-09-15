@@ -161,6 +161,8 @@ async def _call_llm(system: str, user: str) -> dict:
             "Persona LLM call failed; skipping persona enrichment this cycle: %s",
             type(e).__name__,
         )
+        # Fail-soft: never raise LLMChainExhausted into the trading loop.
+        # Size and hard gates (risk_guard, geometry, Jesse) do not need personas.
         return {
             "signal": "neutral",
             "confidence": 0.0,

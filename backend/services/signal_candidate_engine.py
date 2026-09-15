@@ -27,6 +27,7 @@ from backend.services.binance_market_data import binance_market_data
 from backend.services.multi_asset_bars import classify_symbol, tf_to_binance_interval
 from backend.services.trading_mode import live_ctrader_orders_allowed
 from backend.services.symbol_aliases import same_crypto_perp_leg
+from backend.services.market_hours import is_venue_open
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,7 @@ class SignalCandidateEngine:
             "max_portfolio_risk_pct": float(os.getenv("MAX_PORTFOLIO_RISK_PCT", "3.0")),
         }
         self._symbol_cooldowns: Dict[str, float] = {}
+        self._venue_closed_until: Dict[str, float] = {}
         self.cooldown_duration_sec: int = int(os.getenv("SYMBOL_COOLDOWN_MINUTES", "45")) * 60
         self.momentum_min_adx: float = float(os.getenv("MOMENTUM_MIN_ADX", "22.0"))
 
@@ -612,6 +614,34 @@ class SignalCandidateEngine:
             return True
         base = self._symbol_base(symbol)
         return self._open_ctrader_base_counts().get(base, 0) < cap
+
+    def _venue_closed_backoff_seconds(self) -> float:
+        try:
+            value = float(os.getenv("VENUE_CLOSED_BACKOFF_SECONDS", "900"))
+        except (TypeError, ValueError):
+            value = 900.0
+        return value if value > 0 else 900.0
+
+    def _note_venue_closed(self, venue: str, symbol: str) -> None:
+        """Log once per backoff window so weekend polls do not spam MARKET_CLOSED."""
+        now = time.time()
+        until = float(self._venue_closed_until.get(venue) or 0.0)
+        if now < until:
+            return
+        backoff = self._venue_closed_backoff_seconds()
+        self._venue_closed_until[venue] = now + backoff
+        logger.info(
+            "[%s] %s venue closed — skipping IC orders/scans for %.0fs (weekend/session closed)",
+            symbol,
+            venue,
+            backoff,
+        )
+
+    def _ctrader_venue_closed(self, symbol: str) -> bool:
+        if is_venue_open(symbol):
+            return False
+        self._note_venue_closed("ctrader", symbol)
+        return True
 
     def _account_equity(self) -> float:
         """Live cTrader equity when connected; otherwise a conservative fallback.
@@ -1157,6 +1187,8 @@ class SignalCandidateEngine:
                 if self.execution_config.get("forex_only") and asset_class == "crypto":
                     continue
                 broker = "binance_futures" if asset_class == "crypto" else "ctrader"
+                if broker == "ctrader" and self._ctrader_venue_closed(sym):
+                    continue
 
                 # Ingest bars
                 if broker == "ctrader":
@@ -1624,6 +1656,12 @@ class SignalCandidateEngine:
                 return {"success": False, "error": "Timing window expired."}
 
         cand_sym = str(cand.get("symbol", "")).upper()
+        if not force and cand.get("broker") == "ctrader" and self._ctrader_venue_closed(cand_sym):
+            return {
+                "success": False,
+                "skipped": True,
+                "error": "VENUE_CLOSED — market is closed; not sending IC order.",
+            }
         if not force and self.is_symbol_cooling_down(cand_sym):
             return {
                 "success": False,
@@ -1792,9 +1830,11 @@ class SignalCandidateEngine:
                 order_id = order_res.get("order_id") if order_res else None
                 msg = f"cTrader order {order_id or 'pending'} placed ({status or 'unknown'})"
                 if not success and "MARKET_CLOSED" in err_text.upper():
-                    cand["status"] = CandidateStatus.CANCELLED
+                    self._note_venue_closed("ctrader", cand_sym)
+                    cand["status"] = CandidateStatus.READY
                     cand["execution_result"] = {
                         "success": False,
+                        "skipped": True,
                         "order_id": None,
                         "message": err_text,
                         "broker": "ctrader",

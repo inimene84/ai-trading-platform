@@ -29,6 +29,8 @@ from backend.services.trading_loop_helpers import (
     is_ctrader_trade as _is_ctrader_trade,
 )
 from backend.services.ledger import is_binance_paper_fill
+from backend.services.equity_scope import compose_balance_payload
+from backend.services.ops_status import trading_ops_snapshot
 from backend.services.trading_mode import (
     TradingMode,
     get_trading_mode,
@@ -191,9 +193,8 @@ async def run_backtest(request: dict):
 async def _get_current_balance() -> dict:
     """Resolve current balance depending on trading mode (paper vs live).
 
-    Live never treats a failed Binance wallet read as $0 equity. Prefer any
-    healthy broker book (cTrader and/or Binance) and fall back to last live
-    snapshot rather than reporting zeros.
+    Live never treats a failed Binance wallet read as $0 equity. Demo cTrader
+    and live Binance are never summed into kill/status equity (split_book).
     """
     from backend.services.trading_mode import TradingMode, get_trading_mode
     if get_trading_mode() == TradingMode.PAPER:
@@ -224,10 +225,11 @@ async def _get_current_balance() -> dict:
     try:
         if ctrader_broker.has_credentials():
             ct = await asyncio.to_thread(ctrader_broker.get_balance)
-            if ct and (float(ct.get("equity") or 0) > 0 or float(ct.get("balance") or 0) > 0):
-                books.append(ct)
+            if ct:
+                books.append({**ct, "broker": ct.get("broker") or "ctrader"})
     except Exception as exc:
         logger.warning("cTrader get_balance failed: %s", exc)
+        books.append({"broker": "ctrader", "error": type(exc).__name__})
 
     if live_binance_orders_allowed():
         try:
@@ -235,33 +237,16 @@ async def _get_current_balance() -> dict:
             bn = await asyncio.to_thread(
                 lambda: binance_futures_broker.get_balance(raise_on_error=True)
             )
-            if bn and not bn.get("error"):
-                books.append(bn)
+            if bn:
+                books.append({**bn, "broker": bn.get("broker") or "binance_futures"})
         except Exception as exc:
             logger.warning("Binance get_balance failed (not treating as $0): %s", exc)
+            books.append({"broker": "binance_futures", "error": type(exc).__name__})
 
-    if books:
-        equity = sum(float(b.get("equity") or b.get("balance") or 0) for b in books)
-        balance = sum(float(b.get("balance") or 0) for b in books)
-        available = sum(float(b.get("available") or 0) for b in books)
-        margin_used = sum(float(b.get("margin_used") or 0) for b in books)
-        brokers = ",".join(str(b.get("broker") or "?") for b in books)
-        return {
-            "balance": balance,
-            "available": available,
-            "equity": equity,
-            "margin_used": margin_used,
-            "broker": brokers,
-            "books": books,
-        }
-    return {
-        "balance": 0.0,
-        "available": 0.0,
-        "equity": 0.0,
-        "margin_used": 0.0,
-        "broker": "unverified",
-        "error": "no_live_broker_balance",
-    }
+    payload = compose_balance_payload(books)
+    if not books:
+        payload["error"] = payload.get("error") or "no_live_broker_balance"
+    return payload
 
 
 async def _live_binance_book() -> tuple[list, bool]:
@@ -577,7 +562,7 @@ async def get_status():
     if os.getenv('KIE_API_KEY') and os.getenv('KIE_API_KEY') != 'your_kie_api_key_here':
         llm_providers.append({
             'name': 'Kie.ai',
-            'model': os.getenv('KIE_MODEL', 'gpt-5-6-terra'),
+            'model': os.getenv('KIE_MODEL', 'gpt-5-6-luna'),
             'status': 'configured',
             'type': 'cloud',
             'role': 'fallback / direct via Kie.ai',
@@ -626,7 +611,11 @@ async def get_status():
     # Check brokers
     brokers = []
     if os.getenv('BINANCE_API_KEY'):
-        brokers.append({'name': 'Binance', 'env': 'testnet' if os.getenv('BINANCE_TESTNET', 'true') == 'true' else 'live', 'status': 'configured'})
+        brokers.append({
+            'name': 'Binance',
+            'env': 'testnet' if os.getenv('BINANCE_TESTNET', 'false').strip().lower() == 'true' else 'live',
+            'status': 'configured',
+        })
     else:
         brokers.append({'name': 'Binance', 'env': 'testnet', 'status': 'not_configured'})
     if os.getenv('CTRADER_ACCESS_TOKEN'):
@@ -684,6 +673,7 @@ async def get_status():
 
     from backend.services.trading_mode import get_trading_mode
     _trading_mode = get_trading_mode()
+    _ops = trading_ops_snapshot()
 
     # Monitoring flags
     telegram = bool(os.getenv('TELEGRAM_BOT_TOKEN') and os.getenv('TELEGRAM_CHAT_ID'))
@@ -695,7 +685,7 @@ async def get_status():
         'strategies_loaded': 5,
         'dry_run': _trading_mode.value != 'live',
         'mode': _trading_mode.value,
-        'active_broker': os.getenv('ACTIVE_BROKER', 'binance_futures'),
+        'active_broker': os.getenv('ACTIVE_BROKER', 'ctrader'),
         'llm_providers': llm_providers,
         'brokers': brokers,
         'data_providers': data_providers,
@@ -706,6 +696,9 @@ async def get_status():
         'uptime': 'running',
         'last_cycle': trading_loop.status.get('last_cycle'),
         'trading_loop': trading_loop.status,
+        'equity_books': _ops['equity_books'],
+        'llm_router': _ops['llm_router'],
+        'sentry_auto_resume': _ops['sentry_auto_resume'],
     }
 
 

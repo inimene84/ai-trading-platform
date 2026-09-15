@@ -41,8 +41,9 @@ services:
       OMNIROUTE_DEFAULT_MODEL: ${OMNIROUTE_DEFAULT_MODEL:-auto/fast}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       PERSONA_LLM_BASE_URL: ${PERSONA_LLM_BASE_URL:-https://omni.allikas.online/v1}
-      KIE_MODEL: gpt-5-6-terra
-      KIE_OPUS_MODEL: ${KIE_OPUS_MODEL:-gpt-5-6-terra}
+      KIE_MODEL: ${KIE_MODEL:-gpt-5-6-luna}
+      KIE_FALLBACK_MODELS: ${KIE_FALLBACK_MODELS:-gemini-3-8-flash-openai,claude-haiku-4-5}
+      KIE_OPUS_MODEL: ${KIE_OPUS_MODEL:-}
       # OmniRoute — primary LLM provider (https://omni.allikas.online)
       # auto/* presets automatically pick best/free model for each task
       OMNIROUTE_API_KEY: ${OMNIROUTE_API_KEY}
@@ -72,6 +73,9 @@ services:
       PYRAMID_MAX_LAYERS: ${PYRAMID_MAX_LAYERS:-2}
       PYRAMID_BLOCK_UNDERWATER: ${PYRAMID_BLOCK_UNDERWATER:-true}
       MAX_SAME_DIRECTION_POSITIONS: ${MAX_SAME_DIRECTION_POSITIONS:-10}
+      EQUITY_RISK_SCOPE: ${EQUITY_RISK_SCOPE:-broker}
+      SENTRY_AUTO_RESUME_ENABLED: ${SENTRY_AUTO_RESUME_ENABLED:-true}
+      SENTRY_AUTO_RESUME_LIVE_CONFIRM: ${SENTRY_AUTO_RESUME_LIVE_CONFIRM:-}
       # Fee-churn fix: post-only (GTX) maker entries with MARKET fallback.
       # OFF by default (fail-safe). Set true to cut entry fees 0.05%->0.02%.
       MAKER_ENTRY_ENABLED: ${MAKER_ENTRY_ENABLED:-true}
@@ -228,6 +232,11 @@ services:
       BACKEND_URL: http://backend:8000
       SENTRY_WATCHDOG_TOKEN: ${SENTRY_WATCHDOG_TOKEN:-}
       SENTRY_STATE_DIR: /app/data/sentry
+      SENTRY_AUTO_RESUME_ENABLED: ${SENTRY_AUTO_RESUME_ENABLED:-true}
+      SENTRY_AUTO_RESUME_LIVE_CONFIRM: ${SENTRY_AUTO_RESUME_LIVE_CONFIRM:-}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      PAPER_TRADING: ${PAPER_TRADING:-true}
+      DRY_RUN_ALL: ${DRY_RUN_ALL:-true}
     volumes:
       - app-data:/app/data
     depends_on:

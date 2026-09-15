@@ -20,7 +20,8 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, replace
-from typing import Literal, Optional
+from datetime import datetime, timezone
+from typing import Any, Literal, Never, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +54,23 @@ _OMNIROUTE_CANONICAL_BASE = "https://omni.allikas.online/v1"
 _OMNIROUTE_BASE_URL = os.getenv("OMNIROUTE_BASE_URL", _OMNIROUTE_CANONICAL_BASE)
 _OMNIROUTE_DEFAULT_PRESET = "auto/fast"
 
-# Kie.ai direct model IDs (fallback)
-_KIE_MODEL = os.getenv("KIE_MODEL", "gpt-5-6-terra")
-_KIE_OPUS_DIRECT_MODEL = os.getenv("KIE_OPUS_MODEL", "gpt-5-6-terra")
+# Kie.ai direct model IDs (fallback). Luna is the faster GPT 5.6 sibling;
+# Terra 500'd in production on the same /codex/v1/responses path.
+# Extra hops: KIE_FALLBACK_MODELS (Gemini OpenAI-compat, then Claude Haiku).
+_KIE_MODEL = os.getenv("KIE_MODEL", "gpt-5-6-luna")
+_KIE_OPUS_DIRECT_MODEL = os.getenv("KIE_OPUS_MODEL", "")
 _KIE_BASE_URL = os.getenv("KIE_BASE_URL", "https://api.kie.ai")
+_DEFAULT_KIE_FALLBACK_MODELS = "gemini-3-8-flash-openai,claude-haiku-4-5"
+# Documented OpenAI-compat Gemini slugs (docs.kie.ai/market/gemini/*).
+_KIE_GEMINI_SLUGS: dict[str, str] = {
+    "gemini-3-8-flash": "gemini-3-8-flash-openai",
+    "gemini-3-8-flash-openai": "gemini-3-8-flash-openai",
+    "gemini-3-pro": "gemini-3-pro",
+    "gemini-3-pro-openai": "gemini-3-pro",
+    "gemini-3-flash": "gemini-3-flash",
+    "gemini-3-flash-openai": "gemini-3-flash-openai",
+}
+_KIE_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9.-]{0,80}")
 _LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", os.getenv("PERSONA_LLM_BASE_URL", "http://litellm:4000/v1"))
 
 _DEFAULT_REGISTRY: dict[str, ModelConfig] = {
@@ -128,7 +142,7 @@ _DEFAULT_REGISTRY: dict[str, ModelConfig] = {
     ),
 
     # ── Fallback chain entries (used if OmniRoute unavailable) ────────────────
-    # KieAI fallback (direct Kie.ai GPT-5.6 Terra / Luna)
+    # KieAI fallback (direct Kie.ai; family endpoint is chosen per model id)
     "fallback_kie": ModelConfig(
         name=_KIE_MODEL,
         provider="kie",
@@ -213,6 +227,51 @@ class LLMChainExhausted(RuntimeError):
     """Raised when every configured LLM provider failed within the chain budget."""
 
 
+# Last-error summary for /trading/status — no response bodies, no keys.
+_llm_router_status: dict[str, Any] = {
+    "degraded": False,
+    "chain_exhausted": False,
+    "last_success_at": None,
+    "last_success_provider": None,
+    "last_success_model": None,
+    "last_error": None,
+    "last_error_at": None,
+    "last_error_provider": None,
+    "last_error_task": None,
+}
+
+
+def get_llm_router_status() -> dict[str, Any]:
+    """Ops snapshot of the last LLM success/failure (safe to expose)."""
+    return dict(_llm_router_status)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _record_llm_success(task_type: str, provider: str, model: str) -> None:
+    _llm_router_status["degraded"] = False
+    _llm_router_status["chain_exhausted"] = False
+    _llm_router_status["last_success_at"] = _utc_now_iso()
+    _llm_router_status["last_success_provider"] = provider
+    _llm_router_status["last_success_model"] = model
+    _llm_router_status["last_error"] = None
+    _llm_router_status["last_error_at"] = None
+    _llm_router_status["last_error_provider"] = None
+    _llm_router_status["last_error_task"] = task_type
+
+
+def _record_llm_failure(task_type: str, provider: str, summary: str, *, exhausted: bool = False) -> None:
+    _llm_router_status["last_error"] = summary
+    _llm_router_status["last_error_at"] = _utc_now_iso()
+    _llm_router_status["last_error_provider"] = provider
+    _llm_router_status["last_error_task"] = task_type
+    if exhausted:
+        _llm_router_status["degraded"] = True
+        _llm_router_status["chain_exhausted"] = True
+
+
 # ── Timeouts, error classification, catalog sanitization ─────────────────────
 
 # OmniRoute auto-router presets. Dead kie/* / LiteLLM catalog ids must never be
@@ -227,7 +286,16 @@ _OMNIROUTE_PRESETS = {
     "auto/chat",
     "auto/best-coding",
 }
-_KIE_NATIVE_MODELS = {"gpt-5-6-terra", "gpt-5-6-luna", "gpt-5-6-sol"}
+_KIE_NATIVE_MODELS = {
+    "gpt-5-6-terra",
+    "gpt-5-6-luna",
+    "gpt-5-6-sol",
+    "gpt-5-5",
+    "gpt-5-2",
+    "gemini-3-8-flash",
+    "gemini-3-8-flash-openai",
+    "claude-haiku-4-5",
+}
 _DEAD_CATALOG_PREFIXES = ("kie/", "litellm/")
 
 # Per-provider read timeouts.
@@ -293,10 +361,10 @@ def _provider_timeout(provider: str) -> float:
 
 def _chain_budget_seconds(task_type: str) -> float:
     """Hard cap for the whole fallback chain so the trading loop is not stalled."""
-    # Must exceed OmniRoute's 25s attempt so a healthy auto/fast call can finish.
+    # Must exceed OmniRoute's 25s attempt, then Luna + one extra Kie family hop.
     if task_type == "persona_analysis":
-        return _env_float("LLM_PERSONA_CHAIN_BUDGET_SECONDS", 32.0)
-    return _env_float("LLM_CHAIN_BUDGET_SECONDS", 40.0)
+        return _env_float("LLM_PERSONA_CHAIN_BUDGET_SECONDS", 48.0)
+    return _env_float("LLM_CHAIN_BUDGET_SECONDS", 55.0)
 
 
 def _retry_backoff_seconds() -> float:
@@ -393,6 +461,22 @@ def _sanitize_omniroute_base_url(url: Optional[str]) -> str:
     return raw
 
 
+def _looks_like_kie_native_id(name: str) -> bool:
+    """True when a model id belongs on Kie, not OmniRoute auto/*."""
+    lower = (name or "").strip().lower()
+    if not lower or lower in _OMNIROUTE_PRESETS:
+        return False
+    if lower in _KIE_NATIVE_MODELS:
+        return True
+    if lower.startswith(("claude", "grok", "gemini", "gpt-5-6", "gpt-5-5", "gpt-5-4", "gpt-6")):
+        return True
+    if lower.startswith("gpt-") and "codex" in lower:
+        return True
+    if lower in {"gpt-5-2", "gpt-5.2"} or lower.startswith("gpt-5-2"):
+        return True
+    return False
+
+
 def sanitize_provider_config(cfg: ModelConfig, task_type: str = "general") -> Optional[ModelConfig]:
     """
     Drop or remap unusable catalog ids.
@@ -409,7 +493,7 @@ def sanitize_provider_config(cfg: ModelConfig, task_type: str = "general") -> Op
         looks_dead = (
             not name
             or lower.startswith(_DEAD_CATALOG_PREFIXES)
-            or lower in _KIE_NATIVE_MODELS
+            or _looks_like_kie_native_id(lower)
         )
         preset_name = name
         if looks_dead:
@@ -431,12 +515,286 @@ def sanitize_provider_config(cfg: ModelConfig, task_type: str = "general") -> Op
         if not cleaned or "/" in cleaned:
             logger.warning("LLM Router: skipping Kie fallback with unusable model %r", name)
             return None
+        if not _KIE_SLUG_RE.fullmatch(cleaned.lower()):
+            logger.warning("LLM Router: skipping Kie fallback with invalid model id %r", name)
+            return None
         if cleaned != name:
             logger.info("LLM Router: stripping kie/ prefix → %s", cleaned)
             return replace(cfg, name=cleaned)
         return cfg
 
     return cfg
+
+
+# ── Kie.ai family routing (docs.kie.ai Market / Chat Models) ──────────────────
+# Different model families use different host paths and payloads:
+#   Claude        POST /claude/v1/messages              Anthropic messages, stream:false
+#   GPT 5.6/5.5   POST /codex/v1/responses              Responses API (input_text)
+#   GPT Codex     POST /api/v1/responses                Responses API
+#   Grok          POST /grok/v1/responses               Responses API
+#   Gemini/GPT5.2 POST /{slug}/v1/chat/completions      OpenAI chat, stream:false
+
+KieKind = Literal["claude", "codex_responses", "gpt_codex", "grok_responses", "openai_chat"]
+
+
+@dataclass(frozen=True)
+class KieRoute:
+    """Resolved Kie.ai endpoint for a model id."""
+
+    kind: KieKind
+    path: str
+    model: str
+
+
+def _kie_gemini_slug(model: str) -> str:
+    mid = model.strip().lower()
+    if mid in _KIE_GEMINI_SLUGS:
+        return _KIE_GEMINI_SLUGS[mid]
+    if mid.endswith("-openai"):
+        return mid
+    openai_slug = f"{mid}-openai"
+    if openai_slug in _KIE_GEMINI_SLUGS.values() or "flash" in mid:
+        return openai_slug
+    return mid
+
+
+def resolve_kie_route(model: str) -> KieRoute:
+    """Map a Kie model id onto the documented family endpoint.
+
+    Public so unit tests can pin the routing table without HTTP.
+    ``model`` is the canonical id sent in the JSON body (matches the URL slug
+    for OpenAI-compat families).
+    """
+    mid = (model or "").strip().lower()
+    if not mid:
+        return KieRoute("codex_responses", "/codex/v1/responses", "gpt-5-6-luna")
+    if mid.startswith("claude"):
+        return KieRoute("claude", "/claude/v1/messages", mid)
+    if mid.startswith("grok"):
+        return KieRoute("grok_responses", "/grok/v1/responses", mid)
+    if mid.startswith("gemini"):
+        slug = _kie_gemini_slug(mid)
+        return KieRoute("openai_chat", f"/{slug}/v1/chat/completions", slug)
+    if "codex" in mid:
+        return KieRoute("gpt_codex", "/api/v1/responses", mid)
+    if (
+        mid.startswith("gpt-5-6")
+        or mid.startswith("gpt-5-5")
+        or mid.startswith("gpt-5-4")
+        or mid.startswith("gpt-6")
+    ):
+        return KieRoute("codex_responses", "/codex/v1/responses", mid)
+    if mid in {"gpt-5-2", "gpt-5.2"} or mid.startswith("gpt-5-2"):
+        return KieRoute("openai_chat", "/gpt-5-2/v1/chat/completions", "gpt-5-2")
+    return KieRoute("codex_responses", "/codex/v1/responses", mid)
+
+
+def _kie_fallback_model_ids() -> list[str]:
+    """Extra Kie models tried after the primary ``KIE_MODEL`` (same API key)."""
+    raw = os.getenv("KIE_FALLBACK_MODELS", _DEFAULT_KIE_FALLBACK_MODELS).strip()
+    models: list[str] = []
+    if raw:
+        models.extend(part.strip() for part in raw.split(",") if part.strip())
+    opus = os.getenv("KIE_OPUS_MODEL", _KIE_OPUS_DIRECT_MODEL).strip()
+    if opus:
+        models.append(opus)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for model in models:
+        if model not in seen:
+            unique.append(model)
+            seen.add(model)
+    return unique
+
+
+def _kie_request_url(cfg: ModelConfig, path: str) -> str:
+    raw = (cfg.base_url or _KIE_BASE_URL).strip().rstrip("/")
+    if "api.kie.ai" not in raw.lower():
+        raw = "https://api.kie.ai"
+    if raw.endswith("/claude") and path.startswith("/claude/"):
+        return raw + path[len("/claude"):]
+    if raw.endswith("/codex") and path.startswith("/codex/"):
+        return raw + path[len("/codex"):]
+    return f"{raw}{path}"
+
+
+def _kie_responses_payload(model: str, prompt: str, system: str) -> dict[str, Any]:
+    input_msgs: list[dict[str, Any]] = []
+    if system:
+        input_msgs.append({
+            "role": "system",
+            "content": [{"type": "input_text", "text": system}],
+        })
+    input_msgs.append({
+        "role": "user",
+        "content": [{"type": "input_text", "text": prompt}],
+    })
+    return {
+        "model": model,
+        "stream": False,
+        "input": input_msgs,
+        "reasoning": {"effort": "low"},
+    }
+
+
+def _kie_chat_completions_payload(
+    model: str,
+    prompt: str,
+    system: str,
+    max_tokens: int,
+    response_json: bool,
+    temperature: Optional[float] = None,
+) -> dict[str, Any]:
+    messages: list[dict[str, Any]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if response_json:
+        payload["response_format"] = {"type": "json_object"}
+    return payload
+
+
+def _extract_kie_responses_text(data: dict[str, Any]) -> str:
+    text = ""
+    if isinstance(data.get("output"), list):
+        for item in data["output"]:
+            if not isinstance(item, dict):
+                continue
+            for part in item.get("content", []):
+                if isinstance(part, dict) and part.get("type") in ("text", "output_text"):
+                    text += part.get("text", "")
+    elif isinstance(data.get("choices"), list) and data["choices"]:
+        choice = data["choices"][0]
+        if isinstance(choice, dict):
+            msg = choice.get("message") or {}
+            text = msg.get("content", "") if isinstance(msg, dict) else str(choice.get("text", ""))
+    elif "data" in data and isinstance(data["data"], dict):
+        text = data["data"].get("content", "") or data["data"].get("text", "")
+    elif "text" in data and isinstance(data["text"], str):
+        text = data["text"]
+    elif "response" in data and isinstance(data["response"], str):
+        text = data["response"]
+    if not text:
+        raise ValueError("Kie responses API returned no output text")
+    return text
+
+
+def _extract_kie_chat_text(data: dict[str, Any]) -> str:
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            msg = first.get("message") or {}
+            if isinstance(msg, dict):
+                content = msg.get("content") or msg.get("reasoning_content") or ""
+                if content:
+                    return content
+    candidates = data.get("candidates")
+    if isinstance(candidates, list) and candidates:
+        first = candidates[0]
+        if isinstance(first, dict):
+            parts = (first.get("content") or {}).get("parts") or []
+            texts = [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text")]
+            if texts:
+                return "".join(texts)
+    output_text = data.get("output_text")
+    if isinstance(output_text, str) and output_text:
+        return output_text
+    if data.get("output"):
+        return _extract_kie_responses_text(data)
+    raise ValueError("Kie chat completions returned no content")
+
+
+def _extract_kie_claude_text(data: dict[str, Any]) -> str:
+    text = ""
+    for block in data.get("content", []) or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text += block.get("text", "")
+    return text
+
+
+def _assert_never_kie_kind(kind: Never) -> None:
+    raise ValueError(f"Unhandled Kie route kind: {kind}")
+
+
+def _kie_template_config() -> ModelConfig:
+    """Prefer live ``KIE_MODEL``; otherwise the registry snapshot (tests may patch it)."""
+    env_name = os.getenv("KIE_MODEL")
+    if env_name is not None and env_name.strip():
+        name = env_name.strip()
+    else:
+        name = _DEFAULT_REGISTRY["fallback_kie"].name or _KIE_MODEL
+    return replace(_DEFAULT_REGISTRY["fallback_kie"], name=name)
+
+
+def _expand_kie_model_hops(
+    configs_to_try: list[tuple[str, ModelConfig]],
+) -> list[tuple[str, ModelConfig]]:
+    """Insert extra Kie family hops after the first Kie provider (same API key)."""
+    extras = _kie_fallback_model_ids()
+    template = _kie_template_config()
+    if not extras:
+        return configs_to_try
+    if not _provider_configured(template) and not any(
+        cfg.provider.lower() == "kie" for _, cfg in configs_to_try
+    ):
+        return configs_to_try
+
+    out: list[tuple[str, ModelConfig]] = []
+    seen: set[tuple[str, str]] = set()
+    expanded = False
+
+    def _append(label: str, cfg: ModelConfig) -> None:
+        identity = (cfg.provider.lower(), cfg.name)
+        if identity in seen:
+            return
+        seen.add(identity)
+        out.append((label, cfg))
+
+    def _append_extras(base: ModelConfig) -> None:
+        for i, model in enumerate(extras, start=2):
+            extra = replace(base, name=model)
+            sanitized = sanitize_provider_config(extra, "general")
+            if sanitized is None:
+                continue
+            _append(f"Fallback 1.{i} (KieAI {sanitized.name})", sanitized)
+
+    for label, cfg in configs_to_try:
+        _append(label, cfg)
+        if cfg.provider.lower() == "kie" and not expanded:
+            expanded = True
+            _append_extras(cfg)
+
+    if not expanded:
+        insert_at = min(1, len(out))
+        extra_rows: list[tuple[str, ModelConfig]] = []
+        seen_before = set(seen)
+
+        def _collect(label: str, cfg: ModelConfig) -> None:
+            identity = (cfg.provider.lower(), cfg.name)
+            if identity in seen_before:
+                return
+            seen_before.add(identity)
+            extra_rows.append((label, cfg))
+
+        for i, model in enumerate(extras, start=1):
+            extra = replace(template, name=model)
+            sanitized = sanitize_provider_config(extra, "general")
+            if sanitized is None:
+                continue
+            _collect(f"Fallback 1.{i} (KieAI {sanitized.name})", sanitized)
+        out[insert_at:insert_at] = extra_rows
+        for _, cfg in extra_rows:
+            seen.add((cfg.provider.lower(), cfg.name))
+    return out
 
 
 # ── Resilient LLM Execution Engine ────────────────────────────────────────────
@@ -610,19 +968,22 @@ async def _invoke_provider(
             return resp.json()["choices"][0]["message"]["content"]
             
     elif prov == "kie":
-        # Kie.ai supports Claude (/claude/v1/messages) and GPT/ChatGPT models (/codex/v1/responses)
-        is_claude = "claude" in cfg.name.lower()
-        if is_claude:
-            url = f"{cfg.base_url.rstrip('/')}/v1/messages" if "/claude" in (cfg.base_url or "") else "https://api.kie.ai/claude/v1/messages"
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            }
+        # docs.kie.ai: each family has its own path (Claude / Codex / Gemini / Grok / GPT-5.2).
+        route = resolve_kie_route(cfg.name)
+        url = _kie_request_url(cfg, route.path)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        logger.debug("Kie request: POST %s kind=%s model=%s", url, route.kind, route.model)
+
+        if route.kind == "claude":
             messages = [{"role": "user", "content": prompt}]
-            payload = {
-                "model": cfg.name,
+            payload: dict[str, Any] = {
+                "model": route.model,
                 "messages": messages,
                 "max_tokens": tokens,
+                "stream": False,
             }
             if system:
                 payload["system"] = [
@@ -635,10 +996,7 @@ async def _invoke_provider(
                     if not resp.is_success:
                         _raise_http_status(resp, prov)
                     data = resp.json()
-                    text = ""
-                    for block in data.get("content", []):
-                        if block.get("type") == "text":
-                            text += block.get("text", "")
+                    text = _extract_kie_claude_text(data)
                     if response_json:
                         stripped = text.lstrip()
                         if not stripped.startswith("{") and not stripped.startswith("```"):
@@ -652,53 +1010,26 @@ async def _invoke_provider(
                         continue
                     return text
                 raise ValueError(f"Output still truncated at max_tokens={tokens * 2} for {cfg.name}")
-        else:
-            # GPT / ChatGPT / Codex models on Kie.ai (e.g. gpt-5-6-terra, gpt-5-6-luna)
-            url = f"{cfg.base_url.rstrip('/')}/codex/v1/responses" if cfg.base_url and "api.kie.ai" in cfg.base_url else "https://api.kie.ai/codex/v1/responses"
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            }
-            input_msgs = []
-            if system:
-                input_msgs.append({
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": system}]
-                })
-            input_msgs.append({
-                "role": "user",
-                "content": [{"type": "input_text", "text": prompt}]
-            })
-            payload = {
-                "model": cfg.name,
-                "stream": False,
-                "input": input_msgs,
-                "reasoning": {"effort": "low"},
-            }
+
+        if route.kind in ("codex_responses", "gpt_codex", "grok_responses"):
+            payload = _kie_responses_payload(route.model, prompt, system)
             async with httpx.AsyncClient(timeout=client_timeout) as client:
                 resp = await client.post(url, headers=headers, json=payload)
                 if not resp.is_success:
                     _raise_http_status(resp, prov)
-                data = resp.json()
-                text = ""
-                if isinstance(data.get("output"), list):
-                    for item in data["output"]:
-                        for part in item.get("content", []):
-                            if isinstance(part, dict) and part.get("type") in ("text", "output_text"):
-                                text += part.get("text", "")
-                elif isinstance(data.get("choices"), list) and data["choices"]:
-                    choice = data["choices"][0]
-                    msg = choice.get("message") or {}
-                    text = msg.get("content", "") if isinstance(msg, dict) else str(choice.get("text", ""))
-                elif "data" in data and isinstance(data["data"], dict):
-                    text = data["data"].get("content", "") or data["data"].get("text", "")
-                elif "text" in data and isinstance(data["text"], str):
-                    text = data["text"]
-                elif "response" in data and isinstance(data["response"], str):
-                    text = data["response"]
-                if not text and isinstance(data, dict):
-                    text = json.dumps(data)
-                return text
+                return _extract_kie_responses_text(resp.json())
+
+        if route.kind == "openai_chat":
+            payload = _kie_chat_completions_payload(
+                route.model, prompt, system, tokens, response_json, temperature=temp
+            )
+            async with httpx.AsyncClient(timeout=client_timeout) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                if not resp.is_success:
+                    _raise_http_status(resp, prov)
+                return _extract_kie_chat_text(resp.json())
+
+        _assert_never_kie_kind(route.kind)
 
     elif prov == "anthropic":
         # Anthropic messages format
@@ -821,7 +1152,7 @@ def build_provider_chain(task_type: str) -> list[tuple[str, ModelConfig]]:
     primary_cfg = pick_model(task_type)
     raw_chain: list[tuple[str, ModelConfig]] = [
         ("Primary (OmniRoute)", primary_cfg),
-        ("Fallback 1 (KieAI)", _DEFAULT_REGISTRY["fallback_kie"]),
+        ("Fallback 1 (KieAI)", _kie_template_config()),
         ("Fallback 2 (OpenRouter)", _DEFAULT_REGISTRY["fallback_1"]),
         ("Fallback 3 (xAI)", ModelConfig(
             name=os.getenv("XAI_MODEL", "grok-4-1-fast-reasoning"),
@@ -860,7 +1191,7 @@ def build_provider_chain(task_type: str) -> list[tuple[str, ModelConfig]]:
             continue
         seen.add(identity)
         configs_to_try.append((label, sanitized))
-    return configs_to_try
+    return _expand_kie_model_hops(configs_to_try)
 
 
 async def call_llm_resilient(
@@ -884,6 +1215,7 @@ async def call_llm_resilient(
     budget = _chain_budget_seconds(task_type)
     started = time.monotonic()
     last_error: Optional[BaseException] = None
+    last_provider = "none"
 
     async with _LLM_SEMAPHORE:
         for attempt_name, cfg in configs_to_try:
@@ -937,16 +1269,20 @@ async def call_llm_resilient(
                         parsed = _clean_and_parse_json(text)
                         text = json.dumps(parsed)
                     logger.info("LLM Router: Success using %s", attempt_name)
+                    _record_llm_success(task_type, cfg.provider, cfg.name)
                     return text
                 except Exception as e:
                     last_error = e
+                    last_provider = cfg.provider
                     action = classify_llm_error(e)
+                    summary = _error_summary(e)
+                    _record_llm_failure(task_type, cfg.provider, summary)
                     logger.warning(
                         "LLM Router: %s attempt %s failed (%s): %s",
                         attempt_name,
                         attempt,
                         action,
-                        _error_summary(e),
+                        summary,
                     )
                     if action == "retry" and attempt <= extra_retries:
                         backoff = _retry_backoff_seconds()
@@ -963,6 +1299,7 @@ async def call_llm_resilient(
             logger.error("LLM Router: giving up on %s; moving to next fallback.", attempt_name)
 
         summary = _error_summary(last_error) if last_error else "no providers attempted"
+        _record_llm_failure(task_type, last_provider, summary, exhausted=True)
         err_msg = f"All LLM providers in the chain failed. Last error: {summary}"
         logger.critical(err_msg)
         raise LLMChainExhausted(err_msg)

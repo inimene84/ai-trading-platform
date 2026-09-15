@@ -383,7 +383,42 @@ async def test_execute_candidate_skips_market_closed_without_blocking_queue():
 
     assert res["success"] is False
     assert res["skipped"] is True
-    assert signal_candidate_engine.candidates[sig_id]["status"] == CandidateStatus.CANCELLED
+    assert signal_candidate_engine.candidates[sig_id]["status"] == CandidateStatus.READY
+
+
+@pytest.mark.asyncio
+async def test_execute_candidate_skips_closed_venue_without_placing_order():
+    now_ts = int(time.time())
+    sig_id = "test-exec-hours-01"
+    signal_candidate_engine.candidates[sig_id] = {
+        "id": sig_id,
+        "symbol": "EURUSD",
+        "broker": "ctrader",
+        "strategy": "MOMENTUM_TREND_PULSE",
+        "direction": "BUY",
+        "entry_price": 1.10,
+        "stop_loss": 1.09,
+        "take_profit": 1.12,
+        "timing_mode": TimingMode.BAR_CLOSE,
+        "status": CandidateStatus.READY,
+        "earliest_exec_at": now_ts - 5,
+        "latest_exec_at": now_ts + 600,
+        "sizing": {"lots": 0.01, "quantity": 0.01, "risk_usd": 50.0},
+    }
+
+    with patch(
+        "backend.services.signal_candidate_engine.is_venue_open",
+        return_value=False,
+    ), patch(
+        "backend.services.signal_candidate_engine.ctrader_service.place_order",
+    ) as mock_place:
+        res = await signal_candidate_engine.execute_candidate(sig_id, force=False)
+
+    assert res["success"] is False
+    assert res["skipped"] is True
+    assert "VENUE_CLOSED" in res["error"]
+    assert signal_candidate_engine.candidates[sig_id]["status"] == CandidateStatus.READY
+    mock_place.assert_not_called()
 
 
 def test_get_ready_signals_forex_only_excludes_crypto():

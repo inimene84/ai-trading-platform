@@ -47,6 +47,31 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _auto_resume_enabled() -> bool:
+    """Live cash defaults OFF; paper defaults ON.
+
+    Live requires SENTRY_AUTO_RESUME_ENABLED=true AND
+    SENTRY_AUTO_RESUME_LIVE_CONFIRM=I_UNDERSTAND. The watchdog container
+    cannot import backend.services, so this mirrors sentry_resume.auto_resume_policy.
+    """
+    raw_mode = os.getenv("TRADING_MODE", "").strip().lower()
+    if raw_mode not in {"backtest", "paper", "live"}:
+        paper_trading = os.getenv("PAPER_TRADING", "true").lower() == "true"
+        dry_run = os.getenv("DRY_RUN_ALL", "true").lower() == "true"
+        raw_mode = "paper" if (paper_trading or dry_run) else "live"
+
+    flag_raw = os.getenv("SENTRY_AUTO_RESUME_ENABLED")
+    flag = None if flag_raw is None or flag_raw.strip() == "" else (
+        flag_raw.strip().lower() in {"1", "true", "yes", "on"}
+    )
+    confirm = os.getenv("SENTRY_AUTO_RESUME_LIVE_CONFIRM", "").strip()
+    if raw_mode == "live":
+        return bool(flag) and confirm == "I_UNDERSTAND"
+    if flag is None:
+        return True
+    return flag
+
+
 async def _check_health(base_url: str) -> bool:
     url = f"{base_url.rstrip('/')}/health"
     try:
@@ -82,7 +107,9 @@ async def _trigger_emergency(base_url: str, token: str, reason: str) -> None:
                 f"Status: {state.get('status')}",
                 f"Orders: {cancel}",
                 "",
-                "Trading will auto-resume when backend recovers.",
+                "Auto-resume: paper defaults on; live cash requires "
+                "SENTRY_AUTO_RESUME_ENABLED=true and "
+                "SENTRY_AUTO_RESUME_LIVE_CONFIRM=I_UNDERSTAND.",
             ]
         )
     )
@@ -157,7 +184,7 @@ async def run() -> None:
     # 3x fired on ordinary backend restarts and cancelled Binance orders.
     fail_threshold = _env_int("SENTRY_FAIL_THRESHOLD", 6)
     cooldown_sec = _env_int("SENTRY_EMERGENCY_COOLDOWN_SEC", 300)
-    auto_resume = _env_bool("SENTRY_AUTO_RESUME_ENABLED", True)
+    auto_resume = _auto_resume_enabled()
     resume_after_sec = _env_int("SENTRY_RESUME_AFTER_SEC", 120)
     resume_health_checks = _env_int("SENTRY_RESUME_HEALTH_CHECKS", 6)
     startup_grace_sec = _env_int("SENTRY_STARTUP_GRACE_SEC", 120)
@@ -182,7 +209,7 @@ async def run() -> None:
             seen_healthy = True
             consecutive_failures = 0
             consecutive_healthy += 1
-            if auto_resume:
+            if _auto_resume_enabled():
                 await _try_auto_resume(
                     base_url,
                     token,
