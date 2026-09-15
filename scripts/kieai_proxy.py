@@ -356,14 +356,18 @@ def execute(body: dict) -> tuple[int, dict]:
     kind, url, model = resolve_route(req_model)
     api_key = OMNI_KEY if kind == "omni" else KIE_KEY
     status, data = post_kie(kind, url, model, body, api_key)
-    # Fable 5.1 is marketed on Kie but may still 400 until the slug is live.
-    if status >= 400 and model == "claude-fable-5-1":
-        status, data = post_kie("claude", f"{KIE_HOST}/claude/v1/messages", "claude-fable-5", body, KIE_KEY)
+    text = extract_text(kind, data if isinstance(data, dict) else {}) if status < 400 else ""
+    # Fable 5.1 is listed on Kie as coming soon; use documented Fable 5 if empty/4xx.
+    if canonical_model(req_model) == "claude-fable-5-1" and (status >= 400 or not text):
+        status, data = post_kie(
+            "claude", f"{KIE_HOST}/claude/v1/messages", "claude-fable-5", body, KIE_KEY
+        )
+        kind = "claude"
         model = "claude-fable-5"
+        text = extract_text(kind, data if isinstance(data, dict) else {}) if status < 400 else ""
     if status >= 400:
         err = data if isinstance(data, dict) else {"error": {"message": str(data)}}
         return status, err
-    text = extract_text(kind, data if isinstance(data, dict) else {})
     if not text:
         return 502, {"error": {"message": f"Empty Kie response for {model}", "type": "empty_response"}}
     return 200, openai_completion(req_model or model, text)
