@@ -214,6 +214,50 @@ def empirical_payoff_ratio(
     return max(0.5, min(avg_win / avg_loss_abs, 8.0))
 
 
+def artifact_gate(payload: Mapping[str, Any], *, allow_overfit: Optional[bool] = None) -> Dict[str, Any]:
+    """Re-evaluate a saved joblib/meta payload. Old PASS stamps are ignored."""
+    metrics = dict(payload.get("metrics") or {})
+    dsr = payload.get("dsr", metrics.get("deflated_sharpe_ratio"))
+    pbo = payload.get("pbo", metrics.get("prob_backtest_overfitting"))
+    if "deflated_sharpe_ratio" not in metrics and dsr is not None:
+        metrics["deflated_sharpe_ratio"] = dsr
+    if "prob_backtest_overfitting" not in metrics and pbo is not None:
+        metrics["prob_backtest_overfitting"] = pbo
+    for key in ("bullish_recall", "bearish_recall", "n_trials"):
+        if key not in metrics and payload.get(key) is not None:
+            metrics[key] = payload.get(key)
+    pt = payload.get("pt_mult", metrics.get("pt_mult"))
+    sl = payload.get("sl_mult", metrics.get("sl_mult"))
+    geo = payload.get("barrier_geometry") or {}
+    if pt is None:
+        pt = geo.get("tp_atr_mult")
+    if sl is None:
+        sl = geo.get("sl_atr_mult")
+    if allow_overfit is None:
+        allow_overfit = os.getenv("ML_GATE_OVERRIDE", "false").strip().lower() in ("1", "true", "yes", "on")
+    promo = evaluate_promotion(
+        metrics,
+        pt_mult=pt,
+        sl_mult=sl,
+        allow_overfit=allow_overfit,
+        require_geometry=pt is not None and sl is not None,
+    )
+    return {
+        "status": "PASS" if promo.ok else "FAIL",
+        "passed": promo.ok,
+        "dsr": promo.dsr,
+        "pbo": promo.pbo,
+        "bullish_recall": metrics.get("bullish_recall"),
+        "bearish_recall": metrics.get("bearish_recall"),
+        "n_trials": payload.get("n_trials", metrics.get("n_trials")),
+        "dsr_min": DSR_GATE,
+        "pbo_max": PBO_GATE,
+        "min_class_recall": MIN_CLASS_RECALL,
+        "reasons": [] if promo.ok else [promo.reason],
+        "override_active": bool(allow_overfit),
+    }
+
+
 def calculate_fractional_kelly(
     win_prob: float,
     payoff_ratio: float = STRATEGY_PAYOFF_RATIO,
@@ -248,6 +292,8 @@ def annotate_ml_prediction(payload: Dict[str, Any]) -> Dict[str, Any]:
         "prob_backtest_overfitting": payload.get("prob_backtest_overfitting", metrics.get("prob_backtest_overfitting")),
         "pt_mult": payload.get("pt_mult", metrics.get("pt_mult")),
         "sl_mult": payload.get("sl_mult", metrics.get("sl_mult")),
+        "bullish_recall": payload.get("bullish_recall", metrics.get("bullish_recall")),
+        "bearish_recall": payload.get("bearish_recall", metrics.get("bearish_recall")),
     }
     # Prefer nested metrics when top-level is absent.
     for key, value in list(nested.items()):

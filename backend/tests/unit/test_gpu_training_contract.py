@@ -138,3 +138,35 @@ def test_promotion_gate_min_class_recall_floor():
     )
     assert d.ok is False
     assert "bullish recall" in d.reason
+
+
+def test_artifact_gate_refuses_collapsed_btc_even_if_old_pass_stamp():
+    from promotion_gates import artifact_gate
+
+    payload = {
+        "gate": {"passed": True, "reasons": []},
+        "dsr": 1.0,
+        "pbo": 0.02,
+        "pt_mult": 5.5,
+        "sl_mult": 1.75,
+        "metrics": {
+            "deflated_sharpe_ratio": 1.0,
+            "prob_backtest_overfitting": 0.02,
+            "bullish_recall": 0.0,
+            "bearish_recall": 0.999,
+            "pt_mult": 5.5,
+            "sl_mult": 1.75,
+            "n_trials": 6,
+        },
+    }
+    gate = artifact_gate(payload)
+    assert gate["passed"] is False
+    assert gate["status"] == "FAIL"
+    assert any("collapsed" in r.lower() or "bullish recall" in r.lower() for r in gate["reasons"])
+
+
+def test_deploy_ref_wired_in_ssh_wrapper():
+    text = (ROOT / "scripts" / "ssh_vps_remote.sh").read_text(encoding="utf-8")
+    assert "DEPLOY_REF" in text
+    apply = (ROOT / "scripts" / "hostinger_vps_apply.sh").read_text(encoding="utf-8")
+    assert 'DEPLOY_REF="${DEPLOY_REF:-main}"' in apply

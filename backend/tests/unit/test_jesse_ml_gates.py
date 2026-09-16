@@ -140,3 +140,22 @@ def test_annotate_ml_prediction_fail_closes_overfit_model():
     assert out["promotion_ok"] is False
     assert out["signal"] == "NEUTRAL"
     assert "promotion gate" in out["error"]
+
+
+def test_annotate_ml_prediction_fail_closes_collapsed_recall():
+    payload = {
+        "status": "success",
+        "signal": "SELL",
+        "metrics": {
+            "deflated_sharpe_ratio": 1.0,
+            "prob_backtest_overfitting": 0.02,
+            "pt_mult": 5.5,
+            "sl_mult": 1.75,
+            "bullish_recall": 0.0,
+            "bearish_recall": 0.999,
+        },
+    }
+    out = annotate_ml_prediction(payload)
+    assert out["status"] == "error"
+    assert out["promotion_ok"] is False
+    assert out["signal"] == "NEUTRAL"

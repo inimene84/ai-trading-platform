@@ -237,6 +237,8 @@ def annotate_ml_prediction(payload: Dict[str, Any]) -> Dict[str, Any]:
         "prob_backtest_overfitting": payload.get("prob_backtest_overfitting", metrics.get("prob_backtest_overfitting")),
         "pt_mult": payload.get("pt_mult", metrics.get("pt_mult")),
         "sl_mult": payload.get("sl_mult", metrics.get("sl_mult")),
+        "bullish_recall": payload.get("bullish_recall", metrics.get("bullish_recall")),
+        "bearish_recall": payload.get("bearish_recall", metrics.get("bearish_recall")),
     }
     # Prefer nested metrics when top-level is absent.
     for key, value in list(nested.items()):

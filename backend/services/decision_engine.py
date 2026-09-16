@@ -21,6 +21,7 @@ from backend.services.jesse_ml_gates import (
     clip_kelly_for_thin_book,
     empirical_payoff_ratio,
 )
+from backend.services.jesse_bridge import jesse_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -553,7 +554,6 @@ class DecisionEngine:
         # 4e. Jesse Machine Learning Directional Consensus & Meta-Label Gate
         if self.enable_jesse_ml:
             try:
-                from backend.services.jesse_bridge import jesse_bridge
                 ml_res = await jesse_bridge.get_ml_prediction(symbol=symbol, timeframe="1h")
                 if ml_res.get("status") == "success":
                     ml_sig = ml_res.get("signal")

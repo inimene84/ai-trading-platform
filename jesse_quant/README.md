@@ -99,11 +99,18 @@ strategies/QuantumAIStrategy/__init__.py
 Then:
 
 ```bash
-./manage.sh auto-retrain-promote BTC-USDT 1h lightgbm
-./manage.sh backtest QuantumAIStrategy
+./manage.sh import-multi-asset
+./manage.sh import-universe 2025-01-01
 docker compose -f docker/docker-compose.yml restart jesse
+```
+
+From this repo (trading VPS SSH secrets, never commit them):
+
+```bash
+DEPLOY_REF=cursor/jesse-multi-asset-train-dc43 ./scripts/ssh_vps_remote.sh
+./scripts/jesse_live_sync.sh
 ```
 
 Rejected artifacts are written as `*.rejected.joblib` / `*.rejected.pt` and
 **do not** overwrite the production model. Inference refuses models that fail
-the promotion gate unless `JESSE_ML_ALLOW_OVERFIT=true`.
+the promotion gate unless `JESSE_ML_ALLOW_OVERFIT=true` / `ML_GATE_OVERRIDE=true`.

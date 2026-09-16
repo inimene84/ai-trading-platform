@@ -2,6 +2,7 @@
 # Run from Cursor Cloud Agent when SSH secrets are configured.
 # Required env: SSH_HOST, SSH_USER, SSH_PRIVATE_KEY (or SSH_PASSWORD)
 # Optional: SSH_PORT (default 22), PROJECT_DIR (default /root/ai-trading-platform-v3)
+# Optional: DEPLOY_REF (git branch or tag to deploy; default main)
 set -euo pipefail
 
 SSH_HOST="${SSH_HOST:-}"
@@ -12,6 +13,7 @@ fi
 SSH_USER="${SSH_USER:-root}"
 SSH_PORT="${SSH_PORT:-22}"
 PROJECT_DIR="${PROJECT_DIR:-/root/ai-trading-platform-v3}"
+DEPLOY_REF="${DEPLOY_REF:-main}"
 KEY_FILE="${TMPDIR:-/tmp}/vps_ssh_key_$$"
 
 cleanup() { rm -f "$KEY_FILE"; }
@@ -42,7 +44,7 @@ else
   exit 1
 fi
 
-REMOTE_CMD="cd ${PROJECT_DIR} && git fetch origin && git checkout main && git pull origin main && chmod +x scripts/hostinger_vps_apply.sh scripts/vps_realtime_watchdog.sh scripts/vps_remote_oneliner.sh 2>/dev/null; PROJECT_DIR=${PROJECT_DIR} ./scripts/hostinger_vps_apply.sh"
+REMOTE_CMD="cd ${PROJECT_DIR} && git fetch origin ${DEPLOY_REF} && git checkout ${DEPLOY_REF} && git pull origin ${DEPLOY_REF} && chmod +x scripts/hostinger_vps_apply.sh scripts/vps_realtime_watchdog.sh scripts/vps_remote_oneliner.sh 2>/dev/null; PROJECT_DIR=${PROJECT_DIR} DEPLOY_REF=${DEPLOY_REF} ./scripts/hostinger_vps_apply.sh"
 
 echo "Connecting to ${SSH_USER}@${SSH_HOST}:${SSH_PORT} ..."
 if [[ -n "${SSH_PASSWORD:-}" ]]; then

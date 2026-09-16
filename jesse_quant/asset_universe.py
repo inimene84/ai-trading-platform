@@ -158,6 +158,15 @@ def candle_filename(symbol: str, native_tf: str = "1h") -> str:
     return f"{normalize_symbol(symbol)}_{native_tf}.csv.gz"
 
 
+def candle_timeframe_candidates(requested: str) -> Tuple[str, ...]:
+    """Prefer 1m (resample) then native requested timeframe for Jesse Postgres."""
+    if requested == "1m":
+        return ("1m",)
+    if requested == "1h":
+        return ("1m", "1h")
+    return (requested, "1m")
+
+
 def classify_training_symbol(symbol: str) -> Optional[UserAssetClass]:
     """Map a ticker into the five training buckets. None = unknown, skip."""
     sym = (symbol or "").upper().replace("/", "").replace("-", "").strip()

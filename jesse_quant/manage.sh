@@ -35,8 +35,10 @@ show_help() {
     echo "  candles             List existing downloaded candlestick ranges"
     echo "  import-candles      Download historical candles for a specific pair"
     echo "                      Example: ./manage.sh import-candles 'Binance Perpetual Futures' 'BTC-USDT' '2024-01-01'"
-    echo "  import-universe     Batch download candles for top assets (SOL, BNB, XRP, LINK, AVAX)"
-    echo "                      Example: ./manage.sh import-universe 2024-01-01"
+    echo "  import-universe     Batch download 1m crypto candles via Jesse REST (BNB, XRP, LINK, AVAX, ...)"
+    echo "                      Example: ./manage.sh import-universe 2025-01-01"
+    echo "  import-multi-asset  Yahoo Finance 1h forex/metals/commodities/stocks into Jesse Postgres"
+    echo "                      Example: ./manage.sh import-multi-asset"
     echo "  optimize            Run Genetic Algorithm optimizer on a strategy (with DSR gate)"
     echo "                      Example: ./manage.sh optimize QuantumAIStrategy BTC-USDT"
     echo "  monte-carlo         Run Monte Carlo simulation on backtest results (true bootstrap)"
@@ -152,8 +154,17 @@ case "$1" in
         echo "[✓] Response: $RESP"
         ;;
     import-universe)
-        START_DATE="${2:-2024-01-01}"
+        START_DATE="${2:-2025-01-01}"
         python3 "$SCRIPT_DIR/import_universe.py" --start "$START_DATE"
+        ;;
+    import-multi-asset)
+        PYTHON_BIN="${JESSE_GPU_PYTHON:-python3}"
+        if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -q '^jesse-app$'; then
+            docker exec jesse-app python3 -c "import yfinance" 2>/dev/null || docker exec jesse-app pip install --no-cache-dir yfinance ccxt >/dev/null
+            docker exec jesse-app python3 /home/import_multi_asset.py ${2:-}
+        else
+            "$PYTHON_BIN" "$SCRIPT_DIR/import_multi_asset.py" ${2:-}
+        fi
         ;;
     gpu-inventory)
         PYTHON_BIN="${JESSE_GPU_PYTHON:-}"

@@ -41,6 +41,7 @@ from promotion_contract import (
     write_geometry,
 )
 from trial_registry import record_trials
+from asset_universe import candle_timeframe_candidates
 from promotion_gates import (
     DSR_GATE,
     PBO_GATE,
@@ -129,12 +130,27 @@ def load_candles_from_db(symbol: str = "BTC-USDT", timeframe: str = "1h") -> pd.
 
     query = (
         "SELECT timestamp, open, high, low, close, volume "
-        "FROM candle WHERE symbol = %s ORDER BY timestamp ASC"
+        "FROM candle WHERE symbol = %s AND timeframe = %s ORDER BY timestamp ASC"
     )
     t0 = time.time()
-    df = pd.read_sql(query, conn, params=(symbol,))
+    df = pd.DataFrame()
+    used_tf = "1m"
+    for tf in candle_timeframe_candidates(timeframe):
+        loaded = pd.read_sql(query, conn, params=(symbol, tf))
+        if len(loaded) > 0:
+            df = loaded
+            used_tf = tf
+            break
+    if len(df) == 0:
+        # Legacy rows
+        df = pd.read_sql(
+            "SELECT timestamp, open, high, low, close, volume FROM candle WHERE symbol = %s ORDER BY timestamp ASC",
+            conn,
+            params=(symbol,),
+        )
+        used_tf = "1m"
     conn.close()
-    print(f"    Loaded {len(df):,} 1m candles for {symbol} in {time.time()-t0:.2f}s")
+    print(f"    Loaded {len(df):,} {used_tf} candles for {symbol} in {time.time()-t0:.2f}s")
 
     if len(df) == 0:
         raise ValueError(f"No candles found in database for symbol {symbol}")
@@ -142,7 +158,7 @@ def load_candles_from_db(symbol: str = "BTC-USDT", timeframe: str = "1h") -> pd.
     df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df.set_index("datetime", inplace=True)
 
-    if timeframe != "1m":
+    if timeframe != "1m" and used_tf == "1m":
         return _resample_ohlcv(df, timeframe)
     return df
 
