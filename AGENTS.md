@@ -22,6 +22,7 @@ The VPS runs these Docker containers:
 - `vps-influxdb` - Time series DB
 - `vps-qdrant` - Vector DB
 - `grafana-*` - Monitoring
+- `n8n` - Workflows at `/docker/n8n` (`127.0.0.1:5678`). Assistant sandbox overlay: `docker-compose.sandbox.yml` (privileged runner, not published). Search: `http://ai-trading-searxng:8080`.
 
 ### Deployment
 

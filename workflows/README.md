@@ -52,7 +52,7 @@ chmod +x scripts/upgrade_n8n_vps.sh
 N8N_TARGET_VERSION=2.36.8 ./scripts/upgrade_n8n_vps.sh
 ```
 
-Stack lives at `/docker/n8n/docker-compose.yml`.
+Stack lives at `/docker/n8n/docker-compose.yml`. n8n Assistant sandbox (certs, API, privileged runner) is an overlay: `n8n/docker-compose.sandbox.yml`. Apply with `./scripts/apply_n8n_sandbox.sh`. Web search uses the existing SearXNG at `http://ai-trading-searxng:8080`, not a second copy. Do not migrate this instance to Postgres in place — SQLite holds live workflows.
 
 ## Building a forex-only scanner
 
