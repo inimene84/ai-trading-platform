@@ -8,3 +8,4 @@ lightgbm>=4.3
 pyarrow
 scipy
 psycopg2-binary
+yfinance

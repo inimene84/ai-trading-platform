@@ -68,6 +68,17 @@ if not os.path.exists(MODELS_DIR):
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 
+class TooFewEventsError(RuntimeError):
+    """Raised when QuantumAI-event sampling is below the trainer floor."""
+
+    def __init__(self, n_events: int, min_events: int) -> None:
+        self.n_events = int(n_events)
+        self.min_events = int(min_events)
+        super().__init__(
+            f"only {self.n_events} QuantumAI events (min {self.min_events})"
+        )
+
+
 def load_candles_from_path(path: str, symbol: str = "BTC-USDT", timeframe: str = "1h") -> pd.DataFrame:
     """Load OHLCV from parquet/csv (gzip ok) produced by a Jesse candle dump."""
     if not os.path.exists(path):
@@ -164,6 +175,8 @@ def prepare_dataset(
     max_holding: int = 24,
     forward_horizon: int = 6,
     threshold_pct: float = 0.75,
+    fallback_every_bar: bool = True,
+    min_events: int = 50,
 ) -> Tuple[pd.DataFrame, pd.Series, Optional[pd.Series], Optional[pd.Series]]:
     """
     Computes features and labels outcomes using either:
@@ -180,7 +193,9 @@ def prepare_dataset(
             f"[*] Applying Triple-Barrier Method on {len(events_idx):,} QuantumAI entry events: "
             f"PT={pt_mult}x ATR, SL={sl_mult}x ATR, Max Holding={max_holding} bars..."
         )
-        if len(events_idx) < 50:
+        if len(events_idx) < min_events:
+            if not fallback_every_bar:
+                raise TooFewEventsError(len(events_idx), min_events)
             print("[!] Too few strategy events; falling back to every-bar labeling")
             events_idx = None
         tb_df = apply_triple_barrier(

@@ -51,6 +51,10 @@ show_help() {
     echo "  gpu-inventory     Probe NVIDIA / CUDA / LightGBM device (GPU training node or host)"
     echo "  gpu-train         Train LightGBM+LSTM on dumped candles with live 5.5/1.75 geometry"
     echo "                      Example: ./manage.sh gpu-train BTC-USDT 1h both storage/candles/BTC-USDT_1m.csv.gz"
+    echo "  gpu-download-universe  Fetch public OHLCV for forex/metals/minerals/stocks/extra crypto"
+    echo "                      Example: ./manage.sh gpu-download-universe forex"
+    echo "  gpu-train-universe     Batch-train one or all asset classes (no every-bar fallback)"
+    echo "                      Example: ./manage.sh gpu-train-universe metals both"
     echo "  gpu-auto-retrain-promote  GPU retrain; refuse to promote if DSR/PBO/recall gates fail"
     echo "  train-ml            Train direction ML model (standard forward returns)"
     echo "                      Example: ./manage.sh train-ml BTC-USDT 1h lightgbm"
@@ -187,6 +191,39 @@ case "$1" in
             --timeframe "$TIMEFRAME" \
             --model "$MODEL" \
             --candles "$CANDLES" \
+            --pt-mult 5.5 \
+            --sl-mult 1.75
+        ;;
+    gpu-download-universe)
+        CLASS="${2:-all}"
+        PYTHON_BIN="${JESSE_GPU_PYTHON:-}"
+        if [ -z "$PYTHON_BIN" ] && [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+            PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+        fi
+        if [ -z "$PYTHON_BIN" ]; then
+            PYTHON_BIN="python3"
+        fi
+        echo "[*] Download OHLCV universe class=$CLASS"
+        "$PYTHON_BIN" "$SCRIPT_DIR/download_ohlcv.py" \
+            --asset-class "$CLASS" \
+            --out "$SCRIPT_DIR/storage/candles"
+        ;;
+    gpu-train-universe)
+        CLASS="${2:-all}"
+        MODEL="${3:-both}"
+        PYTHON_BIN="${JESSE_GPU_PYTHON:-}"
+        if [ -z "$PYTHON_BIN" ] && [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+            PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+        fi
+        if [ -z "$PYTHON_BIN" ]; then
+            PYTHON_BIN="python3"
+        fi
+        echo "[*] GPU universe train class=$CLASS model=$MODEL (5.5/1.75 ATR, fail-closed)"
+        "$PYTHON_BIN" "$SCRIPT_DIR/train_gpu.py" \
+            --asset-class "$CLASS" \
+            --candles-dir "$SCRIPT_DIR/storage/candles" \
+            --timeframe 1h \
+            --model "$MODEL" \
             --pt-mult 5.5 \
             --sl-mult 1.75
         ;;

@@ -23,7 +23,7 @@ fi
 echo "[*] Installing PyTorch CUDA 12.8 wheels (Blackwell / B200)"
 "$VENV/bin/pip" install --timeout 180 torch --index-url https://download.pytorch.org/whl/cu128
 echo "[*] Installing tabular ML stack"
-"$VENV/bin/pip" install --timeout 180 numpy pandas scikit-learn joblib "lightgbm>=4.3" pyarrow scipy psycopg2-binary
+"$VENV/bin/pip" install --timeout 180 numpy pandas scikit-learn joblib "lightgbm>=4.3" pyarrow scipy psycopg2-binary yfinance
 
 echo "[*] Device probe"
 "$VENV/bin/python" "$ROOT/gpu_device.py"

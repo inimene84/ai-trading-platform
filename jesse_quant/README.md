@@ -26,6 +26,9 @@ back to Jesse ML (`:9003`) only if the contract verdict is not `REJECT`.
 ./bootstrap_gpu.sh
 ./manage.sh gpu-inventory
 ./manage.sh gpu-train BTC-USDT 1h both storage/candles/BTC-USDT_1m.csv.gz
+./manage.sh gpu-download-universe all
+./manage.sh gpu-train-universe forex both
+./manage.sh gpu-train-universe all both
 ./manage.sh gpu-auto-retrain-promote BTC-USDT 1h both
 ```
 
@@ -36,12 +39,32 @@ GPU_SSH_HOST=... GPU_SSH_PORT=... GPU_SSH_USER=ubuntu GPU_SSH_PASSWORD=... \
   ./scripts/gpu_train_remote.sh inventory
 GPU_SSH_HOST=... GPU_SSH_PORT=... GPU_SSH_USER=ubuntu GPU_SSH_PASSWORD=... \
   ./scripts/gpu_train_remote.sh train BTC-USDT both
+GPU_SSH_HOST=... GPU_SSH_PORT=... GPU_SSH_USER=ubuntu GPU_SSH_PASSWORD=... \
+  ./scripts/gpu_train_remote.sh download all
+GPU_SSH_HOST=... GPU_SSH_PORT=... GPU_SSH_USER=ubuntu GPU_SSH_PASSWORD=... \
+  ./scripts/gpu_train_remote.sh train-universe forex both
 ```
 
 `gpu_device.py` prefers CUDA (PyTorch cu128 wheels cover Blackwell / B200).
 LightGBM uses `device=cuda` when the GPU probe succeeds and falls back to CPU
 if the CUDA booster cannot initialize. The LSTM meta-labeler trains with AMP
 on `cuda:0`.
+
+## Multi-asset universe
+
+`asset_universe.py` maps five buckets (crypto, forex, metals, minerals/commodities,
+stocks) onto tickers the platform already feeds. Minerals is WTI/Brent (`USOIL` /
+`UKOIL`) only — copper, NG, and industrial minerals are not wired and are not
+invented. Extra crypto beyond BTC/ETH/SOL uses public Binance klines; FX/metals/
+oil/equities use yfinance. GPU batch:
+
+```bash
+./manage.sh gpu-train-universe all both
+```
+
+Promotion stays fail-closed: DSR > 0.95, PBO < 0.30, both-class recall ≥ 10%,
+live 5.5 / 1.75 ATR geometry. QuantumAI-event sampling never falls back to
+every-bar labels on the GPU path. Too-few-event classes are reported and skipped.
 
 ## Promotion contract
 
