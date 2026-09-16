@@ -78,6 +78,8 @@ def test_jesse_and_finmem_routes_are_sensitive():
     assert is_sensitive_request(_req("POST", "/jesse/finmem/evaluate")) is True
     assert is_sensitive_request(_req("GET", "/jesse/ml-predict")) is True
     assert is_sensitive_request(_req("GET", "/api/jesse/status")) is True
+    assert is_sensitive_request(_req("GET", "/api/jesse/models")) is True
+    assert is_sensitive_request(_req("GET", "/api/jesse/promotion-status")) is True
 
 
 def test_jesse_unauthenticated_requests_blocked(monkeypatch):
@@ -99,6 +101,12 @@ def test_jesse_unauthenticated_requests_blocked(monkeypatch):
 
     r_predict = client.get("/jesse/ml-predict?symbol=BTC-USDT")
     assert r_predict.status_code == 401
+
+    r_models = client.get("/api/jesse/models")
+    assert r_models.status_code == 401
+
+    r_promo = client.get("/api/jesse/promotion-status")
+    assert r_promo.status_code == 401
 
     # Wrong token -> 403
     r_bad = client.post("/jesse/sync", json={}, headers={"X-API-Key": "wrong-key"})

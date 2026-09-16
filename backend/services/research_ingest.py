@@ -11,7 +11,7 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from backend.services.opensearch_client import opensearch_client
 

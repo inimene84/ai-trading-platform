@@ -1,0 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch
+numpy
+pandas
+scikit-learn
+joblib
+lightgbm>=4.3
+pyarrow
+scipy
+psycopg2-binary
+yfinance

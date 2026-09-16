@@ -65,3 +65,9 @@ scratch/
 secrets.*
 .secrets
 MEMORY.md
+
+# Jesse GPU training artifacts (stay on the VPS; never commit binaries or candles)
+jesse_quant/storage/
+jesse_quant/.venv/
+*.joblib
+*.rejected.pt

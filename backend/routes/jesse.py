@@ -6,11 +6,52 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Any, Dict, Optional
 
+from backend.ml.artifacts import default_artifact_dir
 from backend.ml.promotion_service import resolve_promotion
 from backend.services.jesse_bridge import jesse_bridge
 from backend.services.risk_config import get_risk_config
 
 router = APIRouter(tags=["Jesse Quant Engine"])
+
+# Rejected B200 training outputs stay on the VPS. Promotion-status reports
+# them only as documentation — never as a live model directory.
+GPU_ARTIFACTS_NOTE = (
+    "Rejected B200 training outputs stay under /root/gpu-artifacts/ on the VPS; "
+    "they are not live models. Point QTP_PROMOTION_ARTIFACT_DIR at a sealed "
+    "PROMOTE bundle only after gates pass. Do not copy rejected artifacts into "
+    "jesse-trading/storage/models."
+)
+
+
+def _promotion_status_payload() -> Dict[str, Any]:
+    """Read-only QTP promotion snapshot. Fail-closed when nothing is promoted."""
+    artifact_root = default_artifact_dir()
+    state = resolve_promotion(get_risk_config())
+    payload: Dict[str, Any] = {
+        "artifact_dir": str(artifact_root) if artifact_root is not None else None,
+        "gpu_artifacts_note": GPU_ARTIFACTS_NOTE,
+        "promoted": False,
+    }
+    if state is None:
+        payload.update({
+            "status": "unconfigured",
+            "verdict": None,
+            "reason": "no promotion artifacts loaded",
+            "failed_gate": None,
+            "warnings": [],
+            "details": {},
+        })
+        return payload
+    payload.update({
+        "status": "ok",
+        "verdict": state.verdict,
+        "reason": state.result.reason,
+        "failed_gate": state.result.failed_gate,
+        "warnings": state.result.warnings,
+        "details": state.result.details,
+        "promoted": state.verdict == "PROMOTE",
+    })
+    return payload
 
 
 class StrategySyncRequest(BaseModel):
@@ -72,23 +113,43 @@ class MLPredictionRequest(BaseModel):
 @router.get("/promotion-status")
 def get_promotion_status() -> Dict[str, Any]:
     """Read-only promotion contract verdict. Does not place orders or hit /trading/*."""
-    state = resolve_promotion(get_risk_config())
-    if state is None:
-        return {"status": "unconfigured", "verdict": None, "reason": "no promotion artifacts loaded"}
+    return _promotion_status_payload()
+
+
+async def _ml_models_payload() -> Dict[str, Any]:
+    """Sidecar health plus live promotion snapshot. Always JSON, never 404."""
+    models = await jesse_bridge.get_ml_models()
+    if not isinstance(models, dict):
+        models = {"status": "error", "error": str(models)}
+    promo = _promotion_status_payload()
+    available = models.get("available_models") or []
+    cached = models.get("cached_models") or []
+    rejected = models.get("rejected_models") or {}
     return {
-        "status": "ok",
-        "verdict": state.verdict,
-        "reason": state.result.reason,
-        "failed_gate": state.result.failed_gate,
-        "warnings": state.result.warnings,
-        "details": state.result.details,
+        **models,
+        "status": models.get("status") or "error",
+        "available_models": available,
+        "cached_models": cached,
+        "rejected_models": rejected,
+        "has_promoted_model": bool(promo.get("promoted")),
+        "promotion": promo,
     }
 
 
-@router.get("/ml-models")
+@router.get("/models", operation_id="get_jesse_models")
+async def get_jesse_models() -> Dict[str, Any]:
+    """Ops alias for `/ml-models` — list artifacts and promotion snapshot."""
+    return await _ml_models_payload()
+
+
+@router.get("/ml-models", operation_id="get_jesse_ml_models")
 async def get_ml_models() -> Dict[str, Any]:
-    """List available trained Machine Learning model artifacts and cache status."""
-    return await jesse_bridge.get_ml_models()
+    """List trained ML artifacts plus the live promotion snapshot.
+
+    Never implies a live model when the promotion contract is unconfigured
+    or REJECT.
+    """
+    return await _ml_models_payload()
 
 
 @router.get("/ml-predict")

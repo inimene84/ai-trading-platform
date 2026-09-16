@@ -10,12 +10,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/vps_ssh_hygiene.sh
 source "${SCRIPT_DIR}/lib/vps_ssh_hygiene.sh"
 
+DEPLOY_REF="${DEPLOY_REF:-main}"
+
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 if [ ! -f "$COMPOSE_FILE" ]; then
   COMPOSE_FILE="docker-compose.yml"
 fi
 
-echo "=== Hostinger VPS apply (main) ==="
+echo "=== Hostinger VPS apply (${DEPLOY_REF:-main}) ==="
 echo "Project: $PROJECT_DIR"
 echo "Compose: $COMPOSE_FILE"
 
@@ -29,10 +31,15 @@ echo "=== 0. SSH hygiene ==="
 vps_ssh_hygiene
 
 echo ""
-echo "=== 1. Git pull main ==="
-git fetch origin main
-git checkout main
-git pull origin main
+echo "=== 1. Git pull ${DEPLOY_REF:-main} ==="
+DEPLOY_REF="${DEPLOY_REF:-main}"
+git fetch origin "$DEPLOY_REF"
+if git show-ref --verify --quiet "refs/heads/${DEPLOY_REF}" || git show-ref --verify --quiet "refs/remotes/origin/${DEPLOY_REF}"; then
+  git checkout "$DEPLOY_REF"
+  git pull origin "$DEPLOY_REF"
+else
+  git checkout -B "$DEPLOY_REF" "origin/${DEPLOY_REF}"
+fi
 git log -1 --oneline
 
 echo ""

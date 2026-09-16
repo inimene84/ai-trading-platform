@@ -251,12 +251,39 @@ async def test_jesse_ml_gate_fail_closed_in_live_mode(ml_risk_config, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_jesse_ml_gate_fail_closed_when_promotion_blocked(ml_risk_config, monkeypatch):
+    """Live mode must veto when the Jesse model fails PBO/geometry promotion."""
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("JESSE_ML_GATE_ENABLED", "true")
+    engine = DecisionEngine(ml_risk_config)
+    engine.enable_kronos = False
+    engine.account_equity = 1000.0
+    engine.account_available = 1000.0
+    bars = _make_bars(50)
+
+    mock_signal = StrategySignal(symbol="BTCUSDC", signal="BUY", confidence=0.60, entry_price=bars[-1]["close"])
+    engine.strategy.generate_signal = MagicMock(return_value=mock_signal)
+    engine.regime_detector.detect = MagicMock(return_value=MagicMock(regime="TRENDING", weights=MagicMock(return_value={})))
+
+    blocked = {
+        "status": "error",
+        "error": "Jesse ML promotion gate: PBO 63.6% >= 30% gate",
+        "promotion_ok": False,
+        "signal": "NEUTRAL",
+    }
+    with patch("backend.services.jesse_bridge.jesse_bridge.get_ml_prediction", AsyncMock(return_value=blocked)):
+        decision = await engine.evaluate_symbol("BTCUSDC", bars, None, 0, [], False)
+        assert decision is None
+
+
+@pytest.mark.asyncio
 async def test_jesse_ml_kelly_clipping_below_30_partition_trades(ml_risk_config, monkeypatch):
     """When partition closed trades < 30, Kelly multiplier must be clipped to [0.25, 1.0]."""
     monkeypatch.setenv("TRADING_MODE", "live")
     monkeypatch.setenv("JESSE_ML_GATE_ENABLED", "true")
     engine = DecisionEngine(ml_risk_config)
     engine.enable_kronos = False
+    engine.promotion_state = None
     engine.account_equity = 1000.0
     engine.account_available = 1000.0
     bars = _make_bars(50)
