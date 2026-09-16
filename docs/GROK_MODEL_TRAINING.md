@@ -1,9 +1,20 @@
 # Jesse ML Model Training — Grok Agent Runbook
 
-Reproducible workflow for training, validating, and deploying Jesse ML direction models
-on the QuantumTrade VPS. Models gate live entries via DSR/PBO institutional thresholds.
+Train on the **Hostinger GPU node** (NVIDIA B200). Serve and trade on the
+CPU trading VPS. Do not train LightGBM/LSTM/Kronos on `SSH_HOST` — that box
+has no GPU (`nvidia-smi` missing, Kronos sidecar already on CPU).
 
-## Architecture
+## Two hosts
+
+| Role | What runs there | How Grok SSHes |
+|------|-----------------|----------------|
+| **GPU training node** | PyTorch cu128, `jesse_quant/train_gpu.py`, candle dumps, rejected/promoted artifacts | `GPU_SSH_HOST` / `GPU_SSH_USER=ubuntu` / `GPU_SSH_PORT=32408` / password or key |
+| **Trading VPS** (`srv1071801`) | Jesse Docker (`:9000/:9002/:9003`), QuantumTrade `:8001`, live risk | `SSH_HOST` / `SSH_USER=root` / `SSH_PRIVATE_KEY` port 22 |
+
+Remote dir on GPU: `/home/ubuntu/jesse-gpu`  
+Repo trainers: `jesse_quant/` (synced by `scripts/gpu_train_remote.sh`)
+
+## Architecture (trading VPS — inference only)
 
 | Service | Port | Purpose |
 |---------|------|---------|
@@ -14,6 +25,7 @@ on the QuantumTrade VPS. Models gate live entries via DSR/PBO institutional thre
 
 VPS Jesse repo: `/root/jesse-trading`  
 Model artifacts: `/root/jesse-trading/storage/models/` (mounted at `/home/storage/models` in container)
+Kronos sidecar: `ai-trading-kronos` with `KRONOS_DEVICE=cpu` — fine-tune on GPU, do not flip this container to CUDA on the trading VPS.
 
 ## Gate Thresholds (fail-closed in LIVE mode)
 
@@ -30,7 +42,20 @@ Triple-barrier geometry (aligned with live RiskConfig):
 
 ## Required Environment Variables
 
-### Local / Cloud Agent (SSH to VPS)
+### GPU node (required for training)
+
+Add these as Cloud Agent secrets. Never commit host, password, or key.
+
+```bash
+export GPU_SSH_HOST="<hostinger-gpu-host-or-ip>"
+export GPU_SSH_USER="ubuntu"
+export GPU_SSH_PORT=32408
+export GPU_SSH_PASSWORD="<gpu-instance-password>"   # or GPU_SSH_PRIVATE_KEY
+export GPU_REMOTE_DIR="/home/ubuntu/jesse-gpu"
+export JESSE_TRAIN_DEVICE=auto
+```
+
+### Trading VPS (inference, candle dump, backtest)
 
 ```bash
 export SSH_HOST="<vps-hostname-or-ip>"
@@ -70,7 +95,60 @@ ssh root@$SSH_HOST "cd /root/jesse-trading && ./manage.sh import-candles 'Binanc
 
 ---
 
-## Step-by-Step: Train on VPS (recommended)
+## Step-by-Step: Train on Hostinger GPU (required)
+
+The B200 is already bootstrapped (`/home/ubuntu/jesse-gpu/.venv`, PyTorch 2.11+cu128).
+LSTM trains on `cuda:0`. LightGBM PyPI wheels fall back to CPU unless rebuilt with `-DUSE_CUDA=1`.
+
+### 1. Probe GPU
+
+```bash
+./scripts/gpu_train_remote.sh inventory
+# expect: NVIDIA B200, torch cuda.is_available True
+```
+
+### 2. Sync trainers + bootstrap (first run or after code changes)
+
+```bash
+./scripts/gpu_train_remote.sh bootstrap
+```
+
+### 3. Train at live geometry (5.5 / 1.75 ATR)
+
+```bash
+./scripts/gpu_train_remote.sh train BTC-USDT both
+./scripts/gpu_train_remote.sh train ETH-USDT both
+./scripts/gpu_train_remote.sh train SOL-USDT both
+./scripts/gpu_train_remote.sh status
+```
+
+Promotion writes production `*.joblib` / `*.pt` **only** when DSR ≥ 0.95, PBO < 30%, and both-class recall ≥ 10%. Failures land as `*.rejected.*` — do not copy those to the trading VPS.
+
+On the GPU node directly:
+
+```bash
+cd /home/ubuntu/jesse-gpu
+./manage.sh gpu-inventory
+./manage.sh gpu-train BTC-USDT 1h both storage/candles/BTC-USDT_1m.csv.gz
+./manage.sh gpu-auto-retrain-promote BTC-USDT 1h both
+```
+
+### 4. Copy a promoted artifact to Jesse ML (trading VPS)
+
+Only after `contract.json` verdict is not `REJECT`:
+
+```bash
+# from GPU node → trading VPS (run on an operator machine with both SSH sessions)
+scp -P "$GPU_SSH_PORT" ubuntu@$GPU_SSH_HOST:/home/ubuntu/jesse-gpu/storage/models/BTC-USDT_1h_lstm.pt \
+  root@$SSH_HOST:/root/jesse-trading/storage/models/
+ssh root@$SSH_HOST "cd /root/jesse-trading && ./manage.sh clear-cache"
+```
+
+---
+
+## Fallback: Train on trading VPS CPU (not preferred)
+
+Use only if the GPU node is down. Same DSR/PBO gates; much slower; Kronos stays CPU.
 
 ### 1. Verify Jesse stack
 
@@ -270,7 +348,12 @@ Verify: `docker exec jesse-app python3 -c "import os,psycopg2; ..."` (see runboo
 ## Quick Reference Commands
 
 ```bash
-# Reset trials, then train all three symbols
+# GPU (preferred)
+./scripts/gpu_train_remote.sh inventory
+./scripts/gpu_train_remote.sh bootstrap
+./scripts/gpu_train_remote.sh train BTC-USDT both
+
+# CPU trading VPS (fallback only)
 ./scripts/jesse_vps_reset_trials.sh --all
 for S in BTC-USDT ETH-USDT SOL-USDT; do
   RUN_BACKTEST=false ./scripts/jesse_vps_train.sh "$S" 1h lightgbm || echo "FAIL: $S"

@@ -64,3 +64,10 @@ scratch/
 *.key
 secrets.*
 .secrets
+MEMORY.md
+
+# Jesse GPU training artifacts (stay on the Hostinger GPU node; never commit)
+jesse_quant/storage/
+jesse_quant/.venv/
+*.joblib
+*.rejected.pt
