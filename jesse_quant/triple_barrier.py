@@ -19,7 +19,7 @@ def get_daily_volatility(close: pd.Series, lookback: int = 50) -> pd.Series:
     df0 = pd.Series(close.index[df0 - 1], index=close.index[close.shape[0] - df0.shape[0]:])
     df0 = close.loc[df0.index] / close.loc[df0.values].values - 1.0  # Daily returns
     df0 = df0.ewm(span=lookback).std()
-    return df0.fillna(method="bfill")
+    return df0.bfill()
 
 
 def get_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -138,6 +138,28 @@ def apply_triple_barrier(
 
     out_df = pd.DataFrame(out).set_index("datetime")
     return out_df
+
+
+def realized_payoff_stats(returns: Union[np.ndarray, pd.Series]) -> Dict[str, float]:
+    """Win/loss payoff stats used by the promotion tests and Kelly fallback."""
+    arr = np.asarray(returns, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    wins = arr[arr > 0]
+    losses = arr[arr < 0]
+    n_wins = int(len(wins))
+    n_losses = int(len(losses))
+    avg_win = float(wins.mean()) if n_wins else 0.0
+    avg_loss_abs = float(np.abs(losses).mean()) if n_losses else 0.0
+    payoff = (avg_win / avg_loss_abs) if avg_loss_abs > 0 else 0.0
+    return {
+        "n": int(len(arr)),
+        "n_wins": n_wins,
+        "n_losses": n_losses,
+        "avg_win": avg_win,
+        "avg_loss_abs": avg_loss_abs,
+        "payoff_ratio": float(payoff),
+        "win_rate": float(n_wins / len(arr)) if len(arr) else 0.0,
+    }
 
 
 def compute_sample_uniqueness(df_events: pd.DataFrame, total_bars_index: pd.Index) -> pd.Series:

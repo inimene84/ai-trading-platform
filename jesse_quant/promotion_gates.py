@@ -14,16 +14,28 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
+try:
+    from barrier_config import DSR_MIN as _DSR_MIN
+    from barrier_config import PBO_MAX as _PBO_MAX
+    from barrier_config import SL_ATR_MULT as _SL_ATR
+    from barrier_config import TP_ATR_MULT as _TP_ATR
+except ImportError:
+    _SL_ATR = 1.75
+    _TP_ATR = 5.5
+    _DSR_MIN = 0.95
+    _PBO_MAX = 0.30
+
 # Live strategy geometry (jesse4 / optimizer-confirmed).
-STRATEGY_SL_ATR = 1.75
-STRATEGY_PT_ATR = 5.5
+STRATEGY_SL_ATR = float(_SL_ATR)
+STRATEGY_PT_ATR = float(_TP_ATR)
 STRATEGY_PAYOFF_RATIO = STRATEGY_PT_ATR / STRATEGY_SL_ATR  # ~3.14
 
-DSR_GATE = 0.95
-PBO_GATE = 0.30
+DSR_GATE = float(_DSR_MIN)
+PBO_GATE = float(_PBO_MAX)
 KELLY_FRACTION = 0.25
 KELLY_BASELINE = 0.125  # quarter-Kelly at 55% win / 2:1 payoff
 MIN_CLOSED_TRADES_FOR_EMPIRICAL_B = 30
+MIN_CLASS_RECALL = 0.10
 
 
 @dataclass(frozen=True)
@@ -106,6 +118,30 @@ def evaluate_promotion(
             reason=(
                 f"collapsed classifier (bullish recall {bullish_recall:.1%}, "
                 f"bearish recall {bearish_recall:.1%}) — would veto every BUY"
+            ),
+            dsr=dsr,
+            pbo=pbo,
+            pt_mult=pt,
+            sl_mult=sl,
+        )
+    if bullish_recall is not None and bullish_recall < MIN_CLASS_RECALL:
+        return PromotionDecision(
+            ok=False,
+            reason=(
+                f"insufficient bullish recall {bullish_recall:.1%} "
+                f"< {MIN_CLASS_RECALL:.0%} both-class floor"
+            ),
+            dsr=dsr,
+            pbo=pbo,
+            pt_mult=pt,
+            sl_mult=sl,
+        )
+    if bearish_recall is not None and bearish_recall < MIN_CLASS_RECALL:
+        return PromotionDecision(
+            ok=False,
+            reason=(
+                f"insufficient fail-class recall {bearish_recall:.1%} "
+                f"< {MIN_CLASS_RECALL:.0%} both-class floor"
             ),
             dsr=dsr,
             pbo=pbo,

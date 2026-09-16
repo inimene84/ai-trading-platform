@@ -48,7 +48,10 @@ show_help() {
     echo "Institutional Machine Learning & MLOps:"
     echo "  train-tb-ml         Train Triple-Barrier calibrated model (PurgedKFold + Uniqueness weights)"
     echo "                      Example: ./manage.sh train-tb-ml BTC-USDT 1h lightgbm 5.5 1.75"
-    echo "  auto-retrain-promote Retrain at live 5.5/1.75 ATR geometry; refuse to promote if DSR/PBO fail"
+    echo "  gpu-inventory     Probe NVIDIA / CUDA / LightGBM device (GPU training node or host)"
+    echo "  gpu-train         Train LightGBM+LSTM on dumped candles with live 5.5/1.75 geometry"
+    echo "                      Example: ./manage.sh gpu-train BTC-USDT 1h both storage/candles/BTC-USDT_1m.csv.gz"
+    echo "  gpu-auto-retrain-promote  GPU retrain; refuse to promote if DSR/PBO/recall gates fail"
     echo "  train-ml            Train direction ML model (standard forward returns)"
     echo "                      Example: ./manage.sh train-ml BTC-USDT 1h lightgbm"
     echo "  predict-ml          Run ML direction prediction via REST microservice"
@@ -147,6 +150,75 @@ case "$1" in
     import-universe)
         START_DATE="${2:-2024-01-01}"
         python3 "$SCRIPT_DIR/import_universe.py" --start "$START_DATE"
+        ;;
+    gpu-inventory)
+        PYTHON_BIN="${JESSE_GPU_PYTHON:-}"
+        if [ -z "$PYTHON_BIN" ] && [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+            PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+        fi
+        if command -v nvidia-smi >/dev/null 2>&1; then
+            nvidia-smi
+        else
+            echo "[!] nvidia-smi not on PATH"
+        fi
+        if [ -n "$PYTHON_BIN" ]; then
+            "$PYTHON_BIN" "$SCRIPT_DIR/gpu_device.py"
+        elif command -v docker >/dev/null 2>&1; then
+            docker exec jesse-app python3 /home/gpu_device.py || echo "[!] gpu_device.py not mounted in jesse-app"
+        else
+            python3 "$SCRIPT_DIR/gpu_device.py"
+        fi
+        ;;
+    gpu-train)
+        SYMBOL="${2:-BTC-USDT}"
+        TIMEFRAME="${3:-1h}"
+        MODEL="${4:-both}"
+        CANDLES="${5:-$SCRIPT_DIR/storage/candles/${SYMBOL}_1m.csv.gz}"
+        PYTHON_BIN="${JESSE_GPU_PYTHON:-}"
+        if [ -z "$PYTHON_BIN" ] && [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+            PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+        fi
+        if [ -z "$PYTHON_BIN" ]; then
+            PYTHON_BIN="python3"
+        fi
+        echo "[*] GPU train $SYMBOL $TIMEFRAME model=$MODEL candles=$CANDLES"
+        "$PYTHON_BIN" "$SCRIPT_DIR/train_gpu.py" \
+            --symbol "$SYMBOL" \
+            --timeframe "$TIMEFRAME" \
+            --model "$MODEL" \
+            --candles "$CANDLES" \
+            --pt-mult 5.5 \
+            --sl-mult 1.75
+        ;;
+    gpu-auto-retrain-promote)
+        SYMBOL="${2:-BTC-USDT}"
+        TIMEFRAME="${3:-1h}"
+        MODEL="${4:-both}"
+        CANDLES="${5:-$SCRIPT_DIR/storage/candles/${SYMBOL}_1m.csv.gz}"
+        PYTHON_BIN="${JESSE_GPU_PYTHON:-}"
+        if [ -z "$PYTHON_BIN" ] && [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+            PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
+        fi
+        if [ -z "$PYTHON_BIN" ]; then
+            PYTHON_BIN="python3"
+        fi
+        echo "[*] GPU auto-retrain with live 5.5/1.75 ATR geometry and DSR/PBO promotion gates..."
+        set +e
+        "$PYTHON_BIN" "$SCRIPT_DIR/train_gpu.py" \
+            --symbol "$SYMBOL" \
+            --timeframe "$TIMEFRAME" \
+            --model "$MODEL" \
+            --candles "$CANDLES" \
+            --pt-mult 5.5 \
+            --sl-mult 1.75
+        PROMOTE_RC=$?
+        set -e
+        if [ "$PROMOTE_RC" -ne 0 ]; then
+            echo "[!] Promotion gate failed (exit $PROMOTE_RC) — production artifact unchanged"
+            exit "$PROMOTE_RC"
+        fi
+        echo "[*] Reloading inference cache if local ML engine is up..."
+        curl -s -X POST "http://127.0.0.1:9003/cache/clear" | jq . || true
         ;;
     train-tb-ml)
         SYMBOL="${2:-BTC-USDT}"

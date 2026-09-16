@@ -17,7 +17,6 @@ from typing import Dict, Any, Tuple, Optional
 import joblib
 import numpy as np
 import pandas as pd
-import psycopg2
 from sklearn.metrics import classification_report, accuracy_score, precision_score
 from sklearn.preprocessing import RobustScaler
 from sklearn.pipeline import Pipeline
@@ -25,10 +24,23 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
 from lightgbm import LGBMClassifier
 
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None  # type: ignore[assignment]
+
 from ml_features import compute_features_df, FEATURE_NAMES
 from validation_metrics import PurgedKFold, deflated_sharpe_ratio, probability_of_backtest_overfitting, calculate_sharpe_ratio
 from triple_barrier import apply_triple_barrier, compute_sample_uniqueness
 from feature_schema import FEATURE_HASH
+from gpu_device import detect_training_device, lightgbm_device_kwargs
+from promotion_contract import (
+    SPEC_VERSION,
+    default_geometry,
+    evaluate_contract,
+    write_geometry,
+)
+from trial_registry import record_trials
 from promotion_gates import (
     DSR_GATE,
     PBO_GATE,
@@ -45,15 +57,55 @@ DB_USER = os.getenv("POSTGRES_USERNAME", "jesse_user")
 DB_PASS = os.getenv("POSTGRES_PASSWORD", "")
 DB_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
 
-MODELS_DIR = "/root/jesse-trading/storage/models"
+MODELS_DIR = os.getenv("JESSE_MODELS_DIR", "")
+if not MODELS_DIR:
+    MODELS_DIR = "/root/jesse-trading/storage/models"
 if not os.path.exists(MODELS_DIR):
-    # If running inside docker container where root is /home:
-    MODELS_DIR = "/home/storage/models" if os.path.exists("/home/storage") else "storage/models"
+    if os.path.exists("/home/storage"):
+        MODELS_DIR = "/home/storage/models"
+    else:
+        MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage", "models")
 os.makedirs(MODELS_DIR, exist_ok=True)
+
+
+def load_candles_from_path(path: str, symbol: str = "BTC-USDT", timeframe: str = "1h") -> pd.DataFrame:
+    """Load OHLCV from parquet/csv (gzip ok) produced by a Jesse candle dump."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+    if path.endswith(".parquet"):
+        df = pd.read_parquet(path)
+    else:
+        df = pd.read_csv(path, compression="infer")
+    if "timestamp" not in df.columns:
+        raise ValueError(f"{path} missing timestamp column")
+    df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    df.set_index("datetime", inplace=True)
+    print(f"    Loaded {len(df):,} rows from {path} for {symbol}")
+    if timeframe != "1m":
+        return _resample_ohlcv(df, timeframe)
+    return df
+
+
+def _resample_ohlcv(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    rule_map = {"5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "1d": "1d"}
+    resample_rule = rule_map.get(timeframe, timeframe)
+    df_resampled = df.resample(resample_rule).agg(
+        {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+    ).dropna()
+    print(f"    Resampled to {len(df_resampled):,} {timeframe} candles ({df_resampled.index.min().date()} to {df_resampled.index.max().date()})")
+    return df_resampled
 
 
 def load_candles_from_db(symbol: str = "BTC-USDT", timeframe: str = "1h") -> pd.DataFrame:
     """Load 1m candles from PostgreSQL and resample to target timeframe."""
+    if psycopg2 is None:
+        raise RuntimeError("psycopg2 is not installed — pass --candles PATH on the GPU node")
     if not DB_PASS:
         raise RuntimeError("POSTGRES_PASSWORD is not set — refusing to connect")
     conn = psycopg2.connect(
@@ -80,19 +132,7 @@ def load_candles_from_db(symbol: str = "BTC-USDT", timeframe: str = "1h") -> pd.
     df.set_index("datetime", inplace=True)
 
     if timeframe != "1m":
-        rule_map = {"5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "1d": "1d"}
-        resample_rule = rule_map.get(timeframe, timeframe)
-        df_resampled = df.resample(resample_rule).agg(
-            {
-                "open": "first",
-                "high": "max",
-                "low": "min",
-                "close": "last",
-                "volume": "sum",
-            }
-        ).dropna()
-        print(f"    Resampled to {len(df_resampled):,} {timeframe} candles ({df_resampled.index.min().date()} to {df_resampled.index.max().date()})")
-        return df_resampled
+        return _resample_ohlcv(df, timeframe)
     return df
 
 
@@ -222,7 +262,7 @@ def _save_trial_ledger(cumulative_trials: int) -> None:
         json.dump({"cumulative_trials": int(cumulative_trials)}, fh)
 
 
-def _make_clf(model_type: str, params: Optional[Dict[str, Any]] = None):
+def _make_clf(model_type: str, params: Optional[Dict[str, Any]] = None, device_kwargs: Optional[Dict[str, Any]] = None):
     if model_type == "lightgbm":
         cfg = {
             "n_estimators": 120,
@@ -238,6 +278,8 @@ def _make_clf(model_type: str, params: Optional[Dict[str, Any]] = None):
             "random_state": 42,
             "verbose": -1,
         }
+        if device_kwargs:
+            cfg.update(device_kwargs)
         if params:
             cfg.update(params)
         return LGBMClassifier(**cfg)
@@ -259,8 +301,14 @@ def train_model(
     test_size: float = 0.20,
     pt_mult: float = STRATEGY_PT_ATR,
     sl_mult: float = STRATEGY_SL_ATR,
+    symbol: str = "BTC-USDT",
+    timeframe: str = "1h",
 ) -> Tuple[Pipeline, Dict[str, Any]]:
     """Train with a hyperparameter grid so DSR/PBO see the true trial count."""
+    device = detect_training_device()
+    device_kwargs = lightgbm_device_kwargs(device) if model_type == "lightgbm" else {}
+    print(f"[*] Training device: {device.kind} ({device.name}) lightgbm={device.lightgbm_device}")
+
     split_idx = int(len(X) * (1.0 - test_size))
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
@@ -276,14 +324,27 @@ def train_model(
     holdout_columns = []
     trial_sharpes = []
     fitted = []
+    used_device_kwargs = dict(device_kwargs)
 
     print(f"[*] Evaluating {len(grid)} candidate configurations for CPCV/PBO matrix...")
     for i, params in enumerate(grid, 1):
-        clf = _make_clf(model_type, params)
-        if w_train is not None and model_type in ("lightgbm", "random_forest"):
-            clf.fit(X_train_s, y_train, sample_weight=w_train)
-        else:
-            clf.fit(X_train_s, y_train)
+        try:
+            clf = _make_clf(model_type, params, used_device_kwargs)
+            if w_train is not None and model_type in ("lightgbm", "random_forest"):
+                clf.fit(X_train_s, y_train, sample_weight=w_train)
+            else:
+                clf.fit(X_train_s, y_train)
+        except Exception as exc:
+            if used_device_kwargs:
+                print(f"[!] GPU LightGBM failed ({exc}); falling back to CPU for remaining trials")
+                used_device_kwargs = {}
+                clf = _make_clf(model_type, params, used_device_kwargs)
+                if w_train is not None and model_type in ("lightgbm", "random_forest"):
+                    clf.fit(X_train_s, y_train, sample_weight=w_train)
+                else:
+                    clf.fit(X_train_s, y_train)
+            else:
+                raise
         preds = clf.predict(X_test_s)
         pred_signal = np.where(preds == 1, 1.0, -1.0)
         actual_signal = np.where(y_test.to_numpy() == 1, 1.0, -1.0)
@@ -304,7 +365,9 @@ def train_model(
         med_rank = 1.0
 
     historical = _load_trial_ledger()
-    n_trials = historical + len(grid)
+    scope = f"ml:{symbol}:{timeframe}"
+    n_trials = record_trials(scope, len(grid), note="lightgbm_grid")
+    n_trials = max(n_trials, historical + len(grid))
     _save_trial_ledger(n_trials)
 
     var_sharpe = float(np.var(trial_sharpes, ddof=1)) if len(trial_sharpes) > 1 else None
@@ -316,7 +379,7 @@ def train_model(
 
     print(f"[*] Best trial #{best_idx + 1} holdout Sharpe={holdout_sr:.3f}; n_trials={n_trials} (ledger+grid)")
 
-    base_clf = _make_clf(model_type, best_params)
+    base_clf = _make_clf(model_type, best_params, used_device_kwargs)
     calibrated_clf = CalibratedClassifierCV(estimator=base_clf, method="isotonic", cv=3)
     print(f"[*] Fitting final {model_type} pipeline with Isotonic Probability Calibration...")
     if w_train is not None and model_type in ("lightgbm", "random_forest"):
@@ -359,6 +422,12 @@ def train_model(
         "bearish_precision": float(report.get("0", report.get("2", {})).get("precision", 0)),
         "bearish_recall": float(report.get("0", report.get("2", {})).get("recall", 0)),
         "feature_importances": importances,
+        "n_events": int(len(X)),
+        "spec_version": SPEC_VERSION,
+        "feature_schema_hash": FEATURE_HASH,
+        "used_raw_n_as_effective": False,
+        "device": device.to_dict(),
+        "lightgbm_device": used_device_kwargs.get("device", "cpu"),
     }
 
     promotion = evaluate_promotion(metrics, pt_mult=pt_mult, sl_mult=sl_mult)
@@ -396,8 +465,12 @@ def main():
     parser.add_argument("--holding", type=int, default=24, help="Triple-barrier maximum holding period in bars")
     parser.add_argument("--horizon", type=int, default=6, help="Fixed return forward horizon in bars (default: 6)")
     parser.add_argument("--threshold", type=float, default=0.75, help="Fixed return threshold pct (default: 0.75)")
+    parser.add_argument("--candles", default="", help="Parquet/CSV path (GPU node). If empty, load from Postgres.")
+    parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"], help="Training device preference")
     parser.add_argument("--force-promote", action="store_true", help="Overwrite production artifact even if DSR/PBO gates fail")
     args = parser.parse_args()
+    if args.device != "auto":
+        os.environ["JESSE_TRAIN_DEVICE"] = args.device
 
     print("=========================================================")
     print("         JESSE QUANT MACHINE LEARNING TRAINER            ")
@@ -409,7 +482,10 @@ def main():
     print(f"Feature Hash:  {FEATURE_HASH}")
     print("=========================================================")
 
-    df = load_candles_from_db(args.symbol, args.timeframe)
+    if args.candles:
+        df = load_candles_from_path(args.candles, args.symbol, args.timeframe)
+    else:
+        df = load_candles_from_db(args.symbol, args.timeframe)
     X, y, sample_weights, samples_info_sets = prepare_dataset(
         df,
         labeling_mode=args.labeling,
@@ -427,6 +503,8 @@ def main():
         model_type=args.model,
         pt_mult=args.pt_mult,
         sl_mult=args.sl_mult,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
     )
 
     # Save model artifact with MLOps metadata
@@ -460,6 +538,35 @@ def main():
 
     joblib.dump(save_payload, model_path)
     print(f"\n[{'✓' if promoted else '!'}] Model pipeline saved to: {model_path}")
+
+    run_dir = os.path.join(MODELS_DIR, "runs", datetime.utcnow().strftime("%Y%m%dT%H%M%SZ") + f"_{norm_symbol}_{args.timeframe}_{args.model}")
+    os.makedirs(run_dir, exist_ok=True)
+    geo = default_geometry()
+    write_geometry(os.path.join(run_dir, "geometry.json"), geo)
+    metrics_payload = {
+        "spec_version": SPEC_VERSION,
+        "symbol": args.symbol,
+        "timeframe": args.timeframe,
+        "model_type": args.model,
+        "feature_schema_hash": FEATURE_HASH,
+        "pt_mult": args.pt_mult,
+        "sl_mult": args.sl_mult,
+        **metrics,
+    }
+    with open(os.path.join(run_dir, "metrics.json"), "w", encoding="utf-8") as fh:
+        json.dump(metrics_payload, fh, indent=2, default=str)
+    contract = evaluate_contract(
+        geo,
+        metrics_payload,
+        live_geometry=geo,
+        promote_requested=False,
+        holdout_spent=False,
+        holdout_pass=False,
+    )
+    with open(os.path.join(run_dir, "contract.json"), "w", encoding="utf-8") as fh:
+        json.dump(contract.to_dict(), fh, indent=2)
+    print(f"[*] Contract verdict: {contract.verdict} ({contract.code}) — {contract.reason}")
+    print(f"[*] Run artifacts: {run_dir}")
 
     meta_name = f"{norm_symbol}_{args.timeframe}_{args.model}_meta.json"
     if not promoted:

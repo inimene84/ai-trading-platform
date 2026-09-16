@@ -1,0 +1,38 @@
+{
+  "spec_version": "1.0.0",
+  "strategy_id": "QuantumAIStrategy",
+  "triple_barrier": {
+    "sl_atr_mult": 1.75,
+    "pt_atr_mult": 5.5,
+    "atr_period": 14,
+    "vertical_timeout_bars": 48
+  },
+  "bar": {
+    "timeframe": "1h",
+    "primary_type": "time",
+    "bars_per_year": 8760
+  },
+  "costs": {
+    "assume_fill": "taker",
+    "fee_bps_per_side": 6.0,
+    "base_slippage": 0.0003,
+    "funding_rate_8h": 0.0001,
+    "funding_interval_hours": 8
+  },
+  "gates": {
+    "dsr_min": 0.95,
+    "pbo_max": 0.30,
+    "min_class_recall": 0.10,
+    "min_trades": 80,
+    "min_net_sharpe_after_costs": 0.0
+  },
+  "live": {
+    "p_win_min": 0.45,
+    "width_max": 0.50
+  },
+  "validation": {
+    "purge_horizon": 48,
+    "embargo_fraction": 0.01,
+    "cpcv_n_splits": 16
+  }
+}

@@ -249,6 +249,9 @@ def health():
         "canonical_feature_hash": FEATURE_HASH,
         "cached_models": list(_MODEL_CACHE.keys()),
         "available_models": sorted(list(set(available_models))),
+        "production_models": sorted(
+            [m for m in set(available_models) if ".rejected." not in m and not m.endswith(".rejected.pt")]
+        ),
     }
 
 

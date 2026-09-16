@@ -1,0 +1,19 @@
+{
+  "spec_version": "1.0.0",
+  "symbol": "BTC-USDT",
+  "timeframe": "1h",
+  "note": "Example REJECT bundle from the 2026-09-16 GPU run. Not a live model.",
+  "deflated_sharpe_ratio": 0.0,
+  "prob_backtest_overfitting": 0.592,
+  "pt_mult": 5.5,
+  "sl_mult": 1.75,
+  "n_grid": 6,
+  "n_trials": 41,
+  "used_raw_n_as_effective": false,
+  "bullish_recall": 0.00813,
+  "bearish_recall": 0.96887,
+  "n_events": 1898,
+  "holdout_sharpe": 4.002,
+  "promotion_ok": false,
+  "advisory_verdict": "REJECT"
+}

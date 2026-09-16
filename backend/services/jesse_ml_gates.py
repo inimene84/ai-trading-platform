@@ -24,6 +24,7 @@ PBO_GATE = 0.30
 KELLY_FRACTION = 0.25
 KELLY_BASELINE = 0.125  # quarter-Kelly at 55% win / 2:1 payoff
 MIN_CLOSED_TRADES_FOR_EMPIRICAL_B = 30
+MIN_CLASS_RECALL = 0.10
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,30 @@ def evaluate_promotion(
             reason=(
                 f"collapsed classifier (bullish recall {bullish_recall:.1%}, "
                 f"bearish recall {bearish_recall:.1%}) — would veto every BUY"
+            ),
+            dsr=dsr,
+            pbo=pbo,
+            pt_mult=pt,
+            sl_mult=sl,
+        )
+    if bullish_recall is not None and bullish_recall < MIN_CLASS_RECALL:
+        return PromotionDecision(
+            ok=False,
+            reason=(
+                f"insufficient bullish recall {bullish_recall:.1%} "
+                f"< {MIN_CLASS_RECALL:.0%} both-class floor"
+            ),
+            dsr=dsr,
+            pbo=pbo,
+            pt_mult=pt,
+            sl_mult=sl,
+        )
+    if bearish_recall is not None and bearish_recall < MIN_CLASS_RECALL:
+        return PromotionDecision(
+            ok=False,
+            reason=(
+                f"insufficient fail-class recall {bearish_recall:.1%} "
+                f"< {MIN_CLASS_RECALL:.0%} both-class floor"
             ),
             dsr=dsr,
             pbo=pbo,

@@ -59,7 +59,20 @@ def test_evaluate_promotion_rejects_dsr_one_from_too_few_trials_if_below_gate():
     assert "DSR" in decision.reason
 
 
-def test_evaluate_promotion_rejects_collapsed_majority_class_model():
+def test_evaluate_promotion_rejects_weak_but_not_fully_collapsed_recall():
+    decision = evaluate_promotion(
+        {
+            "deflated_sharpe_ratio": 0.99,
+            "prob_backtest_overfitting": 0.10,
+            "bullish_recall": 0.08,
+            "bearish_recall": 0.70,
+        },
+        pt_mult=5.5,
+        sl_mult=1.75,
+    )
+    assert decision.ok is False
+    assert "bullish recall" in decision.reason
+
     decision = evaluate_promotion(
         {
             "deflated_sharpe_ratio": 0.99,
