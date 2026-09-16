@@ -52,7 +52,7 @@ jobs:
             --report-path gitleaks-working-tree.json \
             --report-format json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: gitleaks-working-tree
@@ -95,7 +95,7 @@ jobs:
           fi
           exit "$status"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: gitleaks-history
@@ -126,7 +126,7 @@ jobs:
             --progress-spinner off \
             --format columns
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: pip-audit
@@ -153,7 +153,7 @@ jobs:
           npm audit --audit-level=high --json > ../npm-audit.json || true
           npm audit --audit-level=high
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: npm-audit
