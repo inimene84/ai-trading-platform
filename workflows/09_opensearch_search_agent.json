@@ -1,0 +1,210 @@
+{
+  "name": "09 - OpenSearch Search Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "opensearch-search",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "os-search-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 200],
+      "webhookId": "opensearch-search"
+    },
+    {
+      "parameters": {},
+      "id": "os-search-manual",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [200, 480]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "via",
+              "name": "viaWebhook",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "os-search-flag-hook",
+      "name": "Mark Webhook",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [400, 200]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "via",
+              "name": "viaWebhook",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "q0",
+              "name": "query",
+              "value": "bitcoin",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "os-search-flag-manual",
+      "name": "Mark Manual",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [400, 480]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "q",
+              "name": "query",
+              "value": "={{ $json.body?.query || $json.query || \"bitcoin\" }}",
+              "type": "string"
+            },
+            {
+              "id": "idx",
+              "name": "indexId",
+              "value": "={{ $json.body?.index || $json.index || \"qt-news\" }}",
+              "type": "string"
+            },
+            {
+              "id": "lim",
+              "name": "limit",
+              "value": "={{ $json.body?.limit || $json.limit || 8 }}",
+              "type": "number"
+            },
+            {
+              "id": "via",
+              "name": "viaWebhook",
+              "value": "={{ $json.viaWebhook === true }}",
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "os-search-params",
+      "name": "Search Params",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 340]
+    },
+    {
+      "parameters": {
+        "resource": "document",
+        "operation": "search",
+        "indexId": "={{ $json.indexId }}",
+        "query": "={{ JSON.stringify({ query: { multi_match: { query: $json.query, fields: ['title^2', 'summary', 'text', 'source'] } } }) }}",
+        "returnAll": false,
+        "limit": "={{ $json.limit }}",
+        "simple": true
+      },
+      "id": "os-search-query",
+      "name": "OpenSearch Hybrid-ish Search",
+      "type": "n8n-nodes-opensearch.opensearch",
+      "typeVersion": 1,
+      "position": [680, 340],
+      "credentials": {
+        "openSearchApi": {
+          "id": "XppZPpbkZfdbJ9oO",
+          "name": "OpenSearch account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: true, query: $('Search Params').item.json.query, index: $('Search Params').item.json.indexId, hits: $input.all().map(i => i.json) } }}",
+        "options": {}
+      },
+      "id": "os-search-respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1160, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "via",
+              "leftValue": "={{ $('Search Params').item.json.viaWebhook }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "os-search-if",
+      "name": "From Webhook?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [920, 340]
+    },
+    {
+      "parameters": {},
+      "id": "os-search-done",
+      "name": "Manual Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1160, 480]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Mark Webhook", "type": "main", "index": 0 }]]
+    },
+    "Manual Trigger": {
+      "main": [[{ "node": "Mark Manual", "type": "main", "index": 0 }]]
+    },
+    "Mark Webhook": {
+      "main": [[{ "node": "Search Params", "type": "main", "index": 0 }]]
+    },
+    "Mark Manual": {
+      "main": [[{ "node": "Search Params", "type": "main", "index": 0 }]]
+    },
+    "Search Params": {
+      "main": [[{ "node": "OpenSearch Hybrid-ish Search", "type": "main", "index": 0 }]]
+    },
+    "OpenSearch Hybrid-ish Search": {
+      "main": [[{ "node": "From Webhook?", "type": "main", "index": 0 }]]
+    },
+    "From Webhook?": {
+      "main": [
+        [{ "node": "Respond", "type": "main", "index": 0 }],
+        [{ "node": "Manual Done", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
