@@ -82,6 +82,12 @@ def main() -> int:
     parser.add_argument("--pt-mult", type=float, default=STRATEGY_PT_ATR)
     parser.add_argument("--sl-mult", type=float, default=STRATEGY_SL_ATR)
     parser.add_argument("--holding", type=int, default=48)
+    parser.add_argument(
+        "--events",
+        default="everybar",
+        choices=["everybar", "quantum_ai"],
+        help="everybar uses all bars (needed for GPU sample size); quantum_ai uses strategy setups",
+    )
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     args = parser.parse_args()
     if args.device != "auto":
@@ -94,6 +100,8 @@ def main() -> int:
     print("=========================================================")
     print(f"Symbol:        {args.symbol}")
     print(f"Timeframe:     {args.timeframe}")
+    print(f"Events:        {args.events}")
+    print(f"Holding:       {args.holding} bars")
     print(f"Device:        {device.kind} {device.name} VRAM={device.vram_mb} MiB")
     print(f"Torch:         {device.torch_version} cuda={device.torch_cuda}")
     print(f"LightGBM:      {device.lightgbm_device}")
@@ -111,6 +119,7 @@ def main() -> int:
         pt_mult=args.pt_mult,
         sl_mult=args.sl_mult,
         max_holding=args.holding,
+        events_mode=args.events,
     )
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -172,15 +181,26 @@ def main() -> int:
         )
         if lstm_cols:
             holdout = lstm_cols[int(np.argmax([calculate_sharpe_ratio(c) for c in lstm_cols]))]
-            n_lstm_trials = record_trials(f"ml:{args.symbol}:{args.timeframe}:lstm", len(lstm_cols), note="lstm_grid")
-            var_s = float(np.var([calculate_sharpe_ratio(c) for c in lstm_cols], ddof=1)) if len(lstm_cols) > 1 else None
+            record_trials(f"ml:{args.symbol}:{args.timeframe}:lstm", len(lstm_cols), note="lstm_grid")
+            n_lstm_trials = len(lstm_cols)
+            per_period = []
+            for col in lstm_cols:
+                arr = np.asarray(col, dtype=float)
+                arr = arr[~np.isnan(arr)]
+                if len(arr) < 2:
+                    continue
+                std = float(np.std(arr, ddof=1))
+                per_period.append(0.0 if std <= 1e-12 else float(np.mean(arr) / std))
+            var_s = float(np.var(per_period, ddof=1)) if len(per_period) > 1 else None
             trial_matrix = np.column_stack([c[: min(len(x) for x in lstm_cols)] for c in lstm_cols])
             pbo, med_rank, ranks = probability_of_backtest_overfitting(
                 trial_matrix, n_blocks=min(16, max(4, (trial_matrix.shape[0] // 20) * 2)),
             )
             if not ranks:
                 pbo = 1.0
-            lstm_metrics["deflated_sharpe_ratio"] = float(deflated_sharpe_ratio(holdout, n_trials=n_lstm_trials, variance_of_trials=var_s))
+            lstm_metrics["deflated_sharpe_ratio"] = float(
+                deflated_sharpe_ratio(holdout, n_trials=n_lstm_trials, variance_of_trials=var_s)
+            )
             lstm_metrics["prob_backtest_overfitting"] = float(pbo)
             lstm_metrics["holdout_sharpe"] = float(calculate_sharpe_ratio(holdout))
             lstm_metrics["n_trials"] = int(n_lstm_trials)

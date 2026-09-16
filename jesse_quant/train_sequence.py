@@ -18,7 +18,7 @@ from sklearn.metrics import classification_report
 try:
     import torch
     from torch import nn
-    from torch.utils.data import DataLoader, TensorDataset
+    from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 except ImportError:
     torch = None  # type: ignore[assignment]
     nn = None  # type: ignore[assignment]
@@ -26,10 +26,21 @@ except ImportError:
 
 SEQ_LEN = 32
 LSTM_GRID: List[Dict[str, Any]] = [
-    {"hidden": 32, "layers": 1, "dropout": 0.1, "lr": 1e-3, "epochs": 12},
-    {"hidden": 64, "layers": 1, "dropout": 0.2, "lr": 8e-4, "epochs": 16},
-    {"hidden": 64, "layers": 2, "dropout": 0.2, "lr": 5e-4, "epochs": 20},
+    {"hidden": 32, "layers": 1, "dropout": 0.1, "lr": 1e-3, "epochs": 12, "batch": 64},
+    {"hidden": 64, "layers": 1, "dropout": 0.2, "lr": 8e-4, "epochs": 16, "batch": 64},
+    {"hidden": 64, "layers": 2, "dropout": 0.2, "lr": 5e-4, "epochs": 20, "batch": 64},
 ]
+B200_GRID: List[Dict[str, Any]] = [
+    {"hidden": 256, "layers": 2, "dropout": 0.30, "lr": 5e-4, "epochs": 60, "batch": 1024},
+    {"hidden": 512, "layers": 3, "dropout": 0.30, "lr": 3e-4, "epochs": 80, "batch": 512},
+    {"hidden": 768, "layers": 3, "dropout": 0.35, "lr": 2e-4, "epochs": 100, "batch": 256},
+]
+
+
+def _select_grid(n_events: int, vram_mb: Optional[int]) -> List[Dict[str, Any]]:
+    if vram_mb is not None and vram_mb >= 80_000 and n_events >= 4_000:
+        return B200_GRID
+    return LSTM_GRID
 
 
 class EventLSTM(nn.Module if nn is not None else object):  # type: ignore[misc]
@@ -87,17 +98,26 @@ def build_event_sequences(
     return np.stack(seqs), np.asarray(labels, dtype=np.int64), w_arr, pd.Index(kept)
 
 
+def _class_weights(y: np.ndarray, device: str):
+    assert torch is not None
+    counts = np.bincount(y.astype(int), minlength=2).astype(np.float32)
+    counts = np.maximum(counts, 1.0)
+    weights = counts.sum() / (2.0 * counts)
+    return torch.tensor(weights, dtype=torch.float32, device=device)
+
+
 def _train_one(
     model: EventLSTM,
     train_loader: DataLoader,
     device: str,
     lr: float,
     epochs: int,
+    class_weights,
 ) -> None:
     assert torch is not None
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.CrossEntropyLoss(reduction="none")
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights, reduction="none")
     use_amp = device.startswith("cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     model.train()
@@ -141,12 +161,24 @@ def train_lstm_meta(
     else:
         w_train = seq_w[:split_idx]
 
+    grid = _select_grid(len(seq_x), device_info.vram_mb)
+    class_w = _class_weights(y_train, device)
+    # Inverse-frequency sampler so minority TP-hit class is seen every epoch.
+    counts = np.bincount(y_train.astype(int), minlength=2).astype(np.float64)
+    counts = np.maximum(counts, 1.0)
+    sample_w = (counts.sum() / (2.0 * counts[y_train])).astype(np.float64)
+    sampler = WeightedRandomSampler(
+        weights=torch.as_tensor(sample_w, dtype=torch.double),
+        num_samples=len(y_train),
+        replacement=True,
+    )
+
     holdout_columns: List[np.ndarray] = []
     trial_sharpes: List[float] = []
     fitted: List[Tuple[Dict[str, Any], Dict[str, Any], float, np.ndarray]] = []
 
     n_features = int(x_train.shape[-1])
-    for params in LSTM_GRID:
+    for params in grid:
         model = EventLSTM(
             n_features=n_features,
             hidden=int(params["hidden"]),
@@ -158,8 +190,20 @@ def train_lstm_meta(
             torch.from_numpy(y_train),
             torch.from_numpy(w_train),
         )
-        loader = DataLoader(ds, batch_size=64, shuffle=True, drop_last=False)
-        _train_one(model, loader, device, lr=float(params["lr"]), epochs=int(params["epochs"]))
+        loader = DataLoader(
+            ds,
+            batch_size=int(params.get("batch", 64)),
+            sampler=sampler,
+            drop_last=False,
+        )
+        _train_one(
+            model,
+            loader,
+            device,
+            lr=float(params["lr"]),
+            epochs=int(params["epochs"]),
+            class_weights=class_w,
+        )
         model.eval()
         with torch.no_grad():
             logits = model(torch.from_numpy(x_test).to(device))
@@ -182,7 +226,7 @@ def train_lstm_meta(
         "n_events": int(len(seq_x)),
         "n_train": int(len(x_train)),
         "n_test": int(len(x_test)),
-        "n_grid": int(len(LSTM_GRID)),
+        "n_grid": int(len(grid)),
         "best_params": best_params,
         "seq_len": SEQ_LEN,
         "test_accuracy": float(report.get("accuracy", 0.0)),

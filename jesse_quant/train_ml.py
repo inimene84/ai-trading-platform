@@ -161,9 +161,10 @@ def prepare_dataset(
     labeling_mode: str = "triple_barrier",
     pt_mult: float = STRATEGY_PT_ATR,
     sl_mult: float = STRATEGY_SL_ATR,
-    max_holding: int = 24,
+    max_holding: int = 48,
     forward_horizon: int = 6,
     threshold_pct: float = 0.75,
+    events_mode: str = "quantum_ai",
 ) -> Tuple[pd.DataFrame, pd.Series, Optional[pd.Series], Optional[pd.Series]]:
     """
     Computes features and labels outcomes using either:
@@ -175,14 +176,22 @@ def prepare_dataset(
     X = compute_features_df(df)
 
     if labeling_mode == "triple_barrier":
-        events_idx = quantum_ai_event_index(df)
-        print(
-            f"[*] Applying Triple-Barrier Method on {len(events_idx):,} QuantumAI entry events: "
-            f"PT={pt_mult}x ATR, SL={sl_mult}x ATR, Max Holding={max_holding} bars..."
-        )
-        if len(events_idx) < 50:
-            print("[!] Too few strategy events; falling back to every-bar labeling")
+        events_mode = (events_mode or "quantum_ai").strip().lower()
+        if events_mode in {"everybar", "every_bar", "all"}:
             events_idx = None
+            print(
+                f"[*] Applying Triple-Barrier Method on every bar: "
+                f"PT={pt_mult}x ATR, SL={sl_mult}x ATR, Max Holding={max_holding} bars..."
+            )
+        else:
+            events_idx = quantum_ai_event_index(df)
+            print(
+                f"[*] Applying Triple-Barrier Method on {len(events_idx):,} QuantumAI entry events: "
+                f"PT={pt_mult}x ATR, SL={sl_mult}x ATR, Max Holding={max_holding} bars..."
+            )
+            if len(events_idx) < 50:
+                print("[!] Too few strategy events; falling back to every-bar labeling")
+                events_idx = None
         tb_df = apply_triple_barrier(
             df,
             events_idx=events_idx,
