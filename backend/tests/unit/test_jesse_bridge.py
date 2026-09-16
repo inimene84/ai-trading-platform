@@ -2,12 +2,11 @@
 
 import os
 import pytest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 
 from backend.main import app
 from backend.services.jesse_bridge import JesseBridgeService, is_jesse_ml_model_gap, jesse_bridge
-from backend.services.risk_config import get_risk_config
 
 
 @pytest.fixture
@@ -157,13 +156,143 @@ def test_is_jesse_ml_model_gap_detects_missing_and_unpromoted():
     assert is_jesse_ml_model_gap("") is False
 
 
+@pytest.mark.asyncio
+async def test_get_ml_prediction_maps_sidecar_gap_to_no_model():
+    service = JesseBridgeService()
+    mock_res = MagicMock()
+    mock_res.status_code = 200
+    mock_res.json.return_value = {
+        "status": "error",
+        "error": "No model artifact found for AVAX-USDT (1h, lightgbm)",
+    }
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_res)
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = False
+    with patch.object(service, "_resolve_ml_url", AsyncMock(return_value="http://ml")), \
+         patch("httpx.AsyncClient", return_value=mock_client):
+        res = await service.get_ml_prediction("AVAX-USDT")
+    assert res["status"] == "no_model"
+
+
+@pytest.mark.asyncio
+async def test_get_ml_prediction_fail_closed_without_promotion_metrics():
+    service = JesseBridgeService()
+    mock_res = MagicMock()
+    mock_res.status_code = 200
+    mock_res.json.return_value = {
+        "status": "success",
+        "signal": "BUY",
+        "confidence": 0.70,
+        "probabilities": {"bullish": 0.70, "bearish": 0.10, "neutral": 0.20},
+    }
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_res)
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = False
+    with patch.object(service, "_resolve_ml_url", AsyncMock(return_value="http://ml")), \
+         patch("httpx.AsyncClient", return_value=mock_client):
+        res = await service.get_ml_prediction("BTC-USDT")
+    assert res["status"] == "error"
+    assert "promotion gate" in str(res.get("error") or "").lower()
+    assert res.get("promotion_ok") is False
+
+
 def test_jesse_promotion_status_unconfigured(client, monkeypatch):
     api_key = os.getenv("ADMIN_API_KEY", "test_key")
     monkeypatch.setenv("ADMIN_API_KEY", api_key)
     monkeypatch.delenv("QTP_PROMOTION_ARTIFACT_DIR", raising=False)
+    monkeypatch.delenv("QTP_PROMOTION_REQUIRED", raising=False)
     res = client.get("/api/jesse/promotion-status", headers={"x-api-key": api_key})
     assert res.status_code == 200
-    assert res.json()["status"] == "unconfigured"
+    body = res.json()
+    assert body["status"] == "unconfigured"
+    assert body["verdict"] is None
+    assert body["promoted"] is False
+    assert "gpu-artifacts" in body["gpu_artifacts_note"]
+
+
+def test_jesse_promotion_status_reject_when_required_without_artifacts(client, monkeypatch):
+    api_key = os.getenv("ADMIN_API_KEY", "test_key")
+    monkeypatch.setenv("ADMIN_API_KEY", api_key)
+    monkeypatch.setenv("QTP_PROMOTION_REQUIRED", "true")
+    monkeypatch.delenv("QTP_PROMOTION_ARTIFACT_DIR", raising=False)
+    res = client.get("/api/jesse/promotion-status", headers={"x-api-key": api_key})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "ok"
+    assert body["verdict"] == "REJECT"
+    assert body["promoted"] is False
+    assert body["failed_gate"] == "SCHEMA_HASH"
+
+
+def test_jesse_promotion_status_promote_happy_path(client, monkeypatch):
+    from backend.ml.promotion_gates import GateResult
+    from backend.ml.promotion_service import PromotionState
+
+    api_key = os.getenv("ADMIN_API_KEY", "test_key")
+    monkeypatch.setenv("ADMIN_API_KEY", api_key)
+    state = PromotionState(
+        result=GateResult(
+            verdict="PROMOTE",
+            reason="PASS DSR/PBO/geometry",
+            failed_gate=None,
+            warnings=[],
+            details={"dsr": 0.99},
+        )
+    )
+    monkeypatch.setattr("backend.routes.jesse.resolve_promotion", lambda _cfg=None: state)
+    res = client.get("/api/jesse/promotion-status", headers={"x-api-key": api_key})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "ok"
+    assert body["verdict"] == "PROMOTE"
+    assert body["promoted"] is True
+    assert body["reason"] == "PASS DSR/PBO/geometry"
+
+
+def test_jesse_models_alias_and_no_promoted_model(client, monkeypatch):
+    api_key = os.getenv("ADMIN_API_KEY", "test_key")
+    monkeypatch.setenv("ADMIN_API_KEY", api_key)
+    monkeypatch.delenv("QTP_PROMOTION_ARTIFACT_DIR", raising=False)
+    monkeypatch.delenv("QTP_PROMOTION_REQUIRED", raising=False)
+
+    mock_models = {
+        "status": "ok",
+        "cached_models": [],
+        "available_models": [],
+        "rejected_models": {"BTC-USDT_1h_lightgbm": ["collapsed classifier"]},
+    }
+    with patch.object(jesse_bridge, "get_ml_models", AsyncMock(return_value=mock_models)):
+        res_alias = client.get("/api/jesse/models", headers={"x-api-key": api_key})
+        res_legacy = client.get("/api/jesse/ml-models", headers={"x-api-key": api_key})
+
+    assert res_alias.status_code == 200
+    assert res_legacy.status_code == 200
+    body = res_alias.json()
+    assert body["status"] == "ok"
+    assert body["has_promoted_model"] is False
+    assert body["available_models"] == []
+    assert body["promotion"]["status"] == "unconfigured"
+    assert "collapsed classifier" in body["rejected_models"]["BTC-USDT_1h_lightgbm"]
+    assert res_legacy.json()["has_promoted_model"] is False
+
+
+def test_jesse_models_error_is_json_not_404(client, monkeypatch):
+    api_key = os.getenv("ADMIN_API_KEY", "test_key")
+    monkeypatch.setenv("ADMIN_API_KEY", api_key)
+    monkeypatch.delenv("QTP_PROMOTION_ARTIFACT_DIR", raising=False)
+    with patch.object(
+        jesse_bridge,
+        "get_ml_models",
+        AsyncMock(return_value={"status": "error", "error": "ML server returned HTTP 503"}),
+    ):
+        res = client.get("/api/jesse/models", headers={"x-api-key": api_key})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "error"
+    assert body["available_models"] == []
+    assert body["has_promoted_model"] is False
 
 
 def test_jesse_ml_predict_routes(client, monkeypatch):
@@ -216,6 +345,11 @@ def test_jesse_ml_predict_routes(client, monkeypatch):
         )
         assert res_models.status_code == 200
         assert "BTC-USDT_1h_lightgbm.joblib" in res_models.json()["available_models"]
+
+        # 4. GET /api/jesse/models (ops alias)
+        res_alias = client.get("/api/jesse/models", headers={"x-api-key": api_key})
+        assert res_alias.status_code == 200
+        assert "BTC-USDT_1h_lightgbm.joblib" in res_alias.json()["available_models"]
 
 
 @pytest.mark.asyncio

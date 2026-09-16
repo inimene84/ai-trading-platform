@@ -5,12 +5,14 @@ on:
     paths:
       - "backend/**"
       - "docs/ml/qtp-promotion-contract/**"
+      - "jesse_quant/**"
       - "pyproject.toml"
       - ".github/workflows/backend-ci.yml"
   pull_request:
     paths:
       - "backend/**"
       - "docs/ml/qtp-promotion-contract/**"
+      - "jesse_quant/**"
       - "pyproject.toml"
 
 jobs:

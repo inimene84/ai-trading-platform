@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Dict, List
 import yaml
 
 from backend.services.opensearch_client import opensearch_client

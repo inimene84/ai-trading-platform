@@ -1,8 +1,12 @@
 import os
 import logging
-from typing import Optional, Dict, Any, List, Never
+from typing import Optional, Dict, Any, List, Never, Tuple
 from dataclasses import dataclass
 
+from sqlalchemy import func
+
+from backend.database.connection import SessionLocal
+from backend.database.models import Trade
 from backend.ml.promotion_service import (
     PromotionState,
     apply_live_signal_check,
@@ -10,19 +14,26 @@ from backend.ml.promotion_service import (
     promotion_required,
     resolve_promotion,
 )
+from backend.services.equity_scope import risk_broker_name
 from backend.services.jesse_bridge import jesse_bridge
+from backend.services.jesse_ml_gates import (
+    STRATEGY_PAYOFF_RATIO,
+    calculate_fractional_kelly,
+    clip_kelly_for_thin_book,
+    empirical_payoff_ratio,
+)
 from backend.services.kronos_gate import apply_kronos_gate
 from backend.services.opinion_layer import analyze_symbol as opinion_analyze
 from backend.services.risk_config import RiskConfig
 from backend.services.skill_miner import skill_miner
-from backend.services.trading_mode import TradingMode, get_trading_mode, live_exchange_orders_allowed
-from backend.services import kronos_service
-from backend.strategies.combined import CombinedStrategy
-from backend.strategies.market_regime import MarketRegimeDetector
 from backend.services.symbol_aliases import (
     is_opposing_side,
     normalize_side,
 )
+from backend.services.trading_mode import TradingMode, get_trading_mode, live_exchange_orders_allowed
+from backend.services import kronos_service
+from backend.strategies.combined import CombinedStrategy
+from backend.strategies.market_regime import MarketRegimeDetector
 
 logger = logging.getLogger(__name__)
 
@@ -854,10 +865,17 @@ class DecisionEngine:
                                 signal.confidence = max(0.0, signal.confidence - dampen)
                                 logger.info(f"[{symbol}] Jesse ML Gate DAMPEN: Disagreement {ml_sig} (-{dampen:.2f} -> conf={signal.confidence:.2f})")
 
-                            # Capture Fractional Kelly size multiplier for downstream position sizing
+                            # Capture Fractional Kelly using empirical payoff b (avg win / avg |loss|)
+                            # when the active partition has enough closed trades; otherwise the
+                            # live 5.5/1.75 ATR geometry (≈3.14) replaces the hardcoded b=2.0.
+                            win_p = p_bullish if signal.signal == "BUY" else p_bearish
+                            setattr(signal, "kelly_win_prob", float(win_p))
                             if "size_multiplier" in kelly:
                                 setattr(signal, "kelly_multiplier", float(kelly["size_multiplier"]))
-                                logger.info(f"[{symbol}] Jesse ML Calibrated Edge: Kelly multiplier={kelly['size_multiplier']}x (fractional_kelly={kelly.get('fractional_kelly', 0):.4f})")
+                                logger.info(
+                                    f"[{symbol}] Jesse ML Calibrated Edge: Kelly multiplier="
+                                    f"{kelly['size_multiplier']}x (fractional_kelly={kelly.get('fractional_kelly', 0):.4f})"
+                                )
 
                             if signal.confidence < self.config.min_signal_strength:
                                 self._record_eval(symbol, signal.signal, signal.confidence, "confidence reduced below threshold by Jesse ML gate")
@@ -1003,6 +1021,34 @@ class DecisionEngine:
                     }
         return decision
 
+    def _partition_pnl_stats(self) -> Tuple[int, float, float]:
+        """Closed-trade count, average win, and average |loss| for the active book partition."""
+        closed_count = 0
+        avg_win = 0.0
+        avg_loss_abs = 0.0
+        try:
+            db = SessionLocal()
+            try:
+                active_broker = risk_broker_name().lower()
+                current_mode = get_trading_mode().value if hasattr(get_trading_mode(), "value") else str(get_trading_mode())
+                closed_filter = Trade.status.in_(["closed", "exit"])
+                q = db.query(Trade).filter(closed_filter)
+                if active_broker == "ctrader":
+                    q = q.filter(Trade.broker.in_(["ctrader", "ctrader:paper", "ic", "icmarkets"]))
+                elif active_broker in {"binance", "binance_futures"}:
+                    q = q.filter(Trade.broker.in_(["binance", "binance_futures", "binanceusdm"]))
+                q = q.filter(Trade.mode == current_mode.lower())
+                closed_count = q.with_entities(func.count(Trade.id)).scalar() or 0
+                avg_win = q.filter(Trade.pnl > 0).with_entities(func.avg(Trade.pnl)).scalar() or 0.0
+                avg_loss_abs = (
+                    q.filter(Trade.pnl < 0).with_entities(func.avg(func.abs(Trade.pnl))).scalar() or 0.0
+                )
+            finally:
+                db.close()
+        except Exception as e:
+            logger.debug(f"Could not query partition PnL stats: {e}")
+        return int(closed_count), float(avg_win or 0.0), float(avg_loss_abs or 0.0)
+
     def _create_entry_decision(self, symbol: str, bars: List[Dict[str, Any]], signal: Any, direction: str, is_pyramid: bool, regime: str = "UNKNOWN") -> Optional[Decision]:
         current_price = bars[-1]["close"]
         entry_price = signal.entry_price or current_price
@@ -1020,39 +1066,27 @@ class DecisionEngine:
         # SL distance aren't usable. Pyramid layers keep their fixed notional.
         trade_usdt = self.config.pyramid_usdt_per_layer if is_pyramid else self.config.trade_usdt_amount
         kelly_mult = getattr(signal, "kelly_multiplier", None)
+        win_prob = getattr(signal, "kelly_win_prob", None)
+
+        closed_count, avg_win, avg_loss_abs = self._partition_pnl_stats()
+        payoff_b = empirical_payoff_ratio(avg_win, avg_loss_abs, closed_count)
+
+        if win_prob is not None and float(win_prob) > 0:
+            recomputed = calculate_fractional_kelly(float(win_prob), payoff_ratio=payoff_b)
+            kelly_mult = float(recomputed["size_multiplier"])
+            logger.info(
+                f"[{symbol}] Empirical Kelly b={payoff_b:.2f} "
+                f"(geometry fallback={STRATEGY_PAYOFF_RATIO:.2f}, closed={closed_count}) "
+                f"-> multiplier={kelly_mult:.3f}x"
+            )
 
         if kelly_mult is not None and kelly_mult > 0:
-            # Query partition closed trade count: clip to [0.25, 1.0] until >= 30 trades
-            closed_count = 0
-            try:
-                from backend.database.connection import SessionLocal
-                from backend.database.models import Trade
-                from sqlalchemy import func
-                db = SessionLocal()
-                try:
-                    active_broker = os.getenv("ACTIVE_BROKER", "ctrader").lower()
-                    current_mode = get_trading_mode().value if hasattr(get_trading_mode(), "value") else str(get_trading_mode())
-                    q = db.query(func.count(Trade.id)).filter(Trade.status.in_(["closed", "exit"]))
-                    if active_broker == "ctrader":
-                        q = q.filter(Trade.broker.in_(["ctrader", "ctrader:paper", "ic", "icmarkets"]))
-                    elif active_broker in {"binance", "binance_futures"}:
-                        q = q.filter(Trade.broker.in_(["binance", "binance_futures", "binanceusdm"]))
-                    q = q.filter(Trade.mode == current_mode.lower())
-                    closed_count = q.scalar() or 0
-                finally:
-                    db.close()
-            except Exception as e:
-                logger.debug(f"Could not query partition closed trade count: {e}")
-                closed_count = 0
-
-            if closed_count < 30:
-                clipped = max(0.25, min(1.0, float(kelly_mult)))
-                if clipped != float(kelly_mult):
-                    logger.info(
-                        f"[{symbol}] Kelly multiplier clipped {kelly_mult:.2f}x -> {clipped:.2f}x "
-                        f"(partition closed trades {closed_count} < 30)"
-                    )
-                kelly_mult = clipped
+            kelly_mult, was_clipped = clip_kelly_for_thin_book(float(kelly_mult), closed_count)
+            if was_clipped:
+                logger.info(
+                    f"[{symbol}] Kelly multiplier clipped to {kelly_mult:.2f}x "
+                    f"(partition closed trades {closed_count} < 30)"
+                )
 
         # Apply Kelly sizing to baseline notional for primary entries
         if not is_pyramid and kelly_mult is not None and kelly_mult > 0:

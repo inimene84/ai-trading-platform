@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict
 
 from backend.services.opensearch_client import opensearch_client
 
