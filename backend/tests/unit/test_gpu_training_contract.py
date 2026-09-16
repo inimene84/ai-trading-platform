@@ -168,5 +168,7 @@ def test_artifact_gate_refuses_collapsed_btc_even_if_old_pass_stamp():
 def test_deploy_ref_wired_in_ssh_wrapper():
     text = (ROOT / "scripts" / "ssh_vps_remote.sh").read_text(encoding="utf-8")
     assert "DEPLOY_REF" in text
+    # Exec via bash so a missing +x bit cannot yield "Is a directory"/126.
+    assert "bash scripts/hostinger_vps_apply.sh" in text
     apply = (ROOT / "scripts" / "hostinger_vps_apply.sh").read_text(encoding="utf-8")
     assert 'DEPLOY_REF="${DEPLOY_REF:-main}"' in apply

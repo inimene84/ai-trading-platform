@@ -44,7 +44,7 @@ else
   exit 1
 fi
 
-REMOTE_CMD="cd ${PROJECT_DIR} && git fetch origin ${DEPLOY_REF} && git checkout ${DEPLOY_REF} && git pull origin ${DEPLOY_REF} && chmod +x scripts/hostinger_vps_apply.sh scripts/vps_realtime_watchdog.sh scripts/vps_remote_oneliner.sh 2>/dev/null; PROJECT_DIR=${PROJECT_DIR} DEPLOY_REF=${DEPLOY_REF} ./scripts/hostinger_vps_apply.sh"
+REMOTE_CMD="cd ${PROJECT_DIR} && git fetch origin ${DEPLOY_REF} && git checkout ${DEPLOY_REF} && git pull origin ${DEPLOY_REF} && chmod +x scripts/hostinger_vps_apply.sh scripts/vps_realtime_watchdog.sh scripts/vps_remote_oneliner.sh 2>/dev/null; PROJECT_DIR=${PROJECT_DIR} DEPLOY_REF=${DEPLOY_REF} bash scripts/hostinger_vps_apply.sh"
 
 echo "Connecting to ${SSH_USER}@${SSH_HOST}:${SSH_PORT} ..."
 if [[ -n "${SSH_PASSWORD:-}" ]]; then
