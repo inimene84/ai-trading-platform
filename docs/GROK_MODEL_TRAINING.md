@@ -133,16 +133,36 @@ cd /home/ubuntu/jesse-gpu
 ./manage.sh gpu-auto-retrain-promote BTC-USDT 1h both
 ```
 
-### 4. Copy a promoted artifact to Jesse ML (trading VPS)
+### 4. Evacuate promoted artifacts before the GPU VM is destroyed
 
-Only after `contract.json` verdict is not `REJECT`:
+The Hostinger GPU instance is ephemeral. Pull **promoted** `*.pt` / `*_meta.json`
+only — never `*.rejected.*` — onto the trading VPS bind-mount
+(`/root/jesse-trading/storage/models/` → jesse-app `/home/storage/models`).
 
 ```bash
-# from GPU node → trading VPS (run on an operator machine with both SSH sessions)
-scp -P "$GPU_SSH_PORT" ubuntu@$GPU_SSH_HOST:/home/ubuntu/jesse-gpu/storage/models/BTC-USDT_1h_lstm.pt \
-  root@$SSH_HOST:/root/jesse-trading/storage/models/
-ssh root@$SSH_HOST "cd /root/jesse-trading && ./manage.sh clear-cache"
+# from a Cloud Agent / operator box that has both GPU and VPS secrets
+python3 scripts/gpu_evacuate_promoted.py --push-vps
 ```
+
+Jesse ML (`:9003`) serves `model_type=lstm` from `SYMBOL_TF_lstm.pt` after
+CPU torch is installed on the bind-mounted vendor path:
+
+```bash
+docker exec jesse-app python3 -m pip install --target /home/vendor/cpu-torch \
+  torch --index-url https://download.pytorch.org/whl/cpu
+# reload only the ML process (do not restart live jesse run)
+docker exec jesse-app python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9003/cache/clear')"
+```
+
+Smoke:
+
+```bash
+curl -sf "http://127.0.0.1:9003/model-metadata?symbol=ETH-USDT&timeframe=1h&model_type=lstm"
+curl -sf "http://127.0.0.1:9003/predict?symbol=ETH-USDT&timeframe=1h&model_type=lstm"
+```
+
+Do **not** auto-enable live Jesse sync. LSTM serving is shadow-capable until
+QuantumTrade is pointed at `model_type=lstm` per symbol/timeframe.
 
 ---
 
@@ -268,10 +288,11 @@ High-PBO failure example (18 trials):
 
 | File | Meaning |
 |------|---------|
-| `BTC-USDT_1h_lightgbm.joblib` | **Promoted** production model |
-| `BTC-USDT_1h_lightgbm_meta.json` | DSR/PBO metadata (queried by `/model-metadata`) |
+| `BTC-USDT_1h_lightgbm.joblib` | **Promoted** production LightGBM |
+| `ETH-USDT_1h_lstm.pt` | **Promoted** production LSTM (joblib-wrapped `state_dict`) |
+| `*_lightgbm_meta.json` / `*_lstm_meta.json` | DSR/PBO metadata (queried by `/model-metadata`) |
 | `*.collapsed-everybar.joblib` | Alternate label mode; not served unless promoted |
-| `*.rejected.joblib` | Failed promotion (collapsed classifier, etc.) |
+| `*.rejected.joblib` / `*.rejected.pt` | Failed promotion — never copy to the trading VPS |
 
 `/model-metadata` looks for `{symbol}_{timeframe}_{model_type}_meta.json`. If missing, gate returns error and live mode blocks entries.
 
@@ -298,16 +319,30 @@ cd backend && poetry run pytest tests/unit/test_jesse_validation.py tests/unit/t
 
 ---
 
-## Training Results (2026-09-16 run)
+## Training Results
+
+### CPU VPS LightGBM (2026-09-16 / Sep-11)
 
 | Symbol | Timeframe | DSR | PBO | Holdout Sharpe | Gate | Notes |
 |--------|-----------|-----|-----|----------------|------|-------|
-| BTC-USDT | 1h | **1.00** | **2.0%** | 4.29 | **PASS** | Promoted `collapsed-everybar` artifact → production |
-| ETH-USDT | 1h | 0.00 | 49.6% | — | FAIL | Only ~9 months data; import from 2024-01-01 |
-| SOL-USDT | 1h | 0.89 | 32.8–56% | — | FAIL | Close on PBO once; needs more history |
+| BTC-USDT | 1h | **1.00** | **2.0%** | 4.29 | **PASS** | Sep-11 `collapsed-everybar` LightGBM |
+| ETH-USDT | 1h | 0.00 | 49.6% | — | FAIL | CPU LightGBM |
+| SOL-USDT | 1h | 0.89 | 32.8–56% | — | FAIL | CPU LightGBM |
 
-Fresh `auto-retrain-promote` runs (n-configs=6) failed gate for all symbols on 2026-09-16.
-The production BTC model is the Sep-11 `collapsed-everybar` run (n_trials=6, shallow trees).
+### Hostinger B200 LSTM campaign (2026-09-16, every-bar 5.5/1.75, class-balanced)
+
+| Symbol | Timeframe | DSR | PBO | Bull / Bear recall | Gate | Artifact |
+|--------|-----------|-----|-----|--------------------|------|----------|
+| ETH-USDT | 1h | **1.00** | **2.8%** | 30% / 75% | **PASS** | `ETH-USDT_1h_lstm.pt` |
+| SOL-USDT | 1h | **1.00** | **1.6%** | 30% / 76% | **PASS** | `SOL-USDT_1h_lstm.pt` |
+| BTC-USDT | 15m | **1.00** | **0.8%** | 27% / 74% | **PASS** | `BTC-USDT_15m_lstm.pt` |
+| BTC-USDT | 5m | **1.00** | **0.0%** | 27% / 75% | **PASS** | `BTC-USDT_5m_lstm.pt` |
+| ETH-USDT | 15m | **1.00** | **2.0%** | 28% / 76% | **PASS** | `ETH-USDT_15m_lstm.pt` |
+| BTC-USDT | 1h | 0.07 or fail-class | — | — | **BLOCKED** | `*.rejected.pt` — do not copy |
+
+FX / equity symbols trained later in the same campaign were all rejected.
+LightGBM every-bar on GPU collapsed (majority-class). Evacuate the five
+promoted LSTMs before the GPU VM is destroyed.
 
 ### Reset trial registry before retrain
 

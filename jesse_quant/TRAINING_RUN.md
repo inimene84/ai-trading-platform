@@ -87,3 +87,23 @@ CUDA matmul on B200 succeeded. LightGBM CUDA requires a from-source build
 - Kronos-small fine-tune is still blocked on Qlib-format corpus + HF weights
 - CPCV path reconstruction with `purgedcv` once N_events supports 10–20 partitions
 - Shadow-log predictions until PBO < 0.30 **and** both-class recall ≥ 10%
+
+## B200 9h campaign (2026-09-16 03:30–04:12Z) — evacuate before VM destroy
+
+Every-bar labels + class-balanced LSTM (WeightedRandomSampler, CE class weights,
+B200_GRID hidden 256/512/768). Five artifacts **passed** gates and were copied
+to the trading VPS `storage/models/` (rejected files stayed on the GPU only):
+
+| Artifact | DSR | PBO | Bull / Bear recall |
+|---|---|---|---|
+| `ETH-USDT_1h_lstm.pt` | 1.0 | 2.8% | 30% / 75% |
+| `SOL-USDT_1h_lstm.pt` | 1.0 | 1.6% | 30% / 76% |
+| `BTC-USDT_15m_lstm.pt` | 1.0 | 0.8% | 27% / 74% |
+| `BTC-USDT_5m_lstm.pt` | 1.0 | 0.0% | 27% / 75% |
+| `ETH-USDT_15m_lstm.pt` | 1.0 | 2.0% | 28% / 76% |
+
+BTC 1h LSTM and all later FX/equity symbols were rejected. Jesse ML now loads
+`model_type=lstm` from `*.pt` on CPU torch (`/home/vendor/cpu-torch`). Live
+QuantumTrade still defaults to LightGBM until an operator points a symbol at
+LSTM. Re-run `python3 scripts/gpu_evacuate_promoted.py --push-vps` if the
+staging dir is lost before the GPU is destroyed.

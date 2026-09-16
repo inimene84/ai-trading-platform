@@ -17,6 +17,8 @@
 #   ./scripts/gpu_train_remote.sh bootstrap
 #   ./scripts/gpu_train_remote.sh train BTC-USDT both
 #   ./scripts/gpu_train_remote.sh train ETH-USDT lstm
+# Evacuate promoted artifacts (GPU is ephemeral):
+#   python3 scripts/gpu_evacuate_promoted.py --push-vps
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

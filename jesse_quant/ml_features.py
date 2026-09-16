@@ -150,6 +150,19 @@ def compute_features_df(df: pd.DataFrame) -> pd.DataFrame:
     return features[FEATURE_NAMES]
 
 
+def _candles_to_ohlcv_df(candles: np.ndarray) -> pd.DataFrame:
+    """Jesse candles format: [timestamp, open, close, high, low, volume]."""
+    return pd.DataFrame(
+        {
+            "open": candles[:, 1],
+            "close": candles[:, 2],
+            "high": candles[:, 3],
+            "low": candles[:, 4],
+            "volume": candles[:, 5],
+        }
+    )
+
+
 def compute_latest_features(candles: np.ndarray) -> np.ndarray:
     """
     Extracts the feature vector for the latest candle from a Jesse candle numpy array:
@@ -159,18 +172,19 @@ def compute_latest_features(candles: np.ndarray) -> np.ndarray:
     if len(candles) < 220:
         return np.full((len(FEATURE_NAMES),), np.nan)
 
-    # Jesse candles format: [timestamp, open, close, high, low, volume]
-    recent = candles[-250:]
-    df = pd.DataFrame(
-        {
-            "open": recent[:, 1],
-            "close": recent[:, 2],
-            "high": recent[:, 3],
-            "low": recent[:, 4],
-            "volume": recent[:, 5],
-        }
-    )
-
-    feat_df = compute_features_df(df)
+    feat_df = compute_features_df(_candles_to_ohlcv_df(candles[-250:]))
     latest = feat_df.iloc[-1].to_numpy(dtype=np.float32)
     return latest
+
+
+def compute_latest_sequence(candles: np.ndarray, seq_len: int = 32) -> np.ndarray:
+    """Last `seq_len` feature rows for EventLSTM. NaN-filled when history is short."""
+    need = 220 + int(seq_len)
+    if len(candles) < need:
+        return np.full((int(seq_len), len(FEATURE_NAMES)), np.nan, dtype=np.float32)
+    take = max(250, need)
+    feat_df = compute_features_df(_candles_to_ohlcv_df(candles[-take:]))
+    window = feat_df.iloc[-int(seq_len) :].to_numpy(dtype=np.float32)
+    if window.shape != (int(seq_len), len(FEATURE_NAMES)):
+        return np.full((int(seq_len), len(FEATURE_NAMES)), np.nan, dtype=np.float32)
+    return window

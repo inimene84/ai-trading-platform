@@ -28,14 +28,17 @@ import numpy as np
 import pandas as pd
 import psycopg2
 
-from ml_features import compute_latest_features, FEATURE_NAMES
+from ml_features import FEATURE_NAMES, compute_latest_features, compute_latest_sequence
 from feature_schema import FEATURE_HASH, verify_feature_parity
+from lstm_infer import is_rejected_artifact, wrap_lstm_payload
 from promotion_gates import (
     STRATEGY_PAYOFF_RATIO,
     annotate_ml_prediction,
     calculate_fractional_kelly,
     payoff_ratio_from_geometry,
 )
+
+_TF_TO_1M = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}
 
 app = FastAPI(title="Jesse ML Inference Engine (Institutional)", version="2.0.0")
 
@@ -107,45 +110,41 @@ def check_model_expiration(trained_at_str: Optional[str], expiration_hours: int 
         return {"expired": False, "age_hours": None}
 
 
+def _model_search_dirs() -> List[str]:
+    return [
+        "/home/storage/models",
+        "/root/jesse-trading/storage/models",
+        "storage/models",
+    ]
+
+
+def _find_artifact(norm_symbol: str, timeframe: str, model_type: str) -> Optional[str]:
+    exts = [".pt", ".joblib"] if model_type == "lstm" else [".joblib"]
+    for sdir in _model_search_dirs():
+        for ext in exts:
+            exact = os.path.join(sdir, f"{norm_symbol}_{timeframe}_{model_type}{ext}")
+            if os.path.exists(exact) and not is_rejected_artifact(exact):
+                return exact
+    return None
+
+
 def get_cached_model(symbol: str, timeframe: str = "1h", model_type: str = "lightgbm") -> Optional[Dict[str, Any]]:
     norm_symbol = normalize_symbol(symbol)
     cache_key = f"{norm_symbol}_{timeframe}_{model_type}"
     if cache_key in _MODEL_CACHE:
         return _MODEL_CACHE[cache_key]
 
-    search_dirs = [
-        "/home/storage/models",
-        "/root/jesse-trading/storage/models",
-        "storage/models",
-    ]
-
-    found_path = None
-    for sdir in search_dirs:
-        exact = os.path.join(sdir, f"{norm_symbol}_{timeframe}_{model_type}.joblib")
-        if os.path.exists(exact) and ".rejected." not in exact:
-            found_path = exact
-            break
-        candidates = [
-            c for c in glob.glob(os.path.join(sdir, f"{norm_symbol}_{timeframe}_*.joblib"))
-            if os.path.basename(c) == f"{norm_symbol}_{timeframe}_{model_type}.joblib"
-        ]
-        if candidates:
-            found_path = candidates[0]
-            break
-        any_cand = [
-            c for c in glob.glob(os.path.join(sdir, f"{norm_symbol}_{timeframe}_{model_type}.joblib"))
-            if os.path.isfile(c)
-        ]
-        if any_cand:
-            found_path = any_cand[0]
-            break
-
+    found_path = _find_artifact(norm_symbol, timeframe, model_type)
     if not found_path:
         return None
 
     try:
         payload = joblib.load(found_path)
         payload["filename"] = os.path.basename(found_path)
+        if model_type == "lstm" or payload.get("state_dict") is not None:
+            payload["pipeline"] = wrap_lstm_payload(payload)
+            payload["kind"] = "lstm"
+            payload["seq_len"] = int((payload.get("metrics") or {}).get("seq_len") or 32)
 
         # Schema parity validation
         saved_hash = payload.get("feature_schema_hash") or payload.get("feature_hash")
@@ -168,7 +167,7 @@ def get_cached_model(symbol: str, timeframe: str = "1h", model_type: str = "ligh
         return None
 
 
-def fetch_recent_candles(symbol: str, timeframe: str = "1h", limit_bars: int = 250) -> np.ndarray:
+def fetch_recent_candles(symbol: str, timeframe: str = "1h", limit_bars: int = 280) -> np.ndarray:
     norm_symbol = normalize_symbol(symbol)
     conn = psycopg2.connect(
         host=DB_HOST,
@@ -178,7 +177,7 @@ def fetch_recent_candles(symbol: str, timeframe: str = "1h", limit_bars: int = 2
         password=DB_PASS,
     )
 
-    mult = 60 if timeframe == "1h" else 15 if timeframe == "15m" else 240 if timeframe == "4h" else 1
+    mult = _TF_TO_1M.get(timeframe, 1)
     raw_limit = (limit_bars + 30) * mult
 
     query = (
@@ -238,11 +237,11 @@ class MetaPredictRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    search_dirs = ["/home/storage/models", "/root/jesse-trading/storage/models", "storage/models"]
     available_models = []
-    for sdir in search_dirs:
-        for f in glob.glob(os.path.join(sdir, "*.joblib")):
-            available_models.append(os.path.basename(f))
+    for sdir in _model_search_dirs():
+        for pattern in ("*.joblib", "*.pt"):
+            for f in glob.glob(os.path.join(sdir, pattern)):
+                available_models.append(os.path.basename(f))
 
     return {
         "status": "ok",
@@ -250,9 +249,27 @@ def health():
         "cached_models": list(_MODEL_CACHE.keys()),
         "available_models": sorted(list(set(available_models))),
         "production_models": sorted(
-            [m for m in set(available_models) if ".rejected." not in m and not m.endswith(".rejected.pt")]
+            [m for m in set(available_models) if not is_rejected_artifact(m)]
         ),
     }
+
+
+@app.get("/model-metadata")
+def model_metadata(symbol: str = "BTC-USDT", timeframe: str = "1h", model_type: str = "lightgbm"):
+    """Return MLOps metadata (DSR, PBO, holdout Sharpe) for a trained model artifact."""
+    norm_symbol = normalize_symbol(symbol)
+    meta_name = f"{norm_symbol}_{timeframe}_{model_type}_meta.json"
+    for sdir in _model_search_dirs():
+        meta_path = os.path.join(sdir, meta_name)
+        if os.path.exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            payload["status"] = "success"
+            payload.setdefault("symbol", norm_symbol)
+            payload.setdefault("timeframe", timeframe)
+            payload.setdefault("model_type", model_type)
+            return payload
+    return {"status": "error", "error": f"Metadata not found for {meta_name}"}
 
 
 @app.post("/cache/clear")
@@ -353,21 +370,34 @@ def run_inference(
         }
 
     pipeline = model_data["pipeline"]
+    kind = model_data.get("kind") or ("lstm" if model_type == "lstm" else "lightgbm")
+    seq_len = int(model_data.get("seq_len") or 32)
 
     try:
-        candles = fetch_recent_candles(norm_symbol, timeframe)
-        feats = compute_latest_features(candles)
+        candles = fetch_recent_candles(
+            norm_symbol,
+            timeframe,
+            limit_bars=max(280, 220 + seq_len) if kind == "lstm" else 250,
+        )
+        if kind == "lstm":
+            seq = compute_latest_sequence(candles, seq_len=seq_len)
+            if np.isnan(seq).any():
+                return {
+                    "status": "error",
+                    "error": "Insufficient candle history to compute LSTM feature sequence",
+                }
+            probs = pipeline.predict_proba(seq)[0]
+        else:
+            feats = compute_latest_features(candles)
+            if np.isnan(feats).any():
+                return {
+                    "status": "error",
+                    "error": "Insufficient candle history to compute complete feature vector",
+                }
+            feats_df = pd.DataFrame([feats], columns=FEATURE_NAMES)
+            probs = pipeline.predict_proba(feats_df)[0]
     except Exception as e:
         return {"status": "error", "error": str(e)}
-
-    if np.isnan(feats).any():
-        return {
-            "status": "error",
-            "error": "Insufficient candle history to compute complete feature vector",
-        }
-
-    feats_df = pd.DataFrame([feats], columns=FEATURE_NAMES)
-    probs = pipeline.predict_proba(feats_df)[0]
     if len(probs) == 2:
         # Binary meta-labeler: P(fail), P(TP-before-SL) for a long setup
         p_bearish = float(probs[0])
