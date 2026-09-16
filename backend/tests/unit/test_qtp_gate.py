@@ -64,6 +64,7 @@ def _request(
 
 
 def test_http_contract() -> None:
+    qtp_gate._FAILS.clear()
     httpd = _start_server()
     try:
         status, body, hdrs = _request(httpd, "GET", "/login")
@@ -121,6 +122,56 @@ def test_http_contract() -> None:
         res.read()
         conn.close()
         assert status == 400
+
+        flipped = token[:-1] + ("0" if token[-1] != "0" else "1")
+        status, _, hdrs = _request(
+            httpd, "GET", "/verify", headers={"Cookie": f"qtp_gate={flipped}"}
+        )
+        assert status == 302
+        assert hdrs["location"].endswith("/login")
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_login_throttle_uses_real_ip_not_xff() -> None:
+    qtp_gate._FAILS.clear()
+    httpd = _start_server()
+    try:
+        fail_headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Real-Ip": "203.0.113.50",
+            "X-Forwarded-For": "198.51.100.7",
+        }
+        for _ in range(qtp_gate._FAIL_MAX):
+            status, _, _ = _request(
+                httpd,
+                "POST",
+                "/login",
+                body="username=nope&password=nope",
+                headers=fail_headers,
+            )
+            assert status == 200
+        status, _, _ = _request(
+            httpd,
+            "POST",
+            "/login",
+            body="username=nope&password=nope",
+            headers=fail_headers,
+        )
+        assert status == 429
+        status, _, _ = _request(
+            httpd,
+            "POST",
+            "/login",
+            body="username=nope&password=nope",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-Real-Ip": "203.0.113.51",
+                "X-Forwarded-For": "203.0.113.50",
+            },
+        )
+        assert status == 200
     finally:
         httpd.shutdown()
         httpd.server_close()

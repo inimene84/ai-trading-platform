@@ -93,26 +93,20 @@ def cookie_valid(secret: bytes, value: str, now: int | None = None) -> bool:
     return hmac.compare_digest(_mac(secret, msg), sig)
 
 
-def _too_many_fails(ip: str) -> bool:
+def _register_login_attempt(ip: str) -> bool:
+    """Count this login POST. Return True when the IP is already at the cap."""
     now = time.time()
     with _FAIL_LOCK:
         hits = [t for t in _FAILS.get(ip, []) if now - t < _FAIL_WINDOW]
-        if hits:
+        if len(hits) >= _FAIL_MAX:
             _FAILS[ip] = hits
-        else:
-            _FAILS.pop(ip, None)
-        return len(hits) >= _FAIL_MAX
-
-
-def _record_fail(ip: str) -> None:
-    now = time.time()
-    with _FAIL_LOCK:
+            return True
         if ip not in _FAILS and len(_FAILS) >= MAX_FAIL_KEYS:
             oldest = next(iter(_FAILS))
             _FAILS.pop(oldest, None)
-        hits = [t for t in _FAILS.get(ip, []) if now - t < _FAIL_WINDOW]
         hits.append(now)
         _FAILS[ip] = hits
+        return False
 
 
 def _html(error: str = "") -> bytes:
@@ -231,7 +225,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b"not found", {"Content-Type": "text/plain"})
             return
         ip = self._client_ip()
-        if _too_many_fails(ip):
+        if _register_login_attempt(ip):
             self._send(429, _html("x"), {"Content-Type": "text/html; charset=utf-8"})
             return
         raw_len = self.headers.get("Content-Length", "")
@@ -246,11 +240,9 @@ class Handler(BaseHTTPRequestHandler):
         form = parse_qs(raw, keep_blank_values=True)
         user = (form.get("username") or [""])[0]
         password = (form.get("password") or [""])[0]
-        if not (
-            _fixed_compare(user, self.expected_user)
-            and _fixed_compare(password, self.expected_password)
-        ):
-            _record_fail(ip)
+        user_ok = _fixed_compare(user, self.expected_user)
+        password_ok = _fixed_compare(password, self.expected_password)
+        if not (user_ok and password_ok):
             # 200, not 401: a 401 here re-opens the browser password popup.
             self._send(200, _html("x"), {"Content-Type": "text/html; charset=utf-8"})
             return
