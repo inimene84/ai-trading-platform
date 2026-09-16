@@ -134,8 +134,13 @@ def train_one_symbol(
     holding: int,
     device: Any,
     asset_class: str = "",
+    events: str = "quantum_ai",
 ) -> Dict[str, Any]:
-    """Train LightGBM and/or LSTM for one symbol. Never every-bar fallback."""
+    """Train LightGBM and/or LSTM for one symbol.
+
+    events=quantum_ai never falls back to every-bar labels (GPU promotion path).
+    events=everybar is kept for the overlapping B200 campaign CLI.
+    """
     t0 = time.time()
     summary: Dict[str, Any] = {
         "symbol": symbol,
@@ -161,6 +166,7 @@ def train_one_symbol(
         print(f"[!] {symbol}: {summary['skip_reason']}")
         return summary
 
+    everybar = events == "everybar"
     try:
         X, y, sample_weights, samples_info_sets = prepare_dataset(
             df,
@@ -168,8 +174,8 @@ def train_one_symbol(
             pt_mult=pt_mult,
             sl_mult=sl_mult,
             max_holding=holding,
-            fallback_every_bar=False,
-            min_events=MIN_TRAIN_EVENTS,
+            fallback_every_bar=everybar,
+            min_events=10**9 if everybar else MIN_TRAIN_EVENTS,
         )
     except TooFewEventsError as exc:
         summary["skipped"] = True
@@ -316,8 +322,11 @@ def train_universe(
     holding: int,
     device: Any,
     symbols: Optional[Sequence[str]] = None,
+    events: str = "quantum_ai",
+    exclude: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     rows: List[UniverseSymbol] = resolve_universe(asset_class, symbols=symbols)
+    skip = {normalize_symbol(s) for s in (exclude or []) if s}
     batch: Dict[str, Any] = {
         "asset_class": asset_class,
         "timeframe": timeframe,
@@ -336,6 +345,16 @@ def train_universe(
         return batch
 
     for item in rows:
+        if skip and normalize_symbol(item.symbol) in skip:
+            rec = {
+                "symbol": item.symbol,
+                "asset_class": item.asset_class,
+                "skipped": True,
+                "skip_reason": "excluded",
+            }
+            batch["skipped"].append(item.symbol)
+            batch["results"].append(rec)
+            continue
         path = find_candle_path(item.symbol, candles_dir)
         if not path:
             rec = {
@@ -362,6 +381,7 @@ def train_universe(
             holding=holding,
             device=device,
             asset_class=item.asset_class,
+            events=events,
         )
         batch["results"].append(rec)
         if rec.get("skipped"):
@@ -403,6 +423,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sl-mult", type=float, default=STRATEGY_SL_ATR)
     parser.add_argument("--holding", type=int, default=24)
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
+    parser.add_argument(
+        "--events",
+        default="quantum_ai",
+        choices=["quantum_ai", "everybar"],
+        help="quantum_ai = strategy-event labels (promotion path); everybar = campaign compatibility",
+    )
+    parser.add_argument(
+        "--exclude",
+        default="",
+        help="comma-separated symbols to skip in a batch (e.g. BTC-USDT,ETH-USDT,SOL-USDT)",
+    )
     parser.add_argument("--list-universe", action="store_true")
     return parser
 
@@ -448,6 +479,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             sl_mult=args.sl_mult,
             holding=args.holding,
             device=device,
+            events=args.events,
+            exclude=[s.strip() for s in args.exclude.split(",") if s.strip()],
         )
         print(f"[*] Batch elapsed {time.time() - t0:.1f}s")
         if batch.get("promoted"):
@@ -468,6 +501,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         holding=args.holding,
         device=device,
         asset_class=(lookup_symbol(args.symbol).asset_class if lookup_symbol(args.symbol) else ""),
+        events=args.events,
     )
     if rec.get("skipped"):
         return 2

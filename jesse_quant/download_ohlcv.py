@@ -25,6 +25,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None  # type: ignore[assignment]
+
 from asset_universe import (
     ALL_CLASSES,
     UniverseSymbol,
@@ -32,6 +37,7 @@ from asset_universe import (
     resolve_universe,
 )
 
+BINANCE_VISION_KLINES = "https://data-api.binance.vision/api/v3/klines"
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 BINANCE_FAPI_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 USER_AGENT = "jesse-quant-ohlcv/1.0"
@@ -66,7 +72,7 @@ def fetch_binance_klines(
     if start_ms is None:
         start_ms = int(datetime(2023, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
     out: List[Tuple[int, float, float, float, float, float]] = []
-    for base in (BINANCE_KLINES, BINANCE_FAPI_KLINES):
+    for base in (BINANCE_VISION_KLINES, BINANCE_KLINES, BINANCE_FAPI_KLINES):
         cursor = start_ms
         pages = 0
         out = []
@@ -116,10 +122,8 @@ def fetch_yfinance_ohlcv(
     interval: str = "1h",
     period: str = "730d",
 ) -> List[Tuple[int, float, float, float, float, float]]:
-    try:
-        import yfinance as yf
-    except ImportError as exc:
-        raise DownloadError("yfinance is not installed") from exc
+    if yf is None:
+        raise DownloadError("yfinance is not installed")
     hist = yf.download(
         ticker,
         interval=interval,
@@ -194,7 +198,12 @@ def download_one(item: UniverseSymbol, out_dir: str, skip_existing: bool = True)
         return result
     try:
         if item.source == "binance":
-            rows = fetch_binance_klines(item.ticker, interval=item.native_tf)
+            try:
+                rows = fetch_binance_klines(item.ticker, interval=item.native_tf)
+            except DownloadError:
+                yf_ticker = item.ticker.replace("USDT", "-USD").replace("USDC", "-USD")
+                print(f"    binance blocked; yfinance fallback {yf_ticker}")
+                rows = fetch_yfinance_ohlcv(yf_ticker, interval=item.native_tf)
         elif item.source == "yfinance":
             rows = fetch_yfinance_ohlcv(item.ticker, interval=item.native_tf)
         else:

@@ -18,7 +18,7 @@ from asset_universe import (
     normalize_symbol,
     resolve_universe,
 )
-from download_ohlcv import build_parser as build_download_parser
+from download_ohlcv import BINANCE_VISION_KLINES, build_parser as build_download_parser
 from train_gpu import MIN_TRAIN_EVENTS, build_parser as build_train_parser, find_candle_path
 from train_ml import TooFewEventsError
 
@@ -81,10 +81,14 @@ def test_train_cli_exposes_asset_class_and_candles_dir():
     assert ns.candles_dir == "/tmp/candles"
     assert ns.pt_mult == 5.5
     assert ns.sl_mult == 1.75
+    assert ns.events == "quantum_ai"
+    every = parser.parse_args(["--events", "everybar"])
+    assert every.events == "everybar"
     assert MIN_TRAIN_EVENTS == 20
 
 
-def test_download_cli_lists_classes():
+def test_binance_vision_is_primary_klines_host():
+    assert "data-api.binance.vision" in BINANCE_VISION_KLINES
     parser = build_download_parser()
     ns = parser.parse_args(["--asset-class", "metals", "--list"])
     assert ns.asset_class == "metals"
