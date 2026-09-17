@@ -38,6 +38,15 @@ from backend.strategies.market_regime import MarketRegimeDetector
 logger = logging.getLogger(__name__)
 
 
+def jesse_ml_no_model_policy() -> str:
+    """Live policy when Jesse sidecar reports no deployable model.
+
+    skip — allow strategy signal through and tag jesse_ml_gap (default).
+    veto — fail-closed (blocks entries until a model is promoted).
+    """
+    return (os.getenv("JESSE_ML_NO_MODEL_POLICY", "skip") or "skip").strip().lower()
+
+
 def affordable_notional(
     equity: float,
     available: float,
@@ -904,7 +913,7 @@ class DecisionEngine:
                         # Do not re-parse error text here — a 5xx traceback that
                         # mentions artifacts is still an outage and must veto live.
                         if ml_res.get("status") == "no_model":
-                            if live_exchange_orders_allowed():
+                            if live_exchange_orders_allowed() and jesse_ml_no_model_policy() == "veto":
                                 logger.error(
                                     f"[{symbol}] Jesse ML gate no_model in LIVE mode ({err}) — fail closed: vetoing {signal.signal}"
                                 )
@@ -1267,15 +1276,21 @@ class DecisionEngine:
                 expected_move = min(tp_distance, captured_atr * atr)
 
             gross_expected = expected_move * quantity
+            full_tp_gross = tp_distance * quantity
             roundtrip_cost = self.config.roundtrip_cost_rate * notional
             required = mult * roundtrip_cost
-            if gross_expected < required:
+            if gross_expected < required and full_tp_gross < required:
                 logger.info(
                     f"  [ {symbol} ] SKIP (min-edge): expected capture ${gross_expected:.4f} "
                     f"< {mult:.1f}x round-trip cost ${roundtrip_cost:.4f} "
-                    f"(need >= ${required:.4f}; tp_move=${tp_distance * quantity:.4f})"
+                    f"(need >= ${required:.4f}; tp_move=${full_tp_gross:.4f})"
                 )
                 return False
+            if gross_expected < required <= full_tp_gross:
+                logger.info(
+                    f"  [ {symbol} ] min-edge: trailing capture ${gross_expected:.4f} below "
+                    f"threshold but full TP ${full_tp_gross:.4f} clears ${required:.4f} — allowing"
+                )
             return True
         except Exception as e:
             if fail_open:
