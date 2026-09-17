@@ -20,7 +20,11 @@ from backend.ml.geometry import (
 from backend.ml.gpu_job import TrainingPathViolation, assert_training_path_isolated
 from backend.ml.hashes import canonical_json, geometry_hash, holdout_id_hash, sha256_hex
 from backend.ml.holdout_registry import HoldoutRegistry
-from backend.ml.live_signal import evaluate_live_four_numbers
+from backend.ml.live_signal import (
+    attach_jesse_live_telemetry,
+    evaluate_live_four_numbers,
+    map_jesse_prediction_to_live_telemetry,
+)
 from backend.ml.promotion_gates import GateResult
 from backend.ml.promotion_service import (
     PromotionState,
@@ -181,6 +185,40 @@ def test_live_four_number_stub_blocks_and_skips():
     ok = evaluate_live_four_numbers({"side": "BUY", "p_win": 0.70, "conformal_width": 0.1, "costed_edge_bps": 2.0})
     assert ok.allowed is True
     assert ok.applied is True
+
+
+def test_map_jesse_prediction_to_live_telemetry():
+    mapped = map_jesse_prediction_to_live_telemetry({
+        "signal": "BUY",
+        "confidence": 0.62,
+        "probabilities": {"bullish": 0.62, "bearish": 0.08, "neutral": 0.30},
+        "conformal_margin": 0.34,
+        "entropy": 0.58,
+        "decision": {"expected_value_r": 0.12},
+        "barrier_geometry": {"sl_atr_mult": 1.75},
+    })
+    assert mapped["p_win"] == pytest.approx(0.62)
+    assert mapped["conformal_width"] == pytest.approx(0.24)
+    assert mapped["costed_edge_bps"] is not None
+    assert mapped["costed_edge_bps"] > 0.0
+
+    check = evaluate_live_four_numbers({"side": "BUY", **{k: v for k, v in mapped.items() if v is not None}})
+    assert check.allowed is True
+    assert check.applied is True
+
+
+def test_attach_jesse_live_telemetry_preserves_existing_fields():
+    payload = {
+        "status": "success",
+        "signal": "SELL",
+        "p_win": 0.71,
+        "conformal_width": 0.08,
+        "costed_edge_bps": 4.5,
+    }
+    attach_jesse_live_telemetry(payload)
+    assert payload["p_win"] == 0.71
+    assert payload["conformal_width"] == 0.08
+    assert payload["costed_edge_bps"] == 4.5
 
 
 def _make_bars(n: int = 50, base: float = 100.0) -> list:

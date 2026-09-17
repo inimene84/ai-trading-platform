@@ -16,6 +16,7 @@ import httpx
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional
 
+from backend.ml.live_signal import attach_jesse_live_telemetry
 from backend.ml.promotion_service import resolve_promotion
 from backend.services.jesse_ml_gates import (
     STRATEGY_PT_ATR,
@@ -425,6 +426,8 @@ class JesseBridgeService:
                     payload = res.json()
                     if isinstance(payload, dict):
                         payload = annotate_ml_prediction(payload)
+                        if payload.get("status") == "success":
+                            attach_jesse_live_telemetry(payload)
                         if payload.get("status") != "success":
                             err = str(payload.get("error") or "")
                             if is_jesse_ml_model_gap(err):

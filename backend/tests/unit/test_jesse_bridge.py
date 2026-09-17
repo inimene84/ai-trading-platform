@@ -6,7 +6,15 @@ from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 
 from backend.main import app
-from backend.services.jesse_bridge import JesseBridgeService, is_jesse_ml_model_gap, jesse_bridge
+from backend.ml.live_signal import attach_jesse_live_telemetry
+from backend.services.jesse_bridge import (
+    JesseBridgeService,
+    configured_ml_fallback_model_type,
+    is_jesse_ml_model_gap,
+    jesse_bridge,
+    ml_predict_timeout_seconds,
+)
+from backend.services.jesse_ml_gates import annotate_ml_prediction
 
 
 @pytest.fixture
@@ -350,6 +358,66 @@ def test_jesse_ml_predict_routes(client, monkeypatch):
         res_alias = client.get("/api/jesse/models", headers={"x-api-key": api_key})
         assert res_alias.status_code == 200
         assert "BTC-USDT_1h_lightgbm.joblib" in res_alias.json()["available_models"]
+
+
+def test_configured_ml_fallback_defaults_to_lstm(monkeypatch):
+    monkeypatch.delenv("JESSE_ML_FALLBACK_MODEL_TYPE", raising=False)
+    assert configured_ml_fallback_model_type() == "lstm"
+
+
+def test_configured_ml_fallback_can_be_disabled(monkeypatch):
+    for value in ("none", "false", "off", "0", ""):
+        monkeypatch.setenv("JESSE_ML_FALLBACK_MODEL_TYPE", value)
+        assert configured_ml_fallback_model_type() is None
+
+
+def test_ml_predict_timeout_clamped(monkeypatch):
+    monkeypatch.setenv("JESSE_ML_PREDICT_TIMEOUT", "999")
+    assert ml_predict_timeout_seconds() == 30.0
+    monkeypatch.setenv("JESSE_ML_PREDICT_TIMEOUT", "12")
+    assert ml_predict_timeout_seconds() == 12.0
+
+
+@pytest.mark.asyncio
+async def test_get_ml_prediction_retries_lstm_on_no_model(monkeypatch):
+    monkeypatch.delenv("JESSE_ML_FALLBACK_MODEL_TYPE", raising=False)
+    service = JesseBridgeService()
+    primary = {
+        "status": "no_model",
+        "error": "No model artifact found for ETH-USDT (1h, lightgbm)",
+    }
+    fallback_raw = {
+        "status": "success",
+        "signal": "BUY",
+        "confidence": 0.58,
+        "probabilities": {"bullish": 0.58, "bearish": 0.0, "neutral": 0.42},
+        "conformal_margin": 0.28,
+        "entropy": 0.55,
+        "decision": {"expected_value_r": 0.11},
+        "metrics": {
+            "deflated_sharpe_ratio": 1.0,
+            "prob_backtest_overfitting": 0.03,
+            "pt_mult": 5.5,
+            "sl_mult": 1.75,
+            "bullish_recall": 0.45,
+            "bearish_recall": 0.12,
+        },
+    }
+
+    async def predict_side_effect(symbol, timeframe, model_type, threshold):
+        if model_type == "lightgbm":
+            return primary
+        payload = annotate_ml_prediction(dict(fallback_raw))
+        attach_jesse_live_telemetry(payload)
+        return payload
+
+    with patch.object(service, "_predict_once", AsyncMock(side_effect=predict_side_effect)):
+        res = await service.get_ml_prediction("ETH-USDT", "1h", "lightgbm", 0.45)
+    assert res["status"] == "success"
+    assert res["resolved_via"] == "fallback"
+    assert res.get("p_win") == pytest.approx(0.58)
+    assert res.get("conformal_width") is not None
+    assert res.get("costed_edge_bps") is not None
 
 
 @pytest.mark.asyncio
