@@ -207,6 +207,49 @@ def test_map_jesse_prediction_to_live_telemetry():
     assert check.applied is True
 
 
+def test_map_jesse_prediction_sell_side():
+    mapped = map_jesse_prediction_to_live_telemetry({
+        "signal": "SELL",
+        "confidence": 0.55,
+        "probabilities": {"bullish": 0.10, "bearish": 0.55, "neutral": 0.35},
+        "conformal_margin": 0.30,
+        "entropy": 0.50,
+        "decision": {"expected_value_r": 0.08},
+    })
+    assert mapped["p_win"] == pytest.approx(0.55)
+    assert mapped["conformal_width"] == pytest.approx(0.20)
+
+
+def test_map_jesse_prediction_kelly_only_ev_fallback():
+    mapped = map_jesse_prediction_to_live_telemetry({
+        "signal": "BUY",
+        "probabilities": {"bullish": 0.60, "bearish": 0.05, "neutral": 0.35},
+        "conformal_margin": 0.35,
+        "entropy": 0.52,
+        "kelly": {"expected_value_r": 0.09},
+    })
+    assert mapped["costed_edge_bps"] is not None
+    assert mapped["costed_edge_bps"] > 0.0
+
+
+def test_gated_neutral_does_not_pass_four_number_check():
+    mapped = map_jesse_prediction_to_live_telemetry({
+        "signal": "NEUTRAL",
+        "gated": True,
+        "confidence": 0.62,
+        "probabilities": {"bullish": 0.62, "bearish": 0.08, "neutral": 0.30},
+        "conformal_margin": 0.34,
+        "entropy": 0.58,
+        "decision": {"expected_value_r": 0.12},
+    })
+    assert mapped["p_win"] is None
+    assert mapped["conformal_width"] is None
+    assert mapped["costed_edge_bps"] is None
+    check = evaluate_live_four_numbers({"side": "NEUTRAL", **mapped})
+    assert check.allowed is False
+    assert "missing live telemetry" in check.reason
+
+
 def test_attach_jesse_live_telemetry_preserves_existing_fields():
     payload = {
         "status": "success",

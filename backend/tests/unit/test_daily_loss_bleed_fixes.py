@@ -266,6 +266,41 @@ def test_min_edge_blends_partial_tp_capture():
     assert DecisionEngine(trail_only)._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is True
 
 
+def test_min_edge_fail_closed_in_live_on_error(monkeypatch):
+    cfg = RiskConfig(
+        min_edge_fee_mult=2.5,
+        taker_fee_rate=0.0004,
+        slippage_rate=0.0002,
+        trailing_stop_enabled=True,
+        trail_activation_atr=1.0,
+        trail_atr_mult=0.9,
+    )
+    engine = DecisionEngine(cfg)
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("DRY_RUN_ALL", "false")
+    monkeypatch.setenv("PAPER_TRADING", "false")
+
+    with patch.object(engine, "_passes_min_edge", wraps=engine._passes_min_edge):
+        with patch(
+            "backend.services.decision_engine.atr_from_bars",
+            side_effect=RuntimeError("atr boom"),
+        ):
+            assert engine._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, []) is False
+
+
+def test_min_edge_fail_open_in_paper_on_error(monkeypatch):
+    cfg = RiskConfig(min_edge_fee_mult=2.5, trailing_stop_enabled=True)
+    engine = DecisionEngine(cfg)
+    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("PAPER_TRADING", "true")
+
+    with patch(
+        "backend.services.decision_engine.atr_from_bars",
+        side_effect=RuntimeError("atr boom"),
+    ):
+        assert engine._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, []) is True
+
+
 def test_min_edge_full_tp_when_trailing_disabled():
     cfg = RiskConfig(
         min_edge_fee_mult=2.5,

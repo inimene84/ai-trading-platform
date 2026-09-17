@@ -1992,8 +1992,18 @@ class TradingLoopService:
             return candidates
 
         if not vol_by_sym:
-            logger.warning("  [SYMBOL GATE] empty volume snapshot; failing OPEN")
-            return candidates
+            logger.warning(
+                "  [SYMBOL GATE] empty volume snapshot; failing CLOSED — "
+                f"keeping {len(open_symbols)} open-leg symbols only"
+            )
+            passed = [s for s in candidates if s.upper() in open_symbols]
+            rejected = [s for s in candidates if s.upper() not in open_symbols]
+            if rejected:
+                logger.warning(
+                    "  [SYMBOL GATE] empty snapshot (skipped): "
+                    f"{[f'{s}(empty-volume-snapshot)' for s in rejected]}"
+                )
+            return passed
 
         passed, rejected = [], []
         for s in candidates:

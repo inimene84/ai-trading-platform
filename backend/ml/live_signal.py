@@ -53,6 +53,13 @@ def expected_value_r_to_costed_edge_bps(
     return gross_bps - round_trip_bps
 
 
+def _jesse_is_gated_or_neutral(payload: Mapping[str, Any]) -> bool:
+    """True when Jesse refused a directional trade or the final signal is NEUTRAL."""
+    if payload.get("gated"):
+        return True
+    return str(payload.get("signal") or "").upper() == "NEUTRAL"
+
+
 def map_jesse_prediction_to_live_telemetry(
     payload: Mapping[str, Any],
 ) -> dict[str, Optional[float]]:
@@ -60,7 +67,17 @@ def map_jesse_prediction_to_live_telemetry(
 
     Jesse serves ``conformal_margin`` and ``decision.expected_value_r``; the
     promotion contract expects ``conformal_width`` and ``costed_edge_bps``.
+
+    Heuristics (when the final signal is BUY/SELL and not gated):
+      - ``p_win``: directional probability for the signaled side
+      - ``conformal_width``: max(0, entropy - conformal_margin)
+      - ``costed_edge_bps``: expected_value_r converted to bps minus round-trip costs
+
+    Gated or NEUTRAL payloads omit all three so the four-number check fails closed.
     """
+    if _jesse_is_gated_or_neutral(payload):
+        return {"p_win": None, "conformal_width": None, "costed_edge_bps": None}
+
     side = str(payload.get("signal") or "").upper()
     probs = payload.get("probabilities") if isinstance(payload.get("probabilities"), Mapping) else {}
 
@@ -69,8 +86,6 @@ def map_jesse_prediction_to_live_telemetry(
         p_win = _float_or_none(probs.get("bullish")) or _float_or_none(payload.get("confidence"))
     elif side == "SELL":
         p_win = _float_or_none(probs.get("bearish")) or _float_or_none(payload.get("confidence"))
-    else:
-        p_win = _float_or_none(payload.get("confidence"))
 
     margin = _float_or_none(payload.get("conformal_margin"))
     entropy = _float_or_none(payload.get("entropy"))

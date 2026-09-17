@@ -64,7 +64,7 @@ Loop-level **SL/TP / trailing / partial-TP** (incl. `#100` BE+fees ratchet after
 | Risk Guard | whole cycle | fail-closed; `DISABLE_RISK_GUARD` ignored in LIVE | on |
 | Kill switch / margin gate | entries + pyramids only | equity unavailable → block entries | on |
 | New-bar gate | re-eval same bar | — | on (`eval_on_new_bar_only`) |
-| Symbol gate | new entries on symbol | volume fetch fail → **fail open**; no ticker → reject if no open leg | on |
+| Symbol gate | new entries on symbol | volume fetch fail → **fail open**; empty snapshot → **fail closed**; no ticker → reject if no open leg | on |
 | RANGING block | new entries + pyramids | hard unless `allow_ranging_entries` + setup match + (`allow_ranging_in_live` in LIVE) | **blocked** |
 | Funding-rate cap | BUYs above cap | — | env (`funding_rate_cap`) |
 | Kronos gate | entries opposing forecast | **shadow** logs only (`TIMING_GATE_SHADOW=true`) | shadow |
@@ -73,7 +73,7 @@ Loop-level **SL/TP / trailing / partial-TP** (incl. `#100` BE+fees ratchet after
 | Jesse four-number | entries when QTP `promote` | missing telemetry → veto (paper fail-open on missing only) | when promotion bundle active |
 | AI opinion layer | entries when weak | error → requires conf +0.1 vs `min_signal_strength` | only if `enable_personas` |
 | Max positions / notional caps | entries | — | on |
-| Min-edge fee gate | entries | **fail open** on error / missing inputs / `min_edge_fee_mult=0` | on (`MIN_EDGE_FEE_MULT`) |
+| Min-edge fee gate | entries | paper: fail open on error; **live: fail closed** when enabled; `min_edge_fee_mult=0` disables | on (`MIN_EDGE_FEE_MULT`) |
 | LLM Risk Reviewer | entry ticket | fail-closed in LIVE unless `RISK_REVIEWER_FAIL_OPEN=true` | on |
 | Event-Risk Filter | entries ±30m/−15m macro | stale calendar → fail-closed in LIVE when enabled | **off** |
 | Circuit breaker | execution on one broker | — | on |
@@ -122,7 +122,16 @@ LSTM fallback (`JESSE_ML_FALLBACK_MODEL_TYPE=lstm`): when LightGBM is missing/qu
 
 ---
 
-## 6. Still open / watch list
+## 6. Fixed 17 Sep 2026 (code hardening)
+
+| Item | Fix |
+|------|-----|
+| Gated NEUTRAL four-number pass | Jesse telemetry omitted when `gated` or final signal is NEUTRAL |
+| Empty volume snapshot | Fail **closed** for new entries; open legs kept |
+| Min-edge in LIVE | Fail **closed** on error or missing inputs when gate enabled |
+| Volume floor code default | `RiskConfig` default **$3M** (matches `.env.example` for USDC perps) |
+
+## 7. Still open / watch list
 
 1. **RANGING hard-blocked by default** — opt-in path exists (`allow_ranging_entries`, `allow_ranging_in_live`, mean-reversion / mined-skill match). Mined-edge vs ranging contradiction unresolved unless flags flipped and shadow-measured.
 
@@ -134,19 +143,17 @@ LSTM fallback (`JESSE_ML_FALLBACK_MODEL_TYPE=lstm`): when LightGBM is missing/qu
 
 5. **Opinion layer asymmetry** — exits can use opinion when wired; **entries** skip opinion unless `enable_personas=true` (heuristics-only by default).
 
-6. **Fail-open vs fail-closed asymmetry** — min-edge and sentiment errors allow trades; Jesse ML and Risk Reviewer fail closed in live. Deliberate but easy to forget.
+6. **Fail-open vs fail-closed asymmetry** — sentiment errors still allow trades; Jesse ML and Risk Reviewer fail closed in live. Min-edge now fail-closed in live when enabled.
 
-7. **Volume floor env vs code default** — `RiskConfig` default **$50M**; VPS `.env.example` documents **$3M** for thin USDC perp books. Effective floor is whatever is deployed.
+7. **QTP promotion bundle** — `QTP_PROMOTION_*` unset on VPS → Jesse artifact gates apply; first real PROMOTE needs telemetry mapping (live-sync) and process restart for promotion snapshot at engine construct.
 
-8. **QTP promotion bundle** — `QTP_PROMOTION_*` unset on VPS → Jesse artifact gates apply; first real PROMOTE needs telemetry mapping (live-sync) and process restart for promotion snapshot at engine construct.
+8. **No promoted LightGBM for several majors** — ETH/SOL use LSTM fallback; altcoins without 1h LSTM → `no_model` live veto (quieter book by design).
 
-9. **No promoted LightGBM for several majors** — ETH/SOL use LSTM fallback; altcoins without 1h LSTM → `no_model` live veto (quieter book by design).
-
-10. **Dual FX/crypto brains, research ingest on uvicorn loop, credential rotation** — operational; not resolved in trading logic.
+9. **Dual FX/crypto brains, research ingest on uvicorn loop, credential rotation** — operational; not resolved in trading logic.
 
 ---
 
-## 7. Configuration quick reference
+## 8. Configuration quick reference
 
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -158,14 +165,14 @@ LSTM fallback (`JESSE_ML_FALLBACK_MODEL_TYPE=lstm`): when LightGBM is missing/qu
 | `enable_personas` | false | AI opinion on **entries** |
 | `EVENT_RISK_FILTER_ENABLED` | false | Macro event window gate |
 | `MIN_EDGE_FEE_MULT` | 2.5 | Fee-churn gate (0 = off) |
-| `MIN_24H_QUOTE_VOLUME_USDT` | 50M code / 3M doc | Liquidity floor |
+| `MIN_24H_QUOTE_VOLUME_USDT` | 3M | Liquidity floor (code default matches `.env.example`) |
 | `allow_ranging_entries` | false | RANGING opt-in |
 | `RISK_REVIEWER_FAIL_OPEN` | false | LLM reviewer errors |
 | `DISABLE_RISK_GUARD` | false | Ignored in LIVE |
 
 ---
 
-## 8. Related files
+## 9. Related files
 
 | Area | Primary modules |
 |------|-----------------|

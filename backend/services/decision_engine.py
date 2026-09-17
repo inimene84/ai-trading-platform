@@ -1225,17 +1225,28 @@ class DecisionEngine:
         the partial level and the trail lock (0.5×1.0 + 0.5×1.2 = 1.1 ATR
         at default geometry).
 
-        FAILS OPEN: any bad input / disabled config -> allow the trade.
+        Paper: fails open on bad input / errors. Live: fails closed when enabled.
         """
+        fail_open = not live_exchange_orders_allowed()
         try:
             mult = getattr(self.config, "min_edge_fee_mult", 0.0) or 0.0
             if mult <= 0:
                 return True  # gate disabled
             if not entry_price or not quantity or tp is None:
-                return True  # missing data -> don't block
+                if fail_open:
+                    return True
+                logger.warning(
+                    f"  [ {symbol} ] min-edge gate missing inputs in LIVE — blocking entry"
+                )
+                return False
             notional = entry_price * quantity
             if notional <= 0:
-                return True
+                if fail_open:
+                    return True
+                logger.warning(
+                    f"  [ {symbol} ] min-edge gate non-positive notional in LIVE — blocking entry"
+                )
+                return False
 
             tp_distance = abs(tp - entry_price)
             expected_move = tp_distance
@@ -1267,5 +1278,8 @@ class DecisionEngine:
                 return False
             return True
         except Exception as e:
-            logger.warning(f"  [ {symbol} ] min-edge gate error (allowing trade): {e}")
-            return True
+            if fail_open:
+                logger.warning(f"  [ {symbol} ] min-edge gate error (allowing trade): {e}")
+                return True
+            logger.warning(f"  [ {symbol} ] min-edge gate error in LIVE (blocking entry): {e}")
+            return False

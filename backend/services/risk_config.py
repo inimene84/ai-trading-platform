@@ -293,7 +293,7 @@ class RiskConfig(BaseSettings):
     # produced the entire realized-PnL loss tail (~-$300) via wide spreads,
     # slippage and forced liquidations. Set 0 to disable the volume gate.
     min_24h_quote_volume_usdt: float = PydanticField(
-        default=50_000_000.0,
+        default=3_000_000.0,
         validation_alias=AliasChoices(
             "min_24h_quote_volume_usdt", "MIN_24H_QUOTE_VOLUME_USDT"
         ),
