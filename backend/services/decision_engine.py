@@ -744,7 +744,7 @@ class DecisionEngine:
                     return None
                 logger.info(f"[{symbol}] PreExecutionGate SHADOW VETO (allowed): {gate_result.reasoning}")
                 self._record_eval(
-                    symbol, "SHADOW_VETO", signal.confidence, f"shadow_vetoed: {gate_result.reasoning}",
+                    symbol, signal.signal, signal.confidence, f"shadow_vetoed: {gate_result.reasoning}",
                 )
             elif gate_result.action == "boost":
                 logger.info(f"[{symbol}] PreExecutionGate BOOST: {gate_result.reasoning}")
