@@ -1,0 +1,459 @@
+[
+  {
+    "updatedAt": "2026-09-16T23:09:43.796Z",
+    "createdAt": "2026-04-20T08:55:12.786Z",
+    "id": "IA5EABIICsmC65Yj",
+    "name": "3. Technical Divergence Alert Workflow",
+    "description": "",
+    "active": true,
+    "isArchived": false,
+    "nodes": [
+      {
+        "id": "ff2125eb-3fa4-4905-afaa-e5eaeaf6d42c",
+        "name": "Agent Zero Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "typeVersion": 1,
+        "position": [
+          40,
+          40
+        ],
+        "parameters": {
+          "content": "## Agent Zero enrichment (research-only)\n\n- No order / trade-execution nodes\n- Workflow **03** (`2Wo50hT9z1xqjBXT`) left untouched\n- Backend writes use `X-API-Key: {{ $env.BACKEND_API_KEY }}`\n- Keep **inactive** until backend `/api/market-data/*` routes are deployed\n- Manual webhook paths: `qt-agentzero-*-manual` for smoke only",
+          "height": 320,
+          "width": 380,
+          "color": 5
+        }
+      },
+      {
+        "id": "2df416bb-8899-4ad7-9110-06221c9bcf9d",
+        "name": "Manual Test Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          240,
+          40
+        ],
+        "webhookId": "fe332136-f764-459f-84bc-b090d826f06e",
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "qt-agentzero-tech-manual",
+          "responseMode": "responseNode",
+          "options": {}
+        }
+      },
+      {
+        "id": "bbd91597-c2ca-4c04-819e-2637beca3050",
+        "name": "Schedule Every 4 Hours",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          240,
+          300
+        ],
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours",
+                "hoursInterval": 4
+              }
+            ]
+          }
+        },
+        "disabled": true
+      },
+      {
+        "id": "47f171c9-7c00-4786-b6e6-2915d90a7e00",
+        "name": "Fetch BTC 4h Klines",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          460,
+          100
+        ],
+        "continueOnFail": true,
+        "parameters": {
+          "method": "GET",
+          "url": "https://fapi.binance.com/fapi/v1/klines",
+          "options": {
+            "timeout": 30000,
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            }
+          },
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "symbol",
+                "value": "BTCUSDT"
+              },
+              {
+                "name": "interval",
+                "value": "4h"
+              },
+              {
+                "name": "limit",
+                "value": "100"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "dca7703d-9648-4600-a25a-6b0ce84d9b0a",
+        "name": "Fetch ETH 4h Klines",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          460,
+          250
+        ],
+        "continueOnFail": true,
+        "parameters": {
+          "method": "GET",
+          "url": "https://fapi.binance.com/fapi/v1/klines",
+          "options": {
+            "timeout": 30000,
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            }
+          },
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "symbol",
+                "value": "ETHUSDT"
+              },
+              {
+                "name": "interval",
+                "value": "4h"
+              },
+              {
+                "name": "limit",
+                "value": "100"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "f0811934-7bb8-4277-b320-4682cc7f8016",
+        "name": "Fetch BTC Funding Rate",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          460,
+          400
+        ],
+        "continueOnFail": true,
+        "parameters": {
+          "method": "GET",
+          "url": "https://fapi.binance.com/fapi/v1/premiumIndex",
+          "options": {
+            "timeout": 30000,
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            }
+          },
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "symbol",
+                "value": "BTCUSDT"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "bbe9c472-5e62-4055-a3bc-16ac8766dda7",
+        "name": "Fetch ETH Funding Rate",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          460,
+          550
+        ],
+        "continueOnFail": true,
+        "parameters": {
+          "method": "GET",
+          "url": "https://fapi.binance.com/fapi/v1/premiumIndex",
+          "options": {
+            "timeout": 30000,
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            }
+          },
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "symbol",
+                "value": "ETHUSDT"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "4c61ee69-a18d-4ffb-b8a1-947769c6cae2",
+        "name": "Process Technical Data",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          700,
+          300
+        ],
+        "parameters": {
+          "jsCode": "// Calculate technical indicators and detect divergences\nfunction calculateRSI(prices, period = 14) {\n  if (prices.length < period + 1) return 50;\n  let gains = 0, losses = 0;\n  const start = prices.length - period;\n  for (let i = start; i < prices.length; i++) {\n    const change = prices[i] - prices[i - 1];\n    if (change > 0) gains += change;\n    else losses -= change;\n  }\n  const avgGain = gains / period;\n  const avgLoss = losses / period;\n  if (avgLoss === 0) return 100;\n  const rs = avgGain / avgLoss;\n  return 100 - (100 / (1 + rs));\n}\n\nfunction calculateEMA(prices, period) {\n  if (prices.length === 0) return 0;\n  const multiplier = 2 / (period + 1);\n  let ema = prices[0];\n  for (let i = 1; i < prices.length; i++) {\n    ema = (prices[i] - ema) * multiplier + ema;\n  }\n  return ema;\n}\n\nfunction calculateMACD(prices, fast = 12, slow = 26, signal = 9) {\n  if (prices.length < slow) return {macd: 0, signal: 0, histogram: 0};\n  const emaFast = calculateEMA(prices, fast);\n  const emaSlow = calculateEMA(prices, slow);\n  const macd = emaFast - emaSlow;\n  return {macd, signal: macd * 0.9, histogram: macd * 0.1};\n}\n\nfunction extractKlines(nodeName) {\n  const items = $(nodeName).all();\n  if (!items || items.length === 0) return [];\n  const first = items[0].json;\n  // Full array as one item\n  if (Array.isArray(first) && first.length && Array.isArray(first[0])) return first;\n  // Split into items (each item is one candle array)\n  if (Array.isArray(first) && (typeof first[0] === 'number' || typeof first[0] === 'string')) {\n    return items.map(i => i.json);\n  }\n  // Wrapped\n  if (first && Array.isArray(first.data)) return first.data;\n  return items.map(i => (Array.isArray(i.json) ? i.json : null)).filter(Boolean);\n}\n\nfunction processKlinesData(klinesJson) {\n  if (!klinesJson || !klinesJson.length) return {close: [], high: [], low: [], volume: []};\n  const close = klinesJson.map(k => parseFloat(k[4]));\n  const high = klinesJson.map(k => parseFloat(k[2]));\n  const low = klinesJson.map(k => parseFloat(k[3]));\n  const volume = klinesJson.map(k => parseFloat(k[5]));\n  return {close, high, low, volume};\n}\n\nconst symbols = [\n  {name: 'BTC', klinesNode: 'Fetch BTC 4h Klines', fundingNode: 'Fetch BTC Funding Rate'},\n  {name: 'ETH', klinesNode: 'Fetch ETH 4h Klines', fundingNode: 'Fetch ETH Funding Rate'},\n];\n\nconst results = [];\n\nfor (const sym of symbols) {\n  try {\n    const klinesData = processKlinesData(extractKlines(sym.klinesNode));\n    const fundingData = $(sym.fundingNode).first()?.json || {};\n    const currentFundingRate = parseFloat(fundingData.lastFundingRate || 0);\n\n    if (klinesData.close.length < 20) {\n      results.push({\n        json: {\n          id: `${sym.name}_tech_${Date.now()}_short`,\n          symbol: `${sym.name}USDT`,\n          source: 'technical-divergence',\n          overall_signal: 'NEUTRAL',\n          confidence: 0.1,\n          published_at: Math.floor(Date.now() / 1000),\n          time_horizon: 'medium',\n          topics: 'technical,divergence,insufficient-data',\n          error: 'insufficient klines',\n        },\n      });\n      continue;\n    }\n\n    const recentClose = klinesData.close.slice(-20);\n    const rsi = calculateRSI(recentClose);\n    const macd = calculateMACD(recentClose);\n    const priceChange10 = (recentClose.slice(-1)[0] - recentClose.slice(-11)[0]) / recentClose.slice(-11)[0];\n\n    let rsiDivergence = 'NONE';\n    if (priceChange10 > 0.02 && rsi < 50) rsiDivergence = 'BEARISH';\n    else if (priceChange10 < -0.02 && rsi > 50) rsiDivergence = 'BULLISH';\n\n    let macdDivergence = 'NONE';\n    if (priceChange10 > 0.015 && macd.histogram < 0) macdDivergence = 'BEARISH';\n    else if (priceChange10 < -0.015 && macd.histogram > 0) macdDivergence = 'BULLISH';\n\n    let fundingDivergence = 'NONE';\n    if (currentFundingRate < -0.0005 && priceChange10 > 0.01) fundingDivergence = 'BULLISH';\n    else if (currentFundingRate > 0.0005 && priceChange10 < -0.01) fundingDivergence = 'BEARISH';\n\n    const signals = [];\n    if (rsiDivergence !== 'NONE') signals.push(rsiDivergence);\n    if (macdDivergence !== 'NONE') signals.push(macdDivergence);\n    if (fundingDivergence !== 'NONE') signals.push(fundingDivergence);\n\n    let overallSignal = 'NEUTRAL';\n    let confidence = 0.3;\n    const bullishCount = signals.filter(s => s === 'BULLISH').length;\n    const bearishCount = signals.filter(s => s === 'BEARISH').length;\n    if (bullishCount >= 2) { overallSignal = 'BULLISH'; confidence = 0.6 + (bullishCount * 0.1); }\n    else if (bearishCount >= 2) { overallSignal = 'BEARISH'; confidence = 0.6 + (bearishCount * 0.1); }\n\n    results.push({\n      json: {\n        id: `${sym.name}_tech_${Date.now()}`,\n        symbol: `${sym.name}USDT`,\n        source: 'technical-divergence',\n        rsi: Number(rsi.toFixed(2)),\n        macd_histogram: Number(macd.histogram.toFixed(6)),\n        price_change_4h: Number((priceChange10 * 100).toFixed(4)),\n        funding_rate: Number((currentFundingRate * 10000).toFixed(4)),\n        rsi_divergence: rsiDivergence,\n        macd_divergence: macdDivergence,\n        funding_divergence: fundingDivergence,\n        overall_signal: overallSignal,\n        confidence: Number(Math.min(confidence, 0.95).toFixed(4)),\n        published_at: Math.floor(Date.now() / 1000),\n        time_horizon: 'medium',\n        topics: 'technical,divergence,rsi,macd,funding',\n      },\n    });\n  } catch (e) {\n    results.push({\n      json: {\n        id: `${sym.name}_tech_${Date.now()}_error`,\n        symbol: `${sym.name}USDT`,\n        source: 'technical-divergence',\n        rsi: 50,\n        macd_histogram: 0,\n        price_change_4h: 0,\n        funding_rate: 0,\n        rsi_divergence: 'NONE',\n        macd_divergence: 'NONE',\n        funding_divergence: 'NONE',\n        overall_signal: 'NEUTRAL',\n        confidence: 0.1,\n        published_at: Math.floor(Date.now() / 1000),\n        time_horizon: 'medium',\n        topics: 'technical,divergence,error',\n        error: String(e.message || e),\n      },\n    });\n  }\n}\n\nreturn results;\n",
+          "mode": "runOnceForAllItems"
+        }
+      },
+      {
+        "id": "650d2185-26b2-447b-bc14-6c16ae499100",
+        "name": "Save Technical Data to Backend",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          920,
+          300
+        ],
+        "continueOnFail": true,
+        "parameters": {
+          "method": "POST",
+          "url": "http://ai-trading-backend:8000/api/market-data/technical",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-API-Key",
+                "value": "={{ $env.BACKEND_API_KEY }}"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "Accept",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify($json) }}",
+          "options": {
+            "timeout": 30000,
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            }
+          }
+        }
+      },
+      {
+        "id": "e9993b75-debf-47b0-b57a-027241e01c24",
+        "name": "Respond to Webhook",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          1100,
+          40
+        ],
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { ok: true, workflow: $workflow.name, items: $('Process Technical Data').all().map(i => i.json), backend: $input.all().map(i => i.json) } }}",
+          "options": {}
+        }
+      },
+      {
+        "id": "91d15076-2534-4ed9-8f56-d9321261618c",
+        "name": "Wait All Binance",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          620,
+          300
+        ],
+        "parameters": {
+          "mode": "append",
+          "numberInputs": 4
+        }
+      }
+    ],
+    "connections": {
+      "Manual Test Webhook": {
+        "main": [
+          [
+            {
+              "node": "Fetch BTC 4h Klines",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch ETH 4h Klines",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch BTC Funding Rate",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch ETH Funding Rate",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Schedule Every 4 Hours": {
+        "main": [
+          [
+            {
+              "node": "Fetch BTC 4h Klines",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch ETH 4h Klines",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch BTC Funding Rate",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch ETH Funding Rate",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch BTC 4h Klines": {
+        "main": [
+          [
+            {
+              "node": "Wait All Binance",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch ETH 4h Klines": {
+        "main": [
+          [
+            {
+              "node": "Wait All Binance",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Fetch BTC Funding Rate": {
+        "main": [
+          [
+            {
+              "node": "Wait All Binance",
+              "type": "main",
+              "index": 2
+            }
+          ]
+        ]
+      },
+      "Fetch ETH Funding Rate": {
+        "main": [
+          [
+            {
+              "node": "Wait All Binance",
+              "type": "main",
+              "index": 3
+            }
+          ]
+        ]
+      },
+      "Wait All Binance": {
+        "main": [
+          [
+            {
+              "node": "Process Technical Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Technical Data": {
+        "main": [
+          [
+            {
+              "node": "Save Technical Data to Backend",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save Technical Data to Backend": {
+        "main": [
+          [
+            {
+              "node": "Respond to Webhook",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "callerPolicy": "workflowsFromSameOwner",
+      "availableInMCP": true,
+      "binaryMode": "separate",
+      "timeSavedMode": "fixed"
+    },
+    "meta": {
+      "templateCredsSetupCompleted": true
+    },
+    "nodeGroups": [],
+    "pinData": {},
+    "versionId": "fc12527a-06b0-4f0e-9164-7dc775578189",
+    "activeVersionId": null,
+    "versionCounter": 146,
+    "triggerCount": 1,
+    "sourceWorkflowId": null,
+    "tags": [
+      {
+        "updatedAt": "2026-04-20T19:35:07.631Z",
+        "createdAt": "2026-04-20T19:35:07.631Z",
+        "id": "3nYIw60vVnhGD9MO",
+        "name": "bot"
+      },
+      {
+        "updatedAt": "2026-09-16T22:56:05.202Z",
+        "createdAt": "2026-09-16T22:56:05.202Z",
+        "id": "awGtkE89DlutEcgp",
+        "name": "a0"
+      }
+    ]
+  }
+]
