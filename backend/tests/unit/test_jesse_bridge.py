@@ -61,6 +61,63 @@ def test_jesse_bridge_sync_blocked_when_flag_disabled(tmp_path, monkeypatch):
     assert "SL_ATR_MULT=3.0" not in content
 
 
+def test_jesse_bridge_sync_rolls_back_on_promotion_reject(tmp_path, monkeypatch):
+    """A sync that breaks GEOMETRY_LIVE_LOCK must roll back .env/os.environ immediately and raise."""
+    from backend.ml.promotion_gates import GateResult
+    from backend.ml.promotion_service import PromotionState
+
+    dummy_env = tmp_path / ".env"
+    original = "SL_ATR_MULT=1.0\nTP_ATR_MULT=2.5\nTRAIL_ACTIVATION_ATR=1.5\nTRAIL_ATR_MULT=0.8\n"
+    dummy_env.write_text(original)
+    monkeypatch.setenv("ENV_FILE_PATH", str(dummy_env))
+    monkeypatch.setenv("JESSE_SYNC_TO_LIVE", "true")
+    monkeypatch.setenv("SL_ATR_MULT", "1.0")
+
+    rejecting = PromotionState(result=GateResult(verdict="REJECT", reason="geometry lock mismatch"))
+    monkeypatch.setattr(
+        "backend.ml.promotion_service.resolve_promotion",
+        lambda cfg: rejecting,
+    )
+
+    service = JesseBridgeService()
+    with pytest.raises(RuntimeError, match="rolled back"):
+        service.sync_strategy_to_risk_config(sl_atr_mult=9.9, tp_atr_mult=4.5)
+
+    # .env file restored byte-for-byte
+    assert dummy_env.read_text() == original
+    # os.environ restored
+    assert os.environ["SL_ATR_MULT"] == "1.0"
+    assert os.environ.get("TP_ATR_MULT") != "4.5"
+
+
+def test_jesse_sync_route_returns_409_on_promotion_reject(client, monkeypatch, tmp_path):
+    """The /api/jesse/sync route must surface a promotion-gate rejection as non-2xx."""
+    from backend.ml.promotion_gates import GateResult
+    from backend.ml.promotion_service import PromotionState
+
+    dummy_env = tmp_path / ".env"
+    dummy_env.write_text("SL_ATR_MULT=1.0\nTP_ATR_MULT=2.0\n")
+    monkeypatch.setenv("ENV_FILE_PATH", str(dummy_env))
+    monkeypatch.setenv("JESSE_SYNC_TO_LIVE", "true")
+    api_key = os.getenv("ADMIN_API_KEY", "test_key")
+    monkeypatch.setenv("ADMIN_API_KEY", api_key)
+
+    rejecting = PromotionState(result=GateResult(verdict="REJECT", reason="geometry lock mismatch"))
+    monkeypatch.setattr(
+        "backend.ml.promotion_service.resolve_promotion",
+        lambda cfg: rejecting,
+    )
+
+    response = client.post(
+        "/api/jesse/sync",
+        headers={"x-api-key": api_key, "Content-Type": "application/json"},
+        json={"sl_atr_mult": 9.9, "tp_atr_mult": 5.0},
+    )
+    assert response.status_code == 409
+    assert "rolled back" in response.json()["detail"]
+    assert "SL_ATR_MULT=1.0" in dummy_env.read_text()
+
+
 @pytest.mark.asyncio
 async def test_jesse_bridge_get_status_fallback():
     """Test get_status returns unavailable when Jesse server cannot be reached."""

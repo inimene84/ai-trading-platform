@@ -79,12 +79,16 @@ async def get_jesse_bridge_status() -> Dict[str, Any]:
 @router.post("/sync")
 def sync_strategy_parameters(req: StrategySyncRequest = StrategySyncRequest()) -> Dict[str, Any]:
     """Sync validated strategy parameters (SL/TP ATR multipliers) to live RiskConfig."""
-    return jesse_bridge.sync_strategy_to_risk_config(
-        sl_atr_mult=req.sl_atr_mult,
-        tp_atr_mult=req.tp_atr_mult,
-        trail_activation_atr=req.trail_activation_atr,
-        trail_atr_mult=req.trail_atr_mult,
-    )
+    try:
+        return jesse_bridge.sync_strategy_to_risk_config(
+            sl_atr_mult=req.sl_atr_mult,
+            tp_atr_mult=req.tp_atr_mult,
+            trail_activation_atr=req.trail_activation_atr,
+            trail_atr_mult=req.trail_atr_mult,
+        )
+    except RuntimeError as e:
+        # Promotion gate rejected the synced geometry; changes were rolled back.
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.post("/validate")

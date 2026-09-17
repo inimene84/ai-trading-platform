@@ -260,6 +260,86 @@ async def test_reject_promotion_fail_closed_in_live(monkeypatch):
     assert "promotion contract" in engine.last_evaluation.get("reason", "")
 
 
+@pytest.mark.asyncio
+async def test_promoted_live_missing_four_number_telemetry_vetoes(monkeypatch):
+    """Promoted model in live without p_win/width/edge telemetry must fail closed."""
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("JESSE_ML_GATE_ENABLED", "true")
+    cfg = RiskConfig(
+        min_signal_strength=0.45,
+        enable_personas=False,
+        use_risk_reviewer_llm=False,
+        min_edge_fee_mult=0.0,
+        sl_atr_mult=1.75,
+        tp_atr_mult=5.5,
+        enable_jesse_ml=True,
+    )
+    engine = DecisionEngine(cfg)
+    engine.enable_kronos = False
+    engine.account_equity = 1000.0
+    engine.account_available = 1000.0
+    engine.promotion_state = PromotionState(result=GateResult(verdict="PROMOTE", reason="fixture"))
+    bars = _make_bars()
+    mock_signal = StrategySignal(symbol="BTCUSDC", signal="BUY", confidence=0.60, entry_price=bars[-1]["close"])
+    engine.strategy.generate_signal = MagicMock(return_value=mock_signal)
+    engine.regime_detector.detect = MagicMock(return_value=MagicMock(regime="TRENDING", weights=MagicMock(return_value={})))
+
+    mock_ml = {
+        "status": "success",
+        "signal": "BUY",
+        "confidence": 0.80,
+        "probabilities": {"bullish": 0.80, "bearish": 0.05, "neutral": 0.15},
+        "p_win": None,
+        "conformal_width": None,
+        "costed_edge_bps": None,
+    }
+    with patch("backend.services.decision_engine.jesse_bridge.get_ml_prediction", AsyncMock(return_value=mock_ml)):
+        decision = await engine.evaluate_symbol("BTCUSDC", bars, None, 0, [], False)
+
+    assert decision is None
+    assert "telemetry missing" in engine.last_evaluation.get("reason", "")
+
+
+@pytest.mark.asyncio
+async def test_promoted_paper_missing_four_number_telemetry_skips(monkeypatch):
+    """Paper mode keeps the fail-open skip when the four numbers are absent."""
+    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("JESSE_ML_GATE_ENABLED", "true")
+    cfg = RiskConfig(
+        min_signal_strength=0.45,
+        enable_personas=False,
+        use_risk_reviewer_llm=False,
+        min_edge_fee_mult=0.0,
+        sl_atr_mult=1.75,
+        tp_atr_mult=5.5,
+        enable_jesse_ml=True,
+    )
+    engine = DecisionEngine(cfg)
+    engine.enable_kronos = False
+    engine.account_equity = 1000.0
+    engine.account_available = 1000.0
+    engine.promotion_state = PromotionState(result=GateResult(verdict="PROMOTE", reason="fixture"))
+    bars = _make_bars()
+    mock_signal = StrategySignal(symbol="BTCUSDC", signal="BUY", confidence=0.60, entry_price=bars[-1]["close"])
+    engine.strategy.generate_signal = MagicMock(return_value=mock_signal)
+    engine.regime_detector.detect = MagicMock(return_value=MagicMock(regime="TRENDING", weights=MagicMock(return_value={})))
+
+    mock_ml = {
+        "status": "success",
+        "signal": "BUY",
+        "confidence": 0.80,
+        "probabilities": {"bullish": 0.80, "bearish": 0.05, "neutral": 0.15},
+        "p_win": None,
+        "conformal_width": None,
+        "costed_edge_bps": None,
+    }
+    with patch("backend.services.decision_engine.jesse_bridge.get_ml_prediction", AsyncMock(return_value=mock_ml)):
+        decision = await engine.evaluate_symbol("BTCUSDC", bars, None, 0, [], False)
+
+    assert decision is not None
+    assert decision.action == "BUY"
+
+
 def test_promotion_required_without_artifacts(monkeypatch):
     monkeypatch.setenv("QTP_PROMOTION_REQUIRED", "true")
     monkeypatch.delenv("QTP_PROMOTION_ARTIFACT_DIR", raising=False)

@@ -626,6 +626,48 @@ class PartialTPManager:
     """Manages partial profit taking (TP) by closing a portion of the position."""
 
     @staticmethod
+    def _ratchet_stop_to_be_fees(trade, entry_ref: float, risk_config, mark: float, broker=None) -> None:
+        """After a confirmed partial TP, tighten the stop to breakeven+fees.
+
+        Ratchet-only: longs may only raise the stop, shorts may only lower it.
+        Never moves the stop to the wrong side of the current mark. In the live
+        path (broker given) the exchange stop is amended via the trailing-stop
+        sync helper.
+        """
+        try:
+            if not entry_ref or entry_ref <= 0:
+                return
+            cost = float(getattr(risk_config, "roundtrip_cost_rate", 0.0) or 0.0)
+            direction = (trade.direction or "").upper()
+            if direction == "BUY":
+                be_stop = entry_ref * (1.0 + cost)
+            elif direction == "SELL":
+                be_stop = entry_ref * (1.0 - cost)
+            else:
+                return
+            if be_stop <= 0:
+                return
+            if not stop_on_correct_side(direction, be_stop, mark=mark):
+                return
+            old_stop = trade.stop_loss
+            if direction == "BUY":
+                if old_stop is not None and be_stop <= float(old_stop):
+                    return
+            else:
+                if old_stop is not None and be_stop >= float(old_stop):
+                    return
+            trade.stop_loss = be_stop
+            trade.notes = (trade.notes or "") + f" | SL_RATCHET_BE_FEES: {old_stop} -> {be_stop:.6f}"
+            logger.info(
+                f"  [ {trade.symbol} ] SL RATCHET BE+fees: "
+                f"{old_stop if old_stop is not None else 'None'} -> {be_stop:.6f}"
+            )
+            if broker is not None:
+                TrailingStopManager._sync_exchange_stop(trade, be_stop, broker, mark=mark)
+        except Exception as e:
+            logger.warning(f"  [ {trade.symbol} ] SL ratchet BE+fees error (stop unchanged): {e}")
+
+    @staticmethod
     def apply_partial_tp(
         db,
         symbol: str,
@@ -689,6 +731,9 @@ class PartialTPManager:
                     trade.quantity = trade.quantity - close_qty
                     trade.notes = (notes + f" | PARTIAL_TP_DONE: closed {close_pct*100:.0f}% "
                                    f"({close_qty:.6f}) @ {filled_px:.6f}, partial PnL=${partial_pnl:+.4f}")
+                    PartialTPManager._ratchet_stop_to_be_fees(
+                        trade, float(trade.entry_price), risk_config, mark=float(current_price)
+                    )
                     logger.info(f"  [ {symbol} ] PARTIAL TP: closed {close_pct*100:.0f}% ({close_qty:.6f}) @ {filled_px:.6f}")
                     try:
                         asyncio.get_event_loop().create_task(
@@ -828,6 +873,9 @@ class PartialTPManager:
             for trade in trades:
                 trade.quantity = float(trade.quantity or 0) * scale
                 trade.notes = (trade.notes or "") + note
+                PartialTPManager._ratchet_stop_to_be_fees(
+                    trade, vwap, risk_config, mark=float(current_price), broker=broker
+                )
 
             logger.info(
                 f"  [ {symbol} ] PARTIAL TP live: closed {close_qty:.6f} @ {filled_px:.6f} "

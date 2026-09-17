@@ -1,3 +1,6 @@
+# WARNING: Do NOT run this stack on the live trading host; privileged DinD
+# sandbox + trading-net access. Lab use only.
+#
 # Overlay for the existing /docker/n8n stack.
 # Does not replace n8n, Traefik, Cloudflared, or SQLite.
 #
