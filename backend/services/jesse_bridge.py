@@ -274,6 +274,17 @@ class JesseBridgeService:
             "TRAIL_ATR_MULT": str(trail_atr_mult),
         }
 
+        # Snapshot pre-mutation state so a GEOMETRY_LIVE_LOCK rejection can be
+        # rolled back immediately instead of diverging until the next cycle.
+        prev_env_content: Optional[str] = None
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    prev_env_content = f.read()
+            except Exception as e:
+                logger.warning(f"Could not snapshot {env_path} before sync: {e}")
+        prev_environ = {k: os.environ.get(k) for k in updates}
+
         # Safely update .env in-place without replacing file inode (works on bind-mounted .env)
         if os.path.exists(env_path):
             try:
@@ -306,6 +317,35 @@ class JesseBridgeService:
             os.environ[k] = v
 
         cfg = refresh_risk_config()
+
+        # Re-evaluate the promotion contract against the refreshed config NOW —
+        # otherwise a sync that breaks GEOMETRY_LIVE_LOCK diverges from the
+        # locked geometry until the next DecisionEngine is constructed.
+        from backend.ml.promotion_service import resolve_promotion
+
+        promo = resolve_promotion(cfg)
+        if promo is not None and promo.reject_model:
+            logger.error(
+                "Jesse sync rejected by promotion gate (%s: %s) — rolling back parameter changes",
+                promo.verdict, promo.result.reason,
+            )
+            for k, prev in prev_environ.items():
+                if prev is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = prev
+            if prev_env_content is not None:
+                try:
+                    with open(env_path, "w", encoding="utf-8") as f:
+                        f.write(prev_env_content)
+                except Exception as e:
+                    logger.warning(f"Could not roll back {env_path}: {e}")
+            refresh_risk_config()
+            raise RuntimeError(
+                f"Jesse sync rejected by promotion gate ({promo.verdict}: {promo.result.reason}); "
+                "parameters rolled back"
+            )
+
         logger.info(
             f"Synced Jesse parameters to RiskConfig: SL={sl_atr_mult} ATR, TP={tp_atr_mult} ATR, "
             f"TrailActivation={trail_activation_atr} ATR, TrailDist={trail_atr_mult} ATR"

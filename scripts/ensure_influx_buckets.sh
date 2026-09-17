@@ -20,7 +20,7 @@ if [[ -z "$TOKEN" ]]; then
 fi
 
 BUCKETS=(
-  "trading-system:7d"
+  "trading-system:90d"
   "trading-signals:90d"
   "trading-orders:365d"
   "trading-raw:30d"
@@ -32,7 +32,16 @@ for spec in "${BUCKETS[@]}"; do
   name="${spec%%:*}"
   retention="${spec##*:}"
   if docker exec "$CONTAINER" influx bucket list --org "$ORG" --token "$TOKEN" --name "$name" >/dev/null 2>&1; then
-    echo "  bucket exists: $name"
+    # Bucket exists — reconcile retention (create alone would leave a stale
+    # shorter retention, e.g. trading-system was 7d before 2026-09).
+    echo "  bucket exists: $name — ensuring retention=${retention}"
+    bucket_id=$(docker exec "$CONTAINER" influx bucket list \
+      --org "$ORG" --token "$TOKEN" --name "$name" --hide-headers | awk '{print $1}' | head -n1)
+    if [[ -n "$bucket_id" ]]; then
+      docker exec "$CONTAINER" influx bucket update \
+        --org "$ORG" --token "$TOKEN" \
+        --id "$bucket_id" --retention "${retention}" || true
+    fi
   else
     echo "  creating bucket: $name (retention=${retention})"
     docker exec "$CONTAINER" influx bucket create \

@@ -268,8 +268,12 @@ def clip_kelly_for_thin_book(
     closed_count: int,
     min_closed: int = MIN_CLOSED_TRADES_FOR_EMPIRICAL_B,
 ) -> Tuple[float, bool]:
-    """Until 30 closed trades exist in the active partition, clip Kelly to [0.25, 1.0]."""
-    if closed_count >= min_closed:
-        return float(size_multiplier), False
-    clipped = max(0.25, min(1.0, float(size_multiplier)))
+    """Clip the Kelly size multiplier before it reaches the sizing path.
+
+    The upper bound 1.0 is unconditional — Kelly may only ever reduce size,
+    never amplify it. Thin books (< min_closed trades) also get a 0.25 floor;
+    thick books may reduce all the way toward 0.
+    """
+    floor = 0.25 if closed_count < min_closed else 0.0
+    clipped = max(floor, min(1.0, float(size_multiplier)))
     return clipped, clipped != float(size_multiplier)

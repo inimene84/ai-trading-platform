@@ -119,9 +119,24 @@ def test_clip_kelly_for_thin_book():
     clipped, was_clipped = clip_kelly_for_thin_book(1.8, closed_count=5)
     assert was_clipped is True
     assert clipped == 1.0
-    unclipped, was_clipped = clip_kelly_for_thin_book(1.8, closed_count=40)
+    # Thin book keeps the 0.25 floor.
+    floored, was_clipped = clip_kelly_for_thin_book(0.10, closed_count=5)
+    assert was_clipped is True
+    assert floored == 0.25
+    in_range, was_clipped = clip_kelly_for_thin_book(0.60, closed_count=5)
     assert was_clipped is False
-    assert unclipped == 1.8
+    assert in_range == 0.60
+
+
+def test_clip_kelly_thick_book_still_caps_at_one():
+    """The 1.0 upper bound is unconditional — Kelly may never amplify size."""
+    clipped, was_clipped = clip_kelly_for_thin_book(1.8, closed_count=40)
+    assert was_clipped is True
+    assert clipped == 1.0
+    # Thick book has no 0.25 floor — it may reduce all the way toward 0.
+    reduced, was_clipped = clip_kelly_for_thin_book(0.10, closed_count=40)
+    assert was_clipped is False
+    assert reduced == 0.10
 
 
 def test_annotate_ml_prediction_fail_closes_overfit_model():

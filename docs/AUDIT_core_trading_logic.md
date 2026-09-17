@@ -185,6 +185,14 @@ whose net-of-cost edge is not yet demonstrated is the main standing exposure.
 
 ## Separately: a live-config issue found during the ops inventory
 
+> **Addendum (2026-09-16, verified at commit `bd3a7a3`).** This specific
+> finding is **resolved in compose**: `docker-compose.prod.yml` now
+> interpolates `PAPER_TRADING: ${PAPER_TRADING:-true}`,
+> `DRY_RUN_ALL: ${DRY_RUN_ALL:-true}`, and
+> `BINANCE_TESTNET: ${BINANCE_TESTNET:-false}`, so `.env` on the VPS is
+> authoritative for these flags (with safe paper-mode defaults when unset).
+> The rest of this audit remains as written at the audited commit `98ec16b`.
+
 `docker-compose.prod.yml` sets `PAPER_TRADING: false`, `DRY_RUN_ALL: false`, and
 `BINANCE_TESTNET: false` in the `environment:` block. In Compose, `environment:`
 **overrides** `env_file:`, so setting `PAPER_TRADING=true` in `.env` on the VPS has

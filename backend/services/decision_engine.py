@@ -837,6 +837,14 @@ class DecisionEngine:
                                         f"vetoed by promoted-model live four-number check ({live_check.reason})",
                                     )
                                     return None
+                                if not live_check.applied and live_exchange_orders_allowed():
+                                    # Promoted live model without the four-number
+                                    # telemetry (p_win/width/edge) — fail closed.
+                                    self._record_eval(
+                                        symbol, signal.signal, signal.confidence,
+                                        f"vetoed by promoted-model live four-number check (telemetry missing: {live_check.reason})",
+                                    )
+                                    return None
 
                             # Conformal Uncertainty Veto: reject trades in high ambiguity or wide conformal sets
                             if uncertainty == "HIGH" or gated:
@@ -886,6 +894,12 @@ class DecisionEngine:
                         # Do not re-parse error text here — a 5xx traceback that
                         # mentions artifacts is still an outage and must veto live.
                         if ml_res.get("status") == "no_model":
+                            if live_exchange_orders_allowed() or promotion_required():
+                                logger.error(
+                                    f"[{symbol}] Jesse ML gate returned no_model in LIVE mode ({err}) — fail closed: vetoing {signal.signal}"
+                                )
+                                self._record_eval(symbol, signal.signal, signal.confidence, f"vetoed by Jesse ML no_model in LIVE mode ({err})")
+                                return None
                             logger.warning(
                                 f"[{symbol}] Jesse ML gate skipped — no deployable model ({err})"
                             )
@@ -1082,10 +1096,11 @@ class DecisionEngine:
 
         if kelly_mult is not None and kelly_mult > 0:
             kelly_mult, was_clipped = clip_kelly_for_thin_book(float(kelly_mult), closed_count)
+            self.last_evaluation["kelly_size_multiplier"] = float(kelly_mult)
             if was_clipped:
                 logger.info(
                     f"[{symbol}] Kelly multiplier clipped to {kelly_mult:.2f}x "
-                    f"(partition closed trades {closed_count} < 30)"
+                    f"(partition closed trades {closed_count})"
                 )
 
         # Apply Kelly sizing to baseline notional for primary entries
@@ -1209,6 +1224,12 @@ class DecisionEngine:
                 activation = float(getattr(self.config, "trail_activation_atr", 0.0) or 0.0)
                 trail_mult = float(getattr(self.config, "trail_atr_mult", 0.0) or 0.0)
                 captured_atr = max(0.0, activation - trail_mult)
+                if getattr(self.config, "partial_tp_enabled", False):
+                    # A fraction of the position exits at the partial-TP level,
+                    # not at the trail lock — blend the two exit distances.
+                    close_pct = float(getattr(self.config, "partial_tp_close_pct", 0.50) or 0.50)
+                    partial_mult = float(getattr(self.config, "partial_tp_atr_mult", 1.0) or 1.0)
+                    captured_atr = close_pct * partial_mult + (1.0 - close_pct) * captured_atr
                 expected_move = min(tp_distance, captured_atr * atr)
 
             gross_expected = expected_move * quantity

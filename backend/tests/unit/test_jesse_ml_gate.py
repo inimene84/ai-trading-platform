@@ -151,9 +151,36 @@ async def test_jesse_ml_gate_fail_open_on_error_in_paper(ml_risk_config, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_jesse_ml_gate_skips_no_model_in_live(ml_risk_config, monkeypatch):
-    """Missing artifacts must skip the gate in live — not veto every entry."""
+async def test_jesse_ml_gate_vetoes_no_model_in_live(ml_risk_config, monkeypatch):
+    """Missing artifacts in live must fail closed — veto the entry like any other non-success status."""
     monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("JESSE_ML_GATE_ENABLED", "true")
+    engine = DecisionEngine(ml_risk_config)
+    engine.enable_kronos = False
+    engine.promotion_state = None
+    engine.account_equity = 1000.0
+    engine.account_available = 1000.0
+    bars = _make_bars(50)
+
+    mock_signal = StrategySignal(symbol="BTCUSDC", signal="BUY", confidence=0.60, entry_price=bars[-1]["close"])
+    engine.strategy.generate_signal = MagicMock(return_value=mock_signal)
+    engine.regime_detector.detect = MagicMock(return_value=MagicMock(regime="TRENDING", weights=MagicMock(return_value={})))
+
+    mock_ml_res = {
+        "status": "no_model",
+        "error": "No model artifact found for BTC-USDT (1h, lightgbm)",
+    }
+    with patch("backend.services.decision_engine.jesse_bridge.get_ml_prediction", AsyncMock(return_value=mock_ml_res)):
+        decision = await engine.evaluate_symbol("BTCUSDC", bars, None, 0, [], False)
+
+    assert decision is None
+    assert "vetoed by Jesse ML no_model in LIVE mode" in engine.last_evaluation.get("reason", "")
+
+
+@pytest.mark.asyncio
+async def test_jesse_ml_gate_skips_no_model_in_paper(ml_risk_config, monkeypatch):
+    """Missing artifacts in paper still skip the gate (fail-open) without blocking trades."""
+    monkeypatch.setenv("TRADING_MODE", "paper")
     monkeypatch.setenv("JESSE_ML_GATE_ENABLED", "true")
     engine = DecisionEngine(ml_risk_config)
     engine.enable_kronos = False

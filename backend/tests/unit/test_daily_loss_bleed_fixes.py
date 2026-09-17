@@ -213,6 +213,7 @@ def test_min_edge_uses_trail_capture_not_full_tp():
         trail_atr_mult=0.9,  # captured = 0.1 ATR — tiny
         tp_atr_mult=10.0,    # theoretical TP huge
         sl_atr_mult=1.0,
+        partial_tp_enabled=False,  # isolate the pure trail-capture path
         equity_sizing_enabled=False,
         trade_usdt_amount=100.0,
     )
@@ -226,6 +227,38 @@ def test_min_edge_uses_trail_capture_not_full_tp():
     # expected_move = 0.1 * atr ≈ 0.2; gross on $100 notional qty=1 → $0.20
     # roundtrip = 0.0012 * 100 = 0.12; required = 2.5 * 0.12 = 0.30 → fail
     assert engine._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is False
+
+
+def test_min_edge_blends_partial_tp_capture():
+    """With partial TP enabled, captured ATR blends the partial exit and the trail lock."""
+    cfg = RiskConfig(
+        min_edge_fee_mult=2.5,
+        taker_fee_rate=0.0004,
+        slippage_rate=0.0002,
+        trailing_stop_enabled=True,
+        trail_activation_atr=1.0,
+        trail_atr_mult=0.9,      # trail leg captures 0.1 ATR
+        tp_atr_mult=10.0,
+        sl_atr_mult=1.0,
+        partial_tp_enabled=True,
+        partial_tp_close_pct=0.50,
+        partial_tp_atr_mult=1.0,  # partial leg captures 1.0 ATR
+        equity_sizing_enabled=False,
+        trade_usdt_amount=100.0,
+    )
+    engine = DecisionEngine(cfg)
+    bars = _bars(30, base=100.0)
+    for b in bars:
+        b["high"] = 101.0
+        b["low"] = 99.0
+
+    # blended capture = 0.5*1.0 + 0.5*0.1 = 0.55 ATR → expected_move ≈ 1.1
+    # gross $1.10 > required $0.30 → pass (old formula would have failed)
+    assert engine._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is True
+    # A smaller partial leg keeps the gate honest: 0.5*0.1 + 0.5*0.1 = 0.1 ATR → fail
+    cfg2 = cfg.model_copy(update={"partial_tp_atr_mult": 0.1})
+    engine2 = DecisionEngine(cfg2)
+    assert engine2._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is False
 
 
 def test_min_edge_full_tp_when_trailing_disabled():

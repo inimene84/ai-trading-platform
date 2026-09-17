@@ -1,3 +1,5 @@
+# WARNING: Do NOT run this stack on the live trading host; privileged DinD
+# sandbox + trading-net access. Lab use only.
 services:
   traefik:
     image: traefik:latest
@@ -5,7 +7,7 @@ services:
     environment:
     - DOCKER_API_VERSION=1.41
     command:
-    - --api.insecure=true
+    - --api.insecure=false
     - --providers.docker=true
     - --providers.docker.exposedbydefault=false
     - --entrypoints.web.address=:80
@@ -39,6 +41,12 @@ services:
     - EXECUTIONS_DATA_MAX_AGE=168
     - EXECUTIONS_DATA_PRUNE=true
     - N8N_PROXY_HOPS=1
+    # SECURITY: N8N_BLOCK_ENV_ACCESS_IN_NODE=false lets ANY workflow/Code/AI
+    # node read the container environment, including BACKEND_API_KEY below.
+    # We cannot flip this to true yet: tracked workflow exports
+    # (workflows/*.json) read $env.BACKEND_API_KEY in 22 places.
+    # Recommended: migrate those workflows to n8n stored credentials
+    # (Header Auth / environment-agnostic credential), then set this to true.
     - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
     - BACKEND_API_KEY=${BACKEND_API_KEY}
     - EXECUTIONS_MODE=regular

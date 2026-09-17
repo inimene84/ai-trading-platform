@@ -1,10 +1,15 @@
 # Ops Runbook — QuantumTrade Pro (Hostinger VPS)
 
-> **This system trades real money.** `docker-compose.prod.yml` sets
-> `PAPER_TRADING: false`, `DRY_RUN_ALL: false`, `BINANCE_TESTNET: false`
-> (lines 16, 20–22) directly in the `environment:` block, so the live-trading
-> posture is baked into the compose file, not just `.env`. Every command below
-> can move real capital. Read the [Safety warnings](#safety-warnings) first.
+> **This system trades real money.** `docker-compose.prod.yml` interpolates
+> `PAPER_TRADING: ${PAPER_TRADING:-true}` (line 17),
+> `BINANCE_TESTNET: ${BINANCE_TESTNET:-false}` (line 21), and
+> `DRY_RUN_ALL: ${DRY_RUN_ALL:-true}` (line 23) — safe paper-mode defaults in
+> the compose file, with the **`.env` on the VPS now authoritative** for these
+> flags. Because `environment:` interpolation reads the project `.env`, the
+> VPS `.env` must be reviewed before pulling/deploying: if it sets
+> `PAPER_TRADING=false` / `DRY_RUN_ALL=false`, the stack trades live. Every
+> command below can move real capital. Read the
+> [Safety warnings](#safety-warnings) first.
 
 Scope: this document inventories the operational scripts and entrypoints that
 exist in this repo and describes what each one *actually does*, based on reading
@@ -145,11 +150,11 @@ processes/containers. **MED** = restarts services or mutates config/state.
 
 | Path | Purpose | Canonical? | Danger |
 |---|---|---|---|
-| `start.sh` | `./start.sh` = native (uvicorn `:8000` + Vite); `./start.sh docker` = `docker compose down` + `up -d --build` using **`docker-compose.yml`** | yes for local | MED–**HIGH** — `docker-compose.yml` also hardcodes `PAPER_TRADING: false`; never run on the VPS |
+| `start.sh` | `./start.sh` = native (uvicorn `:8000` + Vite); `./start.sh docker` = `docker compose down` + `up -d --build` using **`docker-compose.yml`** | yes for local | MED — dev `docker-compose.yml` has no `PAPER_TRADING` key at all (only `BINANCE_TESTNET: ${BINANCE_TESTNET:-true}`); still never run it on the VPS |
 | `run.sh` | Poetry-based launcher: backend `:8080`, frontend `:3000`, traps Ctrl-C | duplicate of `start.sh` native mode | LOW |
 | `start_docker_local.sh` / `.bat`, `run.bat` | Windows/local Docker helpers | duplicates | LOW |
 | `Dockerfile.backend`, `mcp_server/Dockerfile`, `sentry_watchdog/Dockerfile` | Image builds (backend is `python:3.11-slim`, `uv pip install -r requirements.txt`) | yes | LOW |
-| `docker-compose.yml` / `docker-compose.prod.yml` | Dev vs prod stack; **both** set live-trading flags | `prod` is canonical on VPS | **HIGH** |
+| `docker-compose.yml` / `docker-compose.prod.yml` | Dev vs prod stack; prod interpolates the live-trading flags from `.env` with safe defaults (see the banner at the top of this doc); dev has no `PAPER_TRADING` key | `prod` is canonical on VPS | **HIGH** |
 
 There is **no Makefile and no systemd unit** in the repo. `scripts/vps_realtime_watchdog.sh`
 documents itself as a **cron** job instead.
