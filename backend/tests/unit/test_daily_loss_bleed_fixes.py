@@ -216,6 +216,7 @@ def test_min_edge_uses_trail_capture_not_full_tp():
         trailing_stop_enabled=True,
         trail_activation_atr=1.0,
         trail_atr_mult=0.9,  # captured = 0.1 ATR — tiny
+        partial_tp_enabled=False,
         tp_atr_mult=10.0,    # theoretical TP huge
         sl_atr_mult=1.0,
         equity_sizing_enabled=False,
