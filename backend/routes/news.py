@@ -1,5 +1,5 @@
 """News and market data routes for the News & Data Panel."""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 import asyncio
 import time
@@ -416,7 +416,9 @@ async def get_market_sentiment():
 
 # ─── GET /api/news/sentiment — n8n WF4 reads latest Influx scores ─────────────
 @router.get("/sentiment")
-async def get_news_sentiment(lookback_minutes: int = 180):
+async def get_news_sentiment(
+    lookback_minutes: int = Query(default=180, ge=1, le=1440),
+):
     """Latest per-symbol sentiment for n8n enrichment (WF4) and dashboards."""
     symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
     output = []

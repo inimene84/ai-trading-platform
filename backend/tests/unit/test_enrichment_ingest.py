@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.main import app
+from backend.routes import market_data as md
 from backend.services.influxdb_writer import InfluxDBWriter
 
 
@@ -51,8 +53,6 @@ async def test_write_macro_technical_divergence_measurements(writer):
 def test_enrichment_routes_store_and_list(auth_headers, monkeypatch):
     monkeypatch.setenv("ADMIN_API_KEY", "test-admin-key")
     monkeypatch.setenv("CONFIRM_LIVE_DEPLOY", "true")
-    from backend.main import app
-    from backend.routes import market_data as md
 
     md._LAST_WRITES["on-chain"] = []
     md._LAST_WRITES["macro"] = []
@@ -115,6 +115,9 @@ def test_enrichment_routes_store_and_list(auth_headers, monkeypatch):
         assert r4.status_code == 200
         assert r4.json()["kind"] == "divergence"
         influx.write_divergence_alert.assert_awaited()
+
+        denied = client.post("/api/market-data/on-chain", json={"symbol": "BTCUSDT"})
+        assert denied.status_code == 401
 
         listed = client.get("/openapi.json").json()["paths"]
         wanted = [

@@ -7,11 +7,10 @@ from typing import Any, Optional, Union
 
 from fastapi import APIRouter, Body
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from backend.services.binance_market_data import binance_market_data
 from backend.services.crypto_news_service import crypto_news_service
-from backend.services.influxdb_sentiment_reader import sentiment_reader
 from backend.services.influxdb_writer import influx
 from backend.services.multi_asset_bars import fetch_bars
 
@@ -35,7 +34,7 @@ def _now_iso() -> str:
 
 def _as_items(payload: Union[dict, list, BaseModel]) -> list[dict[str, Any]]:
     if isinstance(payload, list):
-        items = payload
+        items = payload[:20]
     else:
         items = [payload]
     out: list[dict[str, Any]] = []
@@ -59,7 +58,7 @@ def _direction_from_label(value: Any, default: str = "NEUTRAL") -> str:
 
 
 class OnChainPayload(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     symbol: str = "BTCUSDT"
     source: str = "on-chain-whale"
@@ -73,7 +72,7 @@ class OnChainPayload(BaseModel):
 
 
 class MacroPayload(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     symbol: str = "BTCUSDT"
     source: str = "macro-correlation"
@@ -90,7 +89,7 @@ class MacroPayload(BaseModel):
 
 
 class TechnicalPayload(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     symbol: str = "BTCUSDT"
     source: str = "technical-divergence"
@@ -108,13 +107,13 @@ class TechnicalPayload(BaseModel):
 
 
 class DivergencePayload(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     symbol: str = "BTCUSDT"
     source: str = "n8n-divergence"
     sentiment_score: float = 0.0
     direction: str = "NEUTRAL"
-    price_change: float = Field(default=0.0, alias="price_change")
+    price_change: float = 0.0
     price_change_pct: Optional[float] = None
     signal: str = "NEUTRAL"
     confidence: float = 0.0
@@ -350,16 +349,10 @@ def _technical_output_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for row in rows:
         symbol = str(row.get("symbol") or "BTCUSDT").upper()
-        sentiment = None
-        try:
-            sentiment = sentiment_reader.get_sentiment(symbol, lookback_minutes=180)
-        except Exception as exc:
-            logger.warning(f"Sentiment join failed for {symbol}: {exc}")
-        sent_score = float((sentiment or {}).get("sentiment_score") or 0.0)
-        sent_dir = str((sentiment or {}).get("direction") or row.get("overall_signal") or "NEUTRAL")
-        if sent_dir in {"BUY"}:
+        sent_dir = str(row.get("overall_signal") or row.get("direction") or "NEUTRAL")
+        if sent_dir == "BUY":
             sent_dir = "BULLISH"
-        elif sent_dir in {"SELL"}:
+        elif sent_dir == "SELL":
             sent_dir = "BEARISH"
         price_change = float(row.get("price_change_4h") or row.get("price_change_pct") or 0.0)
         # WF4 treats 0.02 as 2%. Stored price_change_4h is already percent; normalize.
@@ -367,7 +360,7 @@ def _technical_output_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         output.append({
             "json": {
                 "symbol": symbol,
-                "sentiment_score": sent_score,
+                "sentiment_score": float(row.get("score") or 0.0),
                 "direction": sent_dir,
                 "price_change_pct": price_change_frac,
                 "overall_signal": row.get("overall_signal", "NEUTRAL"),
