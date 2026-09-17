@@ -106,7 +106,21 @@ async def validate_agent_token(request: Request) -> Dict[str, Any]:
 @router.get("/grok-overseer/overview")
 async def grok_overseer_overview(request: Request) -> Dict[str, Any]:
     """Read-only platform overview for GrokBOT overseer / supervisor jobs."""
+    validate_admin_request(request)
     import httpx
+
+    admin_token = (
+        request.headers.get("x-api-key", "").strip()
+        or (
+            request.headers.get("authorization", "").strip()[7:].strip()
+            if request.headers.get("authorization", "").strip().lower().startswith("bearer ")
+            else ""
+        )
+        or os.getenv("ADMIN_API_KEY", "").strip()
+        or os.getenv("API_AUTH_TOKEN", "").strip()
+        or os.getenv("BACKEND_API_KEY", "").strip()
+    )
+    headers = {"Authorization": f"Bearer {admin_token}"} if admin_token else {}
 
     base = "http://127.0.0.1:8000"
     paths = {
@@ -123,7 +137,7 @@ async def grok_overseer_overview(request: Request) -> Dict[str, Any]:
     async with httpx.AsyncClient(timeout=12.0) as client:
         for key, path in paths.items():
             try:
-                r = await client.get(f"{base}{path}")
+                r = await client.get(f"{base}{path}", headers=headers)
                 out["sections"][key] = r.json() if r.is_success else {"error": r.text[:300], "status": r.status_code}
             except Exception as exc:
                 out["sections"][key] = {"error": str(exc)}
