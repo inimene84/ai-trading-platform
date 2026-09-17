@@ -16,6 +16,7 @@ import httpx
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional
 
+from backend.ml.promotion_service import resolve_promotion
 from backend.services.jesse_ml_gates import (
     STRATEGY_PT_ATR,
     STRATEGY_SL_ATR,
@@ -44,9 +45,10 @@ JESSE_PASSWORD = os.getenv("JESSE_PASSWORD", "").strip()
 # JESSE_SYNC_TO_LIVE, and do not point the live ML gate at a new artifact.
 # QTP_SHADOW_INGEST_ENABLED=false
 
-# Predict errors that mean "this symbol has no live model" — not an ML outage.
-# Live fail-closed must not treat these as a veto or the whole universe stalls
-# when only a subset of pairs have a promoted LightGBM artifact.
+# Predict errors that mean "this symbol has no live model". Live mode
+# fail-closes (veto) on no_model; paper stays fail-open. Do not rewrite
+# 5xx bodies to no_model — a traceback that mentions artifacts is still
+# an outage.
 _JESSE_ML_NO_ARTIFACT = "no model artifact found"
 _JESSE_ML_PROMOTION_FAILED = "promotion gate failed"
 
@@ -257,7 +259,13 @@ class JesseBridgeService:
         trail_activation_atr: float = 1.8,
         trail_atr_mult: float = 1.6,
     ) -> Dict[str, Any]:
-        """Apply validated quant strategy parameters directly to active RiskConfig."""
+        """Apply validated quant strategy parameters directly to active RiskConfig.
+
+        Re-runs resolve_promotion immediately. On REJECT, restore .env and
+        os.environ byte-for-byte so a failed sync cannot leave live geometry
+        half-written. The /jesse/sync route maps rejected → HTTP 409.
+        Rejected B200 artifacts are never promoted by this path.
+        """
         if os.getenv("JESSE_SYNC_TO_LIVE", "false").lower() != "true":
             logger.info("JESSE_SYNC_TO_LIVE is disabled — strategy sync is a no-op")
             return {
@@ -273,6 +281,22 @@ class JesseBridgeService:
             "TRAIL_ACTIVATION_ATR": str(trail_activation_atr),
             "TRAIL_ATR_MULT": str(trail_atr_mult),
         }
+        original_env_bytes: Optional[bytes] = None
+        if os.path.exists(env_path):
+            with open(env_path, "rb") as f:
+                original_env_bytes = f.read()
+        original_environ = {k: os.environ[k] if k in os.environ else None for k in updates}
+
+        def _restore_pre_sync() -> None:
+            if original_env_bytes is not None:
+                with open(env_path, "wb") as f:
+                    f.write(original_env_bytes)
+            for key, value in original_environ.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            refresh_risk_config()
 
         # Safely update .env in-place without replacing file inode (works on bind-mounted .env)
         if os.path.exists(env_path):
@@ -306,6 +330,39 @@ class JesseBridgeService:
             os.environ[k] = v
 
         cfg = refresh_risk_config()
+        try:
+            promo = resolve_promotion(cfg)
+        except Exception as exc:
+            _restore_pre_sync()
+            logger.warning(
+                "Jesse sync promotion check failed — restored .env and os.environ (%s)",
+                exc,
+            )
+            return {
+                "status": "rejected",
+                "synced": False,
+                "verdict": "REJECT",
+                "reason": f"promotion check failed: {exc}",
+                "failed_gate": "RESOLVE_PROMOTION",
+                "http_status": 409,
+            }
+        if promo is not None and promo.reject_model:
+            _restore_pre_sync()
+            reason = promo.result.reason
+            logger.warning(
+                "Jesse sync %s — restored .env and os.environ byte-for-byte (%s)",
+                promo.verdict,
+                reason,
+            )
+            return {
+                "status": "rejected",
+                "synced": False,
+                "verdict": promo.verdict,
+                "reason": reason,
+                "failed_gate": promo.result.failed_gate,
+                "http_status": 409,
+            }
+
         logger.info(
             f"Synced Jesse parameters to RiskConfig: SL={sl_atr_mult} ATR, TP={tp_atr_mult} ATR, "
             f"TrailActivation={trail_activation_atr} ATR, TrailDist={trail_atr_mult} ATR"

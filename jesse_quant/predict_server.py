@@ -143,7 +143,7 @@ def calculate_fractional_kelly(
     The size multiplier normalises f* by the fractional Kelly of a *reference* edge of
     +10 percentage points above break-even for the same b, so 1.0x means "the model is
     as confident as a strategy that wins 10pp more often than it needs to". It is clamped
-    to [0.20, 2.0] as before; the live engine applies its own [0.25, 1.0] clip.
+        to [0.20, 1.0]; the live engine also applies a 0.25 thin-book floor.
     """
     if payoff_ratio <= 0:
         payoff_ratio = 1.0
@@ -154,7 +154,7 @@ def calculate_fractional_kelly(
 
     p_ref = min(0.95, breakeven_win_probability(b) + 0.10)
     baseline_kelly = max(1e-6, ((p_ref * b - (1.0 - p_ref)) / b) * fraction)
-    size_multiplier = round(float(np.clip(fractional_kelly / baseline_kelly, 0.20, 2.0)), 3) if fractional_kelly > 0 else 0.0
+    size_multiplier = round(float(np.clip(fractional_kelly / baseline_kelly, 0.20, 1.0)), 3) if fractional_kelly > 0 else 0.0
 
     return {
         "fractional_kelly": round(float(fractional_kelly), 4),

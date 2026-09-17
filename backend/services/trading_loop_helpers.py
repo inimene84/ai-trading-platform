@@ -622,6 +622,60 @@ class TrailingStopManager:
             logger.warning(f"  [ {trade.symbol} ] exchange-stop sync error: {e}")
 
 
+def _ratchet_stop_to_be_fees(trade, risk_config, broker=None, mark=None, entry_override=None) -> bool:
+    """After a confirmed partial TP, tighten stop to entry ± round-trip cost.
+
+    Tightening only; never widens. Side-checked before the DB write and
+    before TrailingStopManager._sync_exchange_stop.
+    Returns True when the stop was moved.
+    """
+    entry = entry_override if entry_override is not None else getattr(trade, "entry_price", None)
+    try:
+        entry_px = float(entry) if entry is not None else 0.0
+    except (TypeError, ValueError):
+        return False
+    if entry_px <= 0:
+        return False
+
+    try:
+        cost_rate = float(getattr(risk_config, "roundtrip_cost_rate", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        cost_rate = 0.0
+    if cost_rate < 0:
+        cost_rate = 0.0
+    fee_offset = entry_px * cost_rate
+    direction = (getattr(trade, "direction", None) or "").upper()
+    old_stop = getattr(trade, "stop_loss", None)
+
+    if direction == "BUY":
+        candidate = entry_px + fee_offset
+        floor = float(old_stop) if old_stop is not None else float("-inf")
+        if candidate <= floor:
+            return False
+    elif direction == "SELL":
+        candidate = entry_px - fee_offset
+        ceiling = float(old_stop) if old_stop is not None else float("inf")
+        if candidate >= ceiling:
+            return False
+    else:
+        return False
+
+    if not stop_on_correct_side(direction, candidate, mark=mark, entry=entry_px):
+        logger.info(
+            f"  [ {getattr(trade, 'symbol', '?')} ] PARTIAL-TP BE ratchet refused: "
+            f"{candidate} wrong-side of mark={mark} entry={entry_px} {direction}"
+        )
+        return False
+
+    trade.stop_loss = candidate
+    logger.info(
+        f"  [ {getattr(trade, 'symbol', '?')} ] PARTIAL-TP BE ratchet "
+        f"{old_stop} -> {candidate:.6f} (entry ± roundtrip_cost_rate)"
+    )
+    TrailingStopManager._sync_exchange_stop(trade, candidate, broker, mark=mark)
+    return True
+
+
 class PartialTPManager:
     """Manages partial profit taking (TP) by closing a portion of the position."""
 
@@ -690,6 +744,7 @@ class PartialTPManager:
                     trade.notes = (notes + f" | PARTIAL_TP_DONE: closed {close_pct*100:.0f}% "
                                    f"({close_qty:.6f}) @ {filled_px:.6f}, partial PnL=${partial_pnl:+.4f}")
                     logger.info(f"  [ {symbol} ] PARTIAL TP: closed {close_pct*100:.0f}% ({close_qty:.6f}) @ {filled_px:.6f}")
+                    _ratchet_stop_to_be_fees(trade, risk_config, broker=None, mark=current_price)
                     try:
                         asyncio.get_event_loop().create_task(
                             influx._write(
@@ -828,6 +883,9 @@ class PartialTPManager:
             for trade in trades:
                 trade.quantity = float(trade.quantity or 0) * scale
                 trade.notes = (trade.notes or "") + note
+                _ratchet_stop_to_be_fees(
+                    trade, risk_config, broker=broker, mark=current_price, entry_override=vwap,
+                )
 
             logger.info(
                 f"  [ {symbol} ] PARTIAL TP live: closed {close_qty:.6f} @ {filled_px:.6f} "

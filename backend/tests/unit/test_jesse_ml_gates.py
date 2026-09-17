@@ -112,16 +112,22 @@ def test_fractional_kelly_uses_geometry_payoff_not_hardcoded_two():
     at_geometry = calculate_fractional_kelly(0.55, payoff_ratio=STRATEGY_PAYOFF_RATIO)
     assert at_geometry["payoff_ratio"] > 3.0
     assert at_geometry["fractional_kelly"] >= at_two["fractional_kelly"]
-    assert 0.20 <= at_geometry["size_multiplier"] <= 2.0
+    assert 0.20 <= at_geometry["size_multiplier"] <= 1.0
 
 
 def test_clip_kelly_for_thin_book():
     clipped, was_clipped = clip_kelly_for_thin_book(1.8, closed_count=5)
     assert was_clipped is True
     assert clipped == 1.0
-    unclipped, was_clipped = clip_kelly_for_thin_book(1.8, closed_count=40)
+    capped, was_clipped = clip_kelly_for_thin_book(1.8, closed_count=40)
+    assert was_clipped is True
+    assert capped == 1.0
+    floor, was_clipped = clip_kelly_for_thin_book(0.10, closed_count=5)
+    assert was_clipped is True
+    assert floor == 0.25
+    kept, was_clipped = clip_kelly_for_thin_book(0.10, closed_count=40)
     assert was_clipped is False
-    assert unclipped == 1.8
+    assert kept == 0.10
 
 
 def test_annotate_ml_prediction_fail_closes_overfit_model():

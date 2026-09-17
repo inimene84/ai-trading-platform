@@ -151,9 +151,36 @@ async def test_jesse_ml_gate_fail_open_on_error_in_paper(ml_risk_config, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_jesse_ml_gate_skips_no_model_in_live(ml_risk_config, monkeypatch):
-    """Missing artifacts must skip the gate in live — not veto every entry."""
+async def test_jesse_ml_gate_vetoes_no_model_in_live(ml_risk_config, monkeypatch):
+    """Live + no promoted model is a veto (the old skip was a fail-open hole)."""
     monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("JESSE_ML_GATE_ENABLED", "true")
+    engine = DecisionEngine(ml_risk_config)
+    engine.enable_kronos = False
+    engine.promotion_state = None
+    engine.account_equity = 1000.0
+    engine.account_available = 1000.0
+    bars = _make_bars(50)
+
+    mock_signal = StrategySignal(symbol="BTCUSDC", signal="BUY", confidence=0.60, entry_price=bars[-1]["close"])
+    engine.strategy.generate_signal = MagicMock(return_value=mock_signal)
+    engine.regime_detector.detect = MagicMock(return_value=MagicMock(regime="TRENDING", weights=MagicMock(return_value={})))
+
+    mock_ml_res = {
+        "status": "no_model",
+        "error": "No model artifact found for BTC-USDT (1h, lightgbm)",
+    }
+    with patch("backend.services.decision_engine.jesse_bridge.get_ml_prediction", AsyncMock(return_value=mock_ml_res)):
+        decision = await engine.evaluate_symbol("BTCUSDC", bars, None, 0, [], False)
+
+    assert decision is None
+    assert "no_model" in engine.last_evaluation.get("reason", "")
+
+
+@pytest.mark.asyncio
+async def test_jesse_ml_gate_no_model_fail_open_in_paper(ml_risk_config, monkeypatch):
+    """Paper stays fail-open when the sidecar reports no_model."""
+    monkeypatch.setenv("TRADING_MODE", "paper")
     monkeypatch.setenv("JESSE_ML_GATE_ENABLED", "true")
     engine = DecisionEngine(ml_risk_config)
     engine.enable_kronos = False
@@ -312,4 +339,6 @@ async def test_jesse_ml_kelly_clipping_below_30_partition_trades(ml_risk_config,
         # Base trade_usdt_amount is 10.0 (from ml_risk_config), clipped kelly is 1.0x (not 1.8x)
         # If clipped to 1.0x, notional doesn't scale above 1.0x trade_usdt or risk
         assert decision.action == "BUY"
+        assert decision.kelly_multiplier == pytest.approx(1.0)
+        assert engine.last_evaluation.get("kelly_multiplier") == pytest.approx(1.0)
 

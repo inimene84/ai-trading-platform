@@ -1,4 +1,5 @@
 # Overlay for the existing /docker/n8n stack.
+# DO NOT RUN ON THE LIVE TRADING HOST.
 # Does not replace n8n, Traefik, Cloudflared, or SQLite.
 #
 #   cd /docker/n8n
