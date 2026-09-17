@@ -10,8 +10,11 @@ QuantumTrade trading platform:
 import os
 import json
 import logging
-import httpx
 from typing import Any, Dict, Optional
+
+import httpx
+
+from backend.services.jesse_validation import evaluate_validation_gates
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,40 @@ DEFAULT_SL_ATR_MULT = float(os.getenv("JESSE_DEFAULT_SL_ATR_MULT", "1.75"))
 DEFAULT_TP_ATR_MULT = float(os.getenv("JESSE_DEFAULT_TP_ATR_MULT", "5.5"))
 DEFAULT_TRAIL_ACTIVATION_ATR = float(os.getenv("JESSE_DEFAULT_TRAIL_ACTIVATION_ATR", "1.8"))
 DEFAULT_TRAIL_ATR_MULT = float(os.getenv("JESSE_DEFAULT_TRAIL_ATR_MULT", "1.6"))
+DEFAULT_ML_PREDICT_TIMEOUT = 20.0
+
+
+def configured_ml_model_type() -> str:
+    raw = (os.getenv("JESSE_ML_MODEL_TYPE") or "lightgbm").strip().lower()
+    return raw or "lightgbm"
+
+
+def configured_ml_fallback_model_type() -> Optional[str]:
+    raw = (os.getenv("JESSE_ML_FALLBACK_MODEL_TYPE", "lstm") or "").strip().lower()
+    if raw in {"", "none", "false", "off", "0"}:
+        return None
+    return raw
+
+
+def ml_predict_timeout_seconds() -> float:
+    raw = os.getenv("JESSE_ML_PREDICT_TIMEOUT", str(DEFAULT_ML_PREDICT_TIMEOUT))
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_ML_PREDICT_TIMEOUT
+    return timeout if timeout >= 1.0 else DEFAULT_ML_PREDICT_TIMEOUT
+
+
+def metadata_is_usable(metadata: Optional[Dict[str, Any]]) -> bool:
+    """True when Jesse /model-metadata describes a loadable production artifact."""
+    if not metadata:
+        return False
+    if metadata.get("status") == "error":
+        return False
+    err = str(metadata.get("error") or "").lower()
+    if "not found" in err or "no model artifact" in err:
+        return False
+    return True
 
 
 class JesseBridgeService:
@@ -291,7 +328,7 @@ class JesseBridgeService:
         """Fetch ultra-low-latency real-time ML direction prediction and probabilities."""
         base_ml = await self._resolve_ml_url()
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=ml_predict_timeout_seconds()) as client:
                 res = await client.post(
                     f"{base_ml}/predict",
                     json={
@@ -391,6 +428,59 @@ class JesseBridgeService:
             logger.debug(f"Jesse model metadata unavailable: {e}")
             return {"status": "error", "error": str(e)}
 
+    async def resolve_gate_model(
+        self,
+        symbol: str = "BTC-USDT",
+        timeframe: str = "1h",
+    ) -> Dict[str, Any]:
+        """Pick LightGBM when a production artifact exists, else a promoted LSTM.
+
+        Missing LightGBM is not a reason to disable the live ML gate. ETH/SOL 1h
+        LightGBM was quarantined for wrong barrier geometry; promoted LSTMs at
+        live 5.5/1.75 ATR remain valid. Fallback never bypasses DSR/PBO checks.
+        """
+        primary = configured_ml_model_type()
+        fallback = configured_ml_fallback_model_type()
+        primary_meta = await self.get_model_metadata(symbol, timeframe, primary)
+        if metadata_is_usable(primary_meta):
+            primary_meta["resolved_model_type"] = primary
+            primary_meta["resolved_via"] = "primary"
+            return primary_meta
+
+        primary_error = primary_meta.get("error") or (
+            f"No model artifact found for {self.normalize_jesse_symbol(symbol)} "
+            f"({timeframe}, {primary})"
+        )
+        if fallback and fallback != primary:
+            fallback_meta = await self.get_model_metadata(symbol, timeframe, fallback)
+            if metadata_is_usable(fallback_meta):
+                logger.info(
+                    "Jesse ML gate using %s fallback for %s %s (primary %s unavailable: %s)",
+                    fallback,
+                    self.normalize_jesse_symbol(symbol),
+                    timeframe,
+                    primary,
+                    primary_error,
+                )
+                fallback_meta["resolved_model_type"] = fallback
+                fallback_meta["resolved_via"] = "fallback"
+                fallback_meta["primary_model_type"] = primary
+                fallback_meta["primary_error"] = primary_error
+                return fallback_meta
+            fallback_error = fallback_meta.get("error")
+        else:
+            fallback_error = None
+
+        return {
+            "status": "error",
+            "resolved_model_type": primary,
+            "resolved_via": "none",
+            "primary_model_type": primary,
+            "error": primary_error,
+            "fallback_model_type": fallback,
+            "fallback_error": fallback_error,
+        }
+
     async def get_validation_status(
         self,
         symbol: str = "BTC-USDT",
@@ -398,8 +488,6 @@ class JesseBridgeService:
         model_type: str = "lightgbm",
     ) -> Dict[str, Any]:
         """Return institutional validation gate status for a Jesse ML model."""
-        from backend.services.jesse_validation import evaluate_validation_gates
-
         metadata = await self.get_model_metadata(symbol, timeframe, model_type)
         if metadata.get("status") == "error":
             return {

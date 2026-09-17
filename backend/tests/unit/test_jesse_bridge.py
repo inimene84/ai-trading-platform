@@ -6,7 +6,11 @@ from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 
 from backend.main import app
-from backend.services.jesse_bridge import JesseBridgeService, jesse_bridge
+from backend.services.jesse_bridge import (
+    JesseBridgeService,
+    jesse_bridge,
+    metadata_is_usable,
+)
 from backend.services.risk_config import get_risk_config
 
 
@@ -187,6 +191,79 @@ async def test_jesse_bridge_get_model_metadata():
          patch("backend.services.jesse_bridge.httpx.AsyncClient", return_value=mock_client):
         meta = await service.get_model_metadata("BTCUSDT", "1h")
         assert meta["metrics"]["prob_backtest_overfitting"] == pytest.approx(0.636)
+
+
+def test_metadata_is_usable_rejects_missing_artifacts():
+    assert metadata_is_usable(None) is False
+    assert metadata_is_usable({"status": "error", "error": "Metadata not found for ETH-USDT_1h_lightgbm_meta.json"}) is False
+    assert metadata_is_usable({"status": "success", "metrics": {"deflated_sharpe_ratio": 1.0}}) is True
+    assert metadata_is_usable({"metrics": {"deflated_sharpe_ratio": 1.0}}) is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_gate_model_uses_lstm_when_lightgbm_missing():
+    service = JesseBridgeService()
+    lightgbm_miss = {"status": "error", "error": "Metadata not found for ETH-USDT_1h_lightgbm_meta.json"}
+    lstm_ok = {
+        "status": "success",
+        "symbol": "ETH-USDT",
+        "model_type": "lstm",
+        "metrics": {"deflated_sharpe_ratio": 1.0, "prob_backtest_overfitting": 0.028},
+    }
+
+    async def fake_meta(symbol, timeframe="1h", model_type="lightgbm"):
+        if model_type == "lstm":
+            return dict(lstm_ok)
+        return dict(lightgbm_miss)
+
+    with patch.object(service, "get_model_metadata", AsyncMock(side_effect=fake_meta)):
+        resolved = await service.resolve_gate_model("ETHUSDT", "1h")
+    assert resolved["resolved_model_type"] == "lstm"
+    assert resolved["resolved_via"] == "fallback"
+    assert resolved["metrics"]["prob_backtest_overfitting"] == pytest.approx(0.028)
+
+
+@pytest.mark.asyncio
+async def test_resolve_gate_model_keeps_lightgbm_when_present():
+    service = JesseBridgeService()
+    lgbm_ok = {
+        "status": "success",
+        "model_type": "lightgbm",
+        "metrics": {"deflated_sharpe_ratio": 1.0, "prob_backtest_overfitting": 0.20},
+    }
+
+    async def fake_meta(symbol, timeframe="1h", model_type="lightgbm"):
+        assert model_type == "lightgbm"
+        return dict(lgbm_ok)
+
+    with patch.object(service, "get_model_metadata", AsyncMock(side_effect=fake_meta)) as mock_meta:
+        resolved = await service.resolve_gate_model("BTC-USDT", "1h")
+    assert resolved["resolved_model_type"] == "lightgbm"
+    assert resolved["resolved_via"] == "primary"
+    assert mock_meta.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_gate_model_errors_when_neither_artifact_exists():
+    service = JesseBridgeService()
+    miss = {"status": "error", "error": "Metadata not found"}
+
+    with patch.object(service, "get_model_metadata", AsyncMock(return_value=miss)):
+        resolved = await service.resolve_gate_model("BTC-USDT", "1h")
+    assert resolved["status"] == "error"
+    assert resolved["resolved_via"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_resolve_gate_model_respects_disabled_fallback(monkeypatch):
+    monkeypatch.setenv("JESSE_ML_FALLBACK_MODEL_TYPE", "none")
+    service = JesseBridgeService()
+    miss = {"status": "error", "error": "Metadata not found for ETH-USDT_1h_lightgbm_meta.json"}
+
+    with patch.object(service, "get_model_metadata", AsyncMock(return_value=miss)) as mock_meta:
+        resolved = await service.resolve_gate_model("ETH-USDT", "1h")
+    assert resolved["resolved_via"] == "none"
+    assert mock_meta.await_count == 1
 
 
 @pytest.mark.asyncio

@@ -161,8 +161,11 @@ curl -sf "http://127.0.0.1:9003/model-metadata?symbol=ETH-USDT&timeframe=1h&mode
 curl -sf "http://127.0.0.1:9003/predict?symbol=ETH-USDT&timeframe=1h&model_type=lstm"
 ```
 
-Do **not** auto-enable live Jesse sync. LSTM serving is shadow-capable until
-QuantumTrade is pointed at `model_type=lstm` per symbol/timeframe.
+Do **not** auto-enable live Jesse sync (`JESSE_SYNC_TO_LIVE` stays false).
+QuantumTrade's live ML gate still prefers LightGBM, then fail-closed
+falls back to a promoted LSTM at the same symbol/timeframe when the
+LightGBM artifact is missing (ETH/SOL 1h geometry quarantine). It never
+disables `JESSE_ML_GATE_ENABLED` and never loads `*.rejected.*`.
 
 ---
 
@@ -294,7 +297,9 @@ High-PBO failure example (18 trials):
 | `*.collapsed-everybar.joblib` | Alternate label mode; not served unless promoted |
 | `*.rejected.joblib` / `*.rejected.pt` | Failed promotion — never copy to the trading VPS |
 
-`/model-metadata` looks for `{symbol}_{timeframe}_{model_type}_meta.json`. If missing, gate returns error and live mode blocks entries.
+`/model-metadata` looks for `{symbol}_{timeframe}_{model_type}_meta.json`. If the
+LightGBM sidecar is missing, the live gate tries `{symbol}_{timeframe}_lstm_meta.json`
+and still fail-closes when neither production artifact exists.
 
 ---
 
@@ -303,6 +308,7 @@ High-PBO failure example (18 trials):
 | Symptom | Fix |
 |---------|-----|
 | `Metadata not found for BTC-USDT_1h_lightgbm_meta.json` | Run `auto-retrain-promote`; prior train may have failed gate |
+| `No model artifact found for ETH-USDT (1h, lightgbm)` | Expected when LightGBM is quarantined (`*.refused-geometry-*`). Live gate should use `ETH-USDT_1h_lstm.pt` — do **not** set `JESSE_ML_GATE_ENABLED=false` |
 | `PROMOTION REFUSED (exit 2)` | Lower `--n-configs`, add data, or accept gate failure |
 | `DSR unavailable` | Retrain; metadata corrupt or missing |
 | ML health shows symbol in `rejected_models` | Model loaded but fails gate; retrain or remove artifact |
