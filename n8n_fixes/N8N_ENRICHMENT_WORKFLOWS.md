@@ -9,7 +9,7 @@ Four scheduled workflows write extra signals into the InfluxDB `news-sentiment` 
 | 1. On-Chain Whale Activity Monitor | POST | `http://ai-trading-backend:8000/api/market-data/on-chain` |
 | 2. Macro Cross-Asset Correlation Monitor | POST | `http://ai-trading-backend:8000/api/market-data/macro` |
 | 3. Technical Divergence Alert Workflow | POST | `http://ai-trading-backend:8000/api/market-data/technical` |
-| 4. Sentiment-Price Divergence Alerts | GET technical + POST | `http://ai-trading-backend:8000/api/market-data/technical` then `.../divergence` (alias: `/api/alerts/divergence`) |
+| 4. Sentiment-Price Divergence Alerts | GET technical + POST | `http://ai-trading-backend:8000/api/market-data/technical` then `.../divergence` (alias: `/api/alerts/divergence`). Manual webhook `qt-agentzero-div-manual` ACKs immediately (`onReceived`). |
 
 POSTs send `X-API-Key: {{ $env.BACKEND_API_KEY }}`. Backend logs `Stored on-chain|macro|technical|divergence ...`.
 

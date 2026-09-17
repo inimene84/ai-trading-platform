@@ -79,7 +79,7 @@
       },
       {
         "parameters": {
-          "jsCode": "// Detect sentiment-price divergence from GET /technical `output` (or a raw row).\nfunction rowsFrom(item) {\n  if (Array.isArray(item.output)) return item.output;\n  if (Array.isArray(item.data)) return item.data.map((r) => ({ json: r }));\n  if (item.json && item.json.symbol) return [item];\n  if (item.symbol) return [{ json: item }];\n  return [];\n}\n\nconst incoming = $input.all().map((i) => i.json);\nconst rows = incoming.flatMap(rowsFrom);\nconst results = [];\n\nfor (const wrapped of rows) {\n  const row = wrapped.json || wrapped;\n  const symbol = row.symbol;\n  const sentiment_score = Number(row.sentiment_score || 0);\n  const direction = String(row.direction || 'NEUTRAL').toUpperCase();\n  const price_change_pct = Number(row.price_change_pct || 0);\n\n  let signal = 'NEUTRAL';\n  let confidence = 0.0;\n  if (direction === 'BULLISH' && price_change_pct < 0) {\n    signal = 'SELL_DUE_TO_SENTIMENT';\n    confidence = Math.abs(price_change_pct);\n  } else if (direction === 'BEARISH' && price_change_pct > 0) {\n    signal = 'BUY_DUE_TO_SENTIMENT';\n    confidence = price_change_pct;\n  }\n\n  if (signal !== 'NEUTRAL' && Math.abs(price_change_pct) >= 0.02) {\n    results.push({\n      json: {\n        symbol,\n        sentiment_score,\n        direction,\n        price_change: price_change_pct,\n        signal,\n        confidence,\n        reasoning: `Sentiment ${direction.toLowerCase()} but price ${price_change_pct >= 0 ? 'rising' : 'falling'} by ${(Math.abs(price_change_pct) * 100).toFixed(2)}%`,\n        source: 'n8n-divergence',\n      },\n    });\n  }\n}\n\nreturn results;\n"
+          "jsCode": "// Detect sentiment-price divergence from GET /technical `output` (or a raw row).\nfunction rowsFrom(item) {\n  if (Array.isArray(item.output)) return item.output;\n  if (Array.isArray(item.data)) return item.data.map((r) => ({ json: r }));\n  if (item.json && item.json.symbol) return [item];\n  if (item.symbol) return [{ json: item }];\n  return [];\n}\n\nconst incoming = $input.all().map((i) => i.json);\nconst rows = incoming.flatMap(rowsFrom);\nconst results = [];\n\nfor (const wrapped of rows) {\n  const row = wrapped.json || wrapped;\n  const symbol = row.symbol;\n  const sentiment_score = Number(row.sentiment_score || 0);\n  const direction = String(row.direction || 'NEUTRAL').toUpperCase();\n  const price_change_pct = Number(row.price_change_pct || 0);\n\n  let signal = 'NEUTRAL';\n  let confidence = 0.0;\n  if (direction === 'BULLISH' && price_change_pct < 0) {\n    signal = 'SELL_DUE_TO_SENTIMENT';\n    confidence = Math.abs(price_change_pct);\n  } else if (direction === 'BEARISH' && price_change_pct > 0) {\n    signal = 'BUY_DUE_TO_SENTIMENT';\n    confidence = price_change_pct;\n  }\n\n  if (signal !== 'NEUTRAL' && Math.abs(price_change_pct) >= 0.02) {\n    results.push({\n      json: {\n        symbol,\n        sentiment_score,\n        direction,\n        price_change: price_change_pct,\n        signal,\n        confidence,\n        reasoning: `Sentiment ${direction.toLowerCase()} but price ${price_change_pct >= 0 ? 'rising' : 'falling'} by ${(Math.abs(price_change_pct) * 100).toFixed(2)}%`,\n        source: 'n8n-divergence',\n      },\n    });\n  }\n}\n\nif (results.length === 0) {\n  return [{ json: { status: 'ok', alerts: 0, skip: true, source: 'n8n-divergence' } }];\n}\nreturn results;\n"
         },
         "name": "Process Divergence Analysis",
         "type": "n8n-nodes-base.code",
@@ -138,7 +138,7 @@
         "parameters": {
           "httpMethod": "POST",
           "path": "qt-agentzero-div-manual",
-          "responseMode": "lastNode",
+          "responseMode": "onReceived",
           "options": {}
         },
         "name": "Manual Test Webhook",
@@ -150,6 +150,38 @@
         ],
         "id": "div-manual-webhook-001",
         "webhookId": "qt-agentzero-div-manual"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "has-alert-1",
+                "leftValue": "={{ $json.skip }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "notTrue"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "name": "Has Alert?",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          6672,
+          7312
+        ],
+        "id": "div-has-alert-001"
       }
     ],
     "connections": {
@@ -195,7 +227,7 @@
         "main": [
           [
             {
-              "node": "Send Divergence Alert",
+              "node": "Has Alert?",
               "type": "main",
               "index": 0
             }
@@ -220,6 +252,18 @@
       },
       "Send Divergence Alert": {
         "main": [
+          []
+        ]
+      },
+      "Has Alert?": {
+        "main": [
+          [
+            {
+              "node": "Send Divergence Alert",
+              "type": "main",
+              "index": 0
+            }
+          ],
           []
         ]
       }
