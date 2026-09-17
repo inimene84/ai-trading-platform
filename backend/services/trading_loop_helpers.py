@@ -622,14 +622,14 @@ class TrailingStopManager:
             logger.warning(f"  [ {trade.symbol} ] exchange-stop sync error: {e}")
 
 
-def _ratchet_stop_to_be_fees(trade, risk_config, broker=None, mark=None) -> bool:
+def _ratchet_stop_to_be_fees(trade, risk_config, broker=None, mark=None, entry_override=None) -> bool:
     """After a confirmed partial TP, tighten stop to entry ± round-trip cost.
 
     Tightening only; never widens. Side-checked before the DB write and
     before TrailingStopManager._sync_exchange_stop.
     Returns True when the stop was moved.
     """
-    entry = getattr(trade, "entry_price", None)
+    entry = entry_override if entry_override is not None else getattr(trade, "entry_price", None)
     try:
         entry_px = float(entry) if entry is not None else 0.0
     except (TypeError, ValueError):
@@ -883,7 +883,9 @@ class PartialTPManager:
             for trade in trades:
                 trade.quantity = float(trade.quantity or 0) * scale
                 trade.notes = (trade.notes or "") + note
-                _ratchet_stop_to_be_fees(trade, risk_config, broker=broker, mark=current_price)
+                _ratchet_stop_to_be_fees(
+                    trade, risk_config, broker=broker, mark=current_price, entry_override=vwap,
+                )
 
             logger.info(
                 f"  [ {symbol} ] PARTIAL TP live: closed {close_qty:.6f} @ {filled_px:.6f} "

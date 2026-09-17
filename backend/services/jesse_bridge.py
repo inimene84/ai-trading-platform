@@ -330,18 +330,34 @@ class JesseBridgeService:
             os.environ[k] = v
 
         cfg = refresh_risk_config()
-        promo = resolve_promotion(cfg)
-        if promo is not None and promo.verdict == "REJECT":
+        try:
+            promo = resolve_promotion(cfg)
+        except Exception as exc:
             _restore_pre_sync()
-            reason = promo.result.reason
             logger.warning(
-                "Jesse sync REJECT — restored .env and os.environ byte-for-byte (%s)",
-                reason,
+                "Jesse sync promotion check failed — restored .env and os.environ (%s)",
+                exc,
             )
             return {
                 "status": "rejected",
                 "synced": False,
                 "verdict": "REJECT",
+                "reason": f"promotion check failed: {exc}",
+                "failed_gate": "RESOLVE_PROMOTION",
+                "http_status": 409,
+            }
+        if promo is not None and promo.reject_model:
+            _restore_pre_sync()
+            reason = promo.result.reason
+            logger.warning(
+                "Jesse sync %s — restored .env and os.environ byte-for-byte (%s)",
+                promo.verdict,
+                reason,
+            )
+            return {
+                "status": "rejected",
+                "synced": False,
+                "verdict": promo.verdict,
                 "reason": reason,
                 "failed_gate": promo.result.failed_gate,
                 "http_status": 409,

@@ -844,7 +844,12 @@ class DecisionEngine:
                                     "conformal_width": ml_res.get("conformal_width"),
                                     "costed_edge_bps": ml_res.get("costed_edge_bps"),
                                 })
-                                if live_check.applied and not live_check.allowed:
+                                missing_telemetry = "missing live telemetry" in (live_check.reason or "")
+                                if missing_telemetry and not live_exchange_orders_allowed():
+                                    logger.warning(
+                                        f"[{symbol}] Promoted-model telemetry missing in paper — fail-open"
+                                    )
+                                elif live_check.applied and not live_check.allowed:
                                     self._record_eval(
                                         symbol, signal.signal, signal.confidence,
                                         f"vetoed by promoted-model live four-number check ({live_check.reason})",
@@ -1242,9 +1247,11 @@ class DecisionEngine:
                 trail_mult = float(getattr(self.config, "trail_atr_mult", 0.0) or 0.0)
                 captured_atr = max(0.0, activation - trail_mult)
                 if getattr(self.config, "partial_tp_enabled", False):
-                    close_pct = float(getattr(self.config, "partial_tp_close_pct", 0.5) or 0.5)
+                    raw_pct = getattr(self.config, "partial_tp_close_pct", None)
+                    close_pct = 0.5 if raw_pct is None else float(raw_pct)
                     close_pct = min(1.0, max(0.0, close_pct))
-                    partial_mult = float(getattr(self.config, "partial_tp_atr_mult", 1.0) or 0.0)
+                    raw_partial = getattr(self.config, "partial_tp_atr_mult", None)
+                    partial_mult = 1.0 if raw_partial is None else float(raw_partial)
                     captured_atr = (close_pct * partial_mult) + ((1.0 - close_pct) * captured_atr)
                 expected_move = min(tp_distance, captured_atr * atr)
 
