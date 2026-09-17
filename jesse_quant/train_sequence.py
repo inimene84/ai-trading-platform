@@ -93,11 +93,12 @@ def _train_one(
     device: str,
     lr: float,
     epochs: int,
+    class_weights: Optional[torch.Tensor] = None,
 ) -> None:
     assert torch is not None
     model.to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.CrossEntropyLoss(reduction="none")
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights, reduction="none")
     use_amp = device.startswith("cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     model.train()
@@ -141,6 +142,16 @@ def train_lstm_meta(
     else:
         w_train = seq_w[:split_idx]
 
+    c0 = np.sum(y_train == 0)
+    c1 = np.sum(y_train == 1)
+    if c1 > 0 and c0 > 0:
+        total = float(c0 + c1)
+        w0 = total / (2.0 * float(c0))
+        w1 = total / (2.0 * float(c1))
+        class_weights = torch.tensor([w0, w1], dtype=torch.float32, device=device)
+    else:
+        class_weights = None
+
     holdout_columns: List[np.ndarray] = []
     trial_sharpes: List[float] = []
     fitted: List[Tuple[Dict[str, Any], Dict[str, Any], float, np.ndarray]] = []
@@ -159,7 +170,7 @@ def train_lstm_meta(
             torch.from_numpy(w_train),
         )
         loader = DataLoader(ds, batch_size=64, shuffle=True, drop_last=False)
-        _train_one(model, loader, device, lr=float(params["lr"]), epochs=int(params["epochs"]))
+        _train_one(model, loader, device, lr=float(params["lr"]), epochs=int(params["epochs"]), class_weights=class_weights)
         model.eval()
         with torch.no_grad():
             logits = model(torch.from_numpy(x_test).to(device))
