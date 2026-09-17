@@ -8,8 +8,10 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.services.jesse_bridge import (
     JesseBridgeService,
+    is_missing_artifact_error,
     jesse_bridge,
     metadata_is_usable,
+    ml_predict_timeout_seconds,
 )
 from backend.services.risk_config import get_risk_config
 
@@ -198,6 +200,17 @@ def test_metadata_is_usable_rejects_missing_artifacts():
     assert metadata_is_usable({"status": "error", "error": "Metadata not found for ETH-USDT_1h_lightgbm_meta.json"}) is False
     assert metadata_is_usable({"status": "success", "metrics": {"deflated_sharpe_ratio": 1.0}}) is True
     assert metadata_is_usable({"metrics": {"deflated_sharpe_ratio": 1.0}}) is True
+    assert is_missing_artifact_error({"error": "No model artifact found for ETH-USDT (1h, lightgbm)"}) is True
+    assert is_missing_artifact_error({"error": "Connection refused"}) is False
+
+
+def test_ml_predict_timeout_is_clamped(monkeypatch):
+    monkeypatch.setenv("JESSE_ML_PREDICT_TIMEOUT", "999")
+    assert ml_predict_timeout_seconds() == 30.0
+    monkeypatch.setenv("JESSE_ML_PREDICT_TIMEOUT", "0")
+    assert ml_predict_timeout_seconds() == 1.0
+    monkeypatch.setenv("JESSE_ML_PREDICT_TIMEOUT", "not-a-number")
+    assert ml_predict_timeout_seconds() == 20.0
 
 
 @pytest.mark.asyncio

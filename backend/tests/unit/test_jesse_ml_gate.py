@@ -272,6 +272,9 @@ async def test_jesse_ml_gate_fail_closed_on_validation_in_live(ml_risk_config, m
         "backend.services.jesse_bridge.jesse_bridge.resolve_gate_model",
         AsyncMock(return_value=failing_meta),
     ), patch(
+        "backend.services.jesse_bridge.jesse_bridge.get_model_metadata",
+        AsyncMock(),
+    ) as mock_meta, patch(
         "backend.services.jesse_bridge.jesse_bridge.get_ml_prediction",
         AsyncMock(),
     ) as mock_predict:
@@ -279,6 +282,7 @@ async def test_jesse_ml_gate_fail_closed_on_validation_in_live(ml_risk_config, m
         assert decision is None
         assert "validation gate" in engine.last_evaluation.get("reason", "")
         mock_predict.assert_not_called()
+        mock_meta.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -318,6 +322,65 @@ async def test_jesse_ml_gate_lstm_fallback_in_live_when_lightgbm_missing(ml_risk
         assert decision.action == "BUY"
         mock_predict.assert_awaited()
         assert mock_predict.await_args.kwargs["model_type"] == "lstm"
+
+
+@pytest.mark.asyncio
+async def test_jesse_ml_gate_retries_lstm_when_lightgbm_joblib_missing(ml_risk_config, monkeypatch):
+    """Sidecar JSON can exist after a joblib quarantine — retry LSTM on predict miss."""
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("JESSE_ML_GATE_ENABLED", "true")
+    engine = DecisionEngine(ml_risk_config)
+    engine.enable_kronos = False
+    engine.account_equity = 1000.0
+    engine.account_available = 1000.0
+    bars = _make_bars(50)
+
+    mock_signal = StrategySignal(symbol="ETHUSDT", signal="BUY", confidence=0.60, entry_price=bars[-1]["close"])
+    engine.strategy.generate_signal = MagicMock(return_value=mock_signal)
+    engine.regime_detector.detect = MagicMock(return_value=MagicMock(regime="TRENDING", weights=MagicMock(return_value={})))
+
+    lgbm_meta = {
+        "status": "success",
+        "resolved_model_type": "lightgbm",
+        "resolved_via": "primary",
+        "metrics": {"deflated_sharpe_ratio": 1.0, "prob_backtest_overfitting": 0.05},
+    }
+    lstm_meta = {
+        "status": "success",
+        "model_type": "lstm",
+        "metrics": {"deflated_sharpe_ratio": 1.0, "prob_backtest_overfitting": 0.028},
+    }
+    lstm_pred = {
+        "status": "success",
+        "signal": "BUY",
+        "confidence": 0.70,
+        "probabilities": {"bullish": 0.70, "bearish": 0.10, "neutral": 0.20},
+        "uncertainty": "LOW",
+        "gated": False,
+        "kelly": {"size_multiplier": 1.0},
+    }
+
+    async def fake_predict(symbol, timeframe="1h", model_type="lightgbm", threshold=0.45):
+        if model_type == "lstm":
+            return lstm_pred
+        return {"status": "error", "error": "No model artifact found for ETH-USDT (1h, lightgbm)"}
+
+    with patch(
+        "backend.services.jesse_bridge.jesse_bridge.resolve_gate_model",
+        AsyncMock(return_value=lgbm_meta),
+    ), patch(
+        "backend.services.jesse_bridge.jesse_bridge.get_model_metadata",
+        AsyncMock(return_value=lstm_meta),
+    ), patch(
+        "backend.services.jesse_bridge.jesse_bridge.get_ml_prediction",
+        AsyncMock(side_effect=fake_predict),
+    ) as mock_predict:
+        decision = await engine.evaluate_symbol("ETHUSDT", bars, None, 0, [], False)
+        assert decision is not None
+        assert decision.action == "BUY"
+        assert mock_predict.await_count == 2
+        assert mock_predict.await_args_list[0].kwargs["model_type"] == "lightgbm"
+        assert mock_predict.await_args_list[1].kwargs["model_type"] == "lstm"
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ QuantumTrade trading platform:
 import os
 import json
 import logging
+import math
 from typing import Any, Dict, Optional
 
 import httpx
@@ -29,14 +30,21 @@ DEFAULT_TP_ATR_MULT = float(os.getenv("JESSE_DEFAULT_TP_ATR_MULT", "5.5"))
 DEFAULT_TRAIL_ACTIVATION_ATR = float(os.getenv("JESSE_DEFAULT_TRAIL_ACTIVATION_ATR", "1.8"))
 DEFAULT_TRAIL_ATR_MULT = float(os.getenv("JESSE_DEFAULT_TRAIL_ATR_MULT", "1.6"))
 DEFAULT_ML_PREDICT_TIMEOUT = 20.0
+MAX_ML_PREDICT_TIMEOUT = 30.0
 
 
 def configured_ml_model_type() -> str:
+    """Primary Jesse ML artifact type (`JESSE_ML_MODEL_TYPE`, default lightgbm)."""
     raw = (os.getenv("JESSE_ML_MODEL_TYPE") or "lightgbm").strip().lower()
     return raw or "lightgbm"
 
 
 def configured_ml_fallback_model_type() -> Optional[str]:
+    """Secondary type when the primary sidecar/artifact is missing.
+
+    `JESSE_ML_FALLBACK_MODEL_TYPE` defaults to lstm. Set to none/false/off/0
+    to disable fallback (live gate then fail-closes on a missing primary).
+    """
     raw = (os.getenv("JESSE_ML_FALLBACK_MODEL_TYPE", "lstm") or "").strip().lower()
     if raw in {"", "none", "false", "off", "0"}:
         return None
@@ -44,16 +52,19 @@ def configured_ml_fallback_model_type() -> Optional[str]:
 
 
 def ml_predict_timeout_seconds() -> float:
+    """HTTP timeout for Jesse `/predict` (`JESSE_ML_PREDICT_TIMEOUT`, 1–30s)."""
     raw = os.getenv("JESSE_ML_PREDICT_TIMEOUT", str(DEFAULT_ML_PREDICT_TIMEOUT))
     try:
         timeout = float(raw)
     except (TypeError, ValueError):
         return DEFAULT_ML_PREDICT_TIMEOUT
-    return timeout if timeout >= 1.0 else DEFAULT_ML_PREDICT_TIMEOUT
+    if not math.isfinite(timeout):
+        return DEFAULT_ML_PREDICT_TIMEOUT
+    return min(MAX_ML_PREDICT_TIMEOUT, max(1.0, timeout))
 
 
 def metadata_is_usable(metadata: Optional[Dict[str, Any]]) -> bool:
-    """True when Jesse /model-metadata describes a loadable production artifact."""
+    """True when /model-metadata did not report an error or missing artifact."""
     if not metadata:
         return False
     if metadata.get("status") == "error":
@@ -62,6 +73,14 @@ def metadata_is_usable(metadata: Optional[Dict[str, Any]]) -> bool:
     if "not found" in err or "no model artifact" in err:
         return False
     return True
+
+
+def is_missing_artifact_error(payload: Optional[Dict[str, Any]]) -> bool:
+    """True when Jesse ML reported a missing sidecar or model file."""
+    if not payload:
+        return False
+    err = str(payload.get("error") or "").lower()
+    return "no model artifact" in err or "not found" in err
 
 
 class JesseBridgeService:

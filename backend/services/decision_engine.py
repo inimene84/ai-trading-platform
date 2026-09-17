@@ -11,7 +11,13 @@ from backend.services.opinion_layer import analyze_symbol as opinion_analyze
 from backend.services.kronos_gate import apply_kronos_gate
 from backend.services import kronos_service
 from backend.services.skill_miner import skill_miner
-from backend.services.jesse_bridge import jesse_bridge, metadata_is_usable
+from backend.services.jesse_bridge import (
+    configured_ml_fallback_model_type,
+    configured_ml_model_type,
+    is_missing_artifact_error,
+    jesse_bridge,
+    metadata_is_usable,
+)
 from backend.services.jesse_validation import evaluate_validation_gates
 
 logger = logging.getLogger(__name__)
@@ -545,29 +551,14 @@ class DecisionEngine:
         # 4e. Jesse Machine Learning Directional Consensus & Meta-Label Gate
         if self.enable_jesse_ml:
             try:
-                model_type = "lightgbm"
+                model_type = configured_ml_model_type()
                 # Institutional validation gate: fail-closed in LIVE when PBO/DSR gates fail.
                 # Missing LightGBM is not a disable-the-gate event — use a promoted LSTM
                 # at the same symbol/timeframe when one exists.
                 if live_exchange_orders_allowed():
                     val_meta = await jesse_bridge.resolve_gate_model(symbol=symbol, timeframe="1h")
                     model_type = val_meta.get("resolved_model_type") or model_type
-                    if metadata_is_usable(val_meta):
-                        gates = evaluate_validation_gates(val_meta)
-                        if not gates["deployment_ok"]:
-                            reason = "; ".join(gates["reasons"]) or "validation gates failed"
-                            logger.error(
-                                f"[{symbol}] Jesse ML validation gate VETO in LIVE mode "
-                                f"({model_type}): {reason}"
-                            )
-                            self._record_eval(
-                                symbol,
-                                signal.signal,
-                                signal.confidence,
-                                f"vetoed by Jesse ML validation gate ({reason})",
-                            )
-                            return None
-                    elif val_meta.get("resolved_via") == "none":
+                    if not metadata_is_usable(val_meta):
                         err = val_meta.get("error") or "Jesse ML artifact missing"
                         logger.error(
                             f"[{symbol}] Jesse ML gate has no production artifact in LIVE "
@@ -580,10 +571,46 @@ class DecisionEngine:
                             f"vetoed by Jesse ML error in LIVE mode ({err})",
                         )
                         return None
+                    gates = evaluate_validation_gates(val_meta)
+                    if not gates["deployment_ok"]:
+                        reason = "; ".join(gates["reasons"]) or "validation gates failed"
+                        logger.error(
+                            f"[{symbol}] Jesse ML validation gate VETO in LIVE mode "
+                            f"({model_type}): {reason}"
+                        )
+                        self._record_eval(
+                            symbol,
+                            signal.signal,
+                            signal.confidence,
+                            f"vetoed by Jesse ML validation gate ({reason})",
+                        )
+                        return None
 
                 ml_res = await jesse_bridge.get_ml_prediction(
                     symbol=symbol, timeframe="1h", model_type=model_type
                 )
+                fallback_type = configured_ml_fallback_model_type()
+                if (
+                    live_exchange_orders_allowed()
+                    and ml_res.get("status") != "success"
+                    and is_missing_artifact_error(ml_res)
+                    and fallback_type
+                    and model_type != fallback_type
+                ):
+                    fb_meta = await jesse_bridge.get_model_metadata(
+                        symbol=symbol, timeframe="1h", model_type=fallback_type
+                    )
+                    if metadata_is_usable(fb_meta):
+                        fb_gates = evaluate_validation_gates(fb_meta)
+                        if fb_gates["deployment_ok"]:
+                            logger.info(
+                                f"[{symbol}] Jesse ML predict missing {model_type} artifact; "
+                                f"retrying {fallback_type}"
+                            )
+                            model_type = fallback_type
+                            ml_res = await jesse_bridge.get_ml_prediction(
+                                symbol=symbol, timeframe="1h", model_type=model_type
+                            )
                 if ml_res.get("status") == "success":
                     ml_sig = ml_res.get("signal")
                     ml_conf = ml_res.get("confidence", 0.0)
