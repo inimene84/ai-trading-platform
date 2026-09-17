@@ -216,6 +216,7 @@ class Decision:
     confidence: float = 0.0
     reasoning: str = ""
     is_pyramid: bool = False
+    kelly_multiplier: Optional[float] = None
 
 class DecisionEngine:
     def __init__(
@@ -241,7 +242,18 @@ class DecisionEngine:
         self.account_available: float = 0.0
         self.account_leverage: float = 1.0
 
-    def _record_eval(self, symbol, direction, confidence, reason, entry=None, sl=None, tp=None, approved=False):
+    def _record_eval(
+        self,
+        symbol,
+        direction,
+        confidence,
+        reason,
+        entry=None,
+        sl=None,
+        tp=None,
+        approved=False,
+        kelly_multiplier=None,
+    ):
         self.last_evaluation = {
             "symbol": symbol,
             "direction": (direction or "HOLD").upper(),
@@ -251,6 +263,7 @@ class DecisionEngine:
             "stop_loss": sl,
             "take_profit": tp,
             "approved": approved,
+            "kelly_multiplier": kelly_multiplier,
         }
 
     def _ranging_entries_permitted(self) -> bool:
@@ -827,7 +840,7 @@ class DecisionEngine:
                             if promo is not None and promo.promote:
                                 live_check = apply_live_signal_check(promo, {
                                     "side": ml_sig,
-                                    "p_win": ml_res.get("p_win", ml_conf),
+                                    "p_win": ml_res.get("p_win"),
                                     "conformal_width": ml_res.get("conformal_width"),
                                     "costed_edge_bps": ml_res.get("costed_edge_bps"),
                                 })
@@ -886,6 +899,15 @@ class DecisionEngine:
                         # Do not re-parse error text here — a 5xx traceback that
                         # mentions artifacts is still an outage and must veto live.
                         if ml_res.get("status") == "no_model":
+                            if live_exchange_orders_allowed():
+                                logger.error(
+                                    f"[{symbol}] Jesse ML gate no_model in LIVE mode ({err}) — fail closed: vetoing {signal.signal}"
+                                )
+                                self._record_eval(
+                                    symbol, signal.signal, signal.confidence,
+                                    f"vetoed by Jesse ML no_model in LIVE mode ({err})",
+                                )
+                                return None
                             logger.warning(
                                 f"[{symbol}] Jesse ML gate skipped — no deployable model ({err})"
                             )
@@ -1010,7 +1032,8 @@ class DecisionEngine:
         if decision:
             self._record_eval(symbol, decision.action, decision.confidence, "entry decision",
                               entry=decision.entry_price, sl=decision.stop_loss,
-                              tp=decision.take_profit, approved=True)
+                              tp=decision.take_profit, approved=True,
+                              kelly_multiplier=decision.kelly_multiplier)
             if self.promotion_state is not None:
                 self.last_evaluation["promotion_verdict"] = self.promotion_state.verdict
                 if self.promotion_state.shadow and self.promotion_state.logged_predictions:
@@ -1085,7 +1108,7 @@ class DecisionEngine:
             if was_clipped:
                 logger.info(
                     f"[{symbol}] Kelly multiplier clipped to {kelly_mult:.2f}x "
-                    f"(partition closed trades {closed_count} < 30)"
+                    f"(unconditional 1.0 cap; thin-book floor 0.25 when closed={closed_count})"
                 )
 
         # Apply Kelly sizing to baseline notional for primary entries
@@ -1155,6 +1178,10 @@ class DecisionEngine:
             )
             return None
 
+        applied_kelly = float(kelly_mult) if (kelly_mult is not None and kelly_mult > 0) else None
+        if applied_kelly is not None:
+            logger.info(f"[{symbol}] Applied Kelly multiplier recorded: {applied_kelly:.3f}x")
+
         return Decision(
             action=direction,
             symbol=symbol,
@@ -1167,8 +1194,10 @@ class DecisionEngine:
                 f"Regime: {regime}"
                 + (" | Jesse ML gate skipped (no deployable model)"
                    if getattr(signal, "jesse_ml_gap", None) else "")
+                + (f" | kelly={applied_kelly:.3f}x" if applied_kelly is not None else "")
             ),
-            is_pyramid=is_pyramid
+            is_pyramid=is_pyramid,
+            kelly_multiplier=applied_kelly,
         )
 
     def _passes_min_edge(
@@ -1187,6 +1216,9 @@ class DecisionEngine:
         When trailing is enabled, winners are typically scratched near the
         trail lock (activation − trail distance), not at full TP. Gate on
         that captured move so fee-unsafe trail scratches are rejected.
+        When partial TP is enabled the captured ATR is the 50/50 blend of
+        the partial level and the trail lock (0.5×1.0 + 0.5×1.2 = 1.1 ATR
+        at default geometry).
 
         FAILS OPEN: any bad input / disabled config -> allow the trade.
         """
@@ -1209,6 +1241,11 @@ class DecisionEngine:
                 activation = float(getattr(self.config, "trail_activation_atr", 0.0) or 0.0)
                 trail_mult = float(getattr(self.config, "trail_atr_mult", 0.0) or 0.0)
                 captured_atr = max(0.0, activation - trail_mult)
+                if getattr(self.config, "partial_tp_enabled", False):
+                    close_pct = float(getattr(self.config, "partial_tp_close_pct", 0.5) or 0.5)
+                    close_pct = min(1.0, max(0.0, close_pct))
+                    partial_mult = float(getattr(self.config, "partial_tp_atr_mult", 1.0) or 0.0)
+                    captured_atr = (close_pct * partial_mult) + ((1.0 - close_pct) * captured_atr)
                 expected_move = min(tp_distance, captured_atr * atr)
 
             gross_expected = expected_move * quantity

@@ -210,7 +210,8 @@ def calculate_fractional_kelly(
 ) -> Dict[str, float]:
     """
     f* = fraction * (p * b - (1 - p)) / b
-    Size multiplier is scaled to a 0.125 quarter-Kelly baseline and clipped.
+    Size multiplier is scaled to a 0.125 quarter-Kelly baseline and clipped
+    to a 1.0 upper bound (unconditional). Thin-book clip keeps a 0.25 floor.
     """
     b = payoff_ratio if payoff_ratio > 0 else 1.0
     p = min(max(float(win_prob), 0.0), 1.0)
@@ -219,7 +220,7 @@ def calculate_fractional_kelly(
     if fractional <= 0:
         size_multiplier = 0.0
     else:
-        size_multiplier = float(max(0.20, min(fractional / KELLY_BASELINE, 2.0)))
+        size_multiplier = float(max(0.20, min(fractional / KELLY_BASELINE, 1.0)))
     return {
         "fractional_kelly": round(float(fractional), 4),
         "full_kelly": round(float(full_kelly), 4),
@@ -268,8 +269,10 @@ def clip_kelly_for_thin_book(
     closed_count: int,
     min_closed: int = MIN_CLOSED_TRADES_FOR_EMPIRICAL_B,
 ) -> Tuple[float, bool]:
-    """Until 30 closed trades exist in the active partition, clip Kelly to [0.25, 1.0]."""
+    """1.0 upper bound is unconditional; thin books also apply a 0.25 floor."""
+    raw = float(size_multiplier)
     if closed_count >= min_closed:
-        return float(size_multiplier), False
-    clipped = max(0.25, min(1.0, float(size_multiplier)))
-    return clipped, clipped != float(size_multiplier)
+        clipped = min(1.0, raw)
+        return clipped, clipped != raw
+    clipped = max(0.25, min(1.0, raw))
+    return clipped, clipped != raw

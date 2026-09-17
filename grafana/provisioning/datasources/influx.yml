@@ -1,0 +1,103 @@
+apiVersion: 1
+
+# Provisioned read-only via docker-compose.prod.yml.
+# Token/org come from the Grafana container environment (VPS .env).
+datasources:
+  - name: influxdb
+    uid: influxdb
+    type: influxdb
+    access: proxy
+    url: http://vps-influxdb:8086
+    isDefault: true
+    editable: false
+    jsonData:
+      version: Flux
+      organization: $INFLUXDB_ORG
+      defaultBucket: trading-system
+      httpMode: POST
+    secureJsonData:
+      token: $INFLUXDB_TOKEN
+
+  - name: influxdb - system
+    uid: influxdb-system
+    type: influxdb
+    access: proxy
+    url: http://vps-influxdb:8086
+    editable: false
+    jsonData:
+      version: Flux
+      organization: $INFLUXDB_ORG
+      defaultBucket: trading-system
+      httpMode: POST
+    secureJsonData:
+      token: $INFLUXDB_TOKEN
+
+  - name: influxdb - signals
+    uid: influxdb-signals
+    type: influxdb
+    access: proxy
+    url: http://vps-influxdb:8086
+    editable: false
+    jsonData:
+      version: Flux
+      organization: $INFLUXDB_ORG
+      defaultBucket: trading-signals
+      httpMode: POST
+    secureJsonData:
+      token: $INFLUXDB_TOKEN
+
+  - name: influxdb - orders
+    uid: influxdb-orders
+    type: influxdb
+    access: proxy
+    url: http://vps-influxdb:8086
+    editable: false
+    jsonData:
+      version: Flux
+      organization: $INFLUXDB_ORG
+      defaultBucket: trading-orders
+      httpMode: POST
+    secureJsonData:
+      token: $INFLUXDB_TOKEN
+
+  - name: influxdb - raw
+    uid: influxdb-raw
+    type: influxdb
+    access: proxy
+    url: http://vps-influxdb:8086
+    editable: false
+    jsonData:
+      version: Flux
+      organization: $INFLUXDB_ORG
+      defaultBucket: trading-raw
+      httpMode: POST
+    secureJsonData:
+      token: $INFLUXDB_TOKEN
+
+  - name: influxdb - memory
+    uid: influxdb-memory
+    type: influxdb
+    access: proxy
+    url: http://vps-influxdb:8086
+    editable: false
+    jsonData:
+      version: Flux
+      organization: $INFLUXDB_ORG
+      defaultBucket: trading-memory
+      httpMode: POST
+    secureJsonData:
+      token: $INFLUXDB_TOKEN
+
+  - name: influxdb - news
+    uid: influxdb-news
+    type: influxdb
+    access: proxy
+    url: http://vps-influxdb:8086
+    editable: false
+    jsonData:
+      version: Flux
+      organization: $INFLUXDB_ORG
+      defaultBucket: news-sentiment
+      httpMode: POST
+    secureJsonData:
+      token: $INFLUXDB_TOKEN

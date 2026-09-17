@@ -216,3 +216,19 @@ recorded 81-day net was positive but dominated by commissions (+$64 net against
 −$193.54 of fees) — within noise of zero. My recommendation is to reduce leverage or
 pause live sizing until (5) produces a cost-aware expectancy estimate. That is your
 call; I have not changed any runtime config.
+
+---
+
+## Addendum — 2026-09-16 (compose claim was stale)
+
+The "Separately: a live-config issue" section above claimed that
+`docker-compose.prod.yml` hardcodes `PAPER_TRADING: false` / `DRY_RUN_ALL: false`
+/ `BINANCE_TESTNET: false` in `environment:`, so a VPS `.env` paper flip would
+be ignored.
+
+**That compose snapshot is stale.** Current `origin/main` interpolates
+`${PAPER_TRADING:-true}`, `${DRY_RUN_ALL:-true}`, `${TRADING_MODE:-paper}`. The
+VPS `.env` is authoritative. Finding 1 (no BE ratchet after partial TP) and
+Finding 2 (uncosted legacy backtester) were still valid at the time of this
+recreation; the fail-closed trading fixes land in the same change-set as this
+addendum. Do not re-derive the compose paper-mode hole from this document.

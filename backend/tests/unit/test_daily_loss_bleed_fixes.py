@@ -5,6 +5,8 @@ captured-move min-edge, and Kronos FLIP→VETO.
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from backend.services.decision_engine import DecisionEngine
 from backend.services.kronos_gate import apply_kronos_gate
 from backend.services.risk_config import RiskConfig
@@ -146,11 +148,11 @@ def test_live_partial_tp_one_reduce_only_from_exchange_qty():
 
     t1 = SimpleNamespace(
         id=1, symbol="ETHUSDT", direction="BUY", entry_price=100.0,
-        quantity=1.0, notes=None, status="open",
+        quantity=1.0, notes=None, status="open", stop_loss=98.0,
     )
     t2 = SimpleNamespace(
         id=2, symbol="ETHUSDT", direction="BUY", entry_price=100.0,
-        quantity=1.0, notes=None, status="open",
+        quantity=1.0, notes=None, status="open", stop_loss=98.0,
     )
     db = MagicMock()
     db.query.return_value.filter.return_value.all.return_value = [t1, t2]
@@ -178,6 +180,9 @@ def test_live_partial_tp_one_reduce_only_from_exchange_qty():
     assert abs(t1.quantity + t2.quantity - 1.0) < 1e-6
     assert "PARTIAL_TP_DONE" in (t1.notes or "")
     assert "PARTIAL_TP_DONE" in (t2.notes or "")
+    be_fees = 100.0 * cfg.roundtrip_cost_rate
+    assert t1.stop_loss == pytest.approx(100.0 + be_fees)
+    assert t2.stop_loss == pytest.approx(100.0 + be_fees)
 
 
 def test_live_partial_tp_idempotent_second_call():
@@ -226,6 +231,38 @@ def test_min_edge_uses_trail_capture_not_full_tp():
     # expected_move = 0.1 * atr ≈ 0.2; gross on $100 notional qty=1 → $0.20
     # roundtrip = 0.0012 * 100 = 0.12; required = 2.5 * 0.12 = 0.30 → fail
     assert engine._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is False
+
+
+def test_min_edge_blends_partial_tp_capture():
+    """With partial TP on, captured ATR is 50% × 1.0 + 50% × trail lock."""
+    bars = _bars(30, base=100.0)
+    for b in bars:
+        b["high"] = 101.0
+        b["low"] = 99.0
+    # ATR ≈ 2.0. Blend 1.1 → $2.20; trail-only 1.2 → $2.40.
+    # min_edge_fee_mult=19 → required $2.28, so blend fails and trail-only would pass.
+    blended = RiskConfig(
+        min_edge_fee_mult=19.0,
+        taker_fee_rate=0.0004,
+        slippage_rate=0.0002,
+        trailing_stop_enabled=True,
+        trail_activation_atr=2.0,
+        trail_atr_mult=0.8,
+        partial_tp_enabled=True,
+        partial_tp_atr_mult=1.0,
+        partial_tp_close_pct=0.5,
+    )
+    trail_only = RiskConfig(
+        min_edge_fee_mult=19.0,
+        taker_fee_rate=0.0004,
+        slippage_rate=0.0002,
+        trailing_stop_enabled=True,
+        trail_activation_atr=2.0,
+        trail_atr_mult=0.8,
+        partial_tp_enabled=False,
+    )
+    assert DecisionEngine(blended)._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is False
+    assert DecisionEngine(trail_only)._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is True
 
 
 def test_min_edge_full_tp_when_trailing_disabled():

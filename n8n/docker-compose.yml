@@ -1,3 +1,12 @@
+# =============================================================================
+# DO NOT RUN THIS COMPOSE FILE ON THE LIVE TRADING HOST.
+# n8n belongs on its own box (/docker/n8n). Privileged sandbox, Traefik, and
+# docker.sock must never share the live trading VPS.
+#
+# RISK: N8N_BLOCK_ENV_ACCESS_IN_NODE=false lets Code nodes read process env
+# (including BACKEND_API_KEY). Leave that flag as-is for current workflows;
+# do not copy this stack onto the trading host to "fix" it.
+# =============================================================================
 services:
   traefik:
     image: traefik:latest
@@ -5,7 +14,7 @@ services:
     environment:
     - DOCKER_API_VERSION=1.41
     command:
-    - --api.insecure=true
+    - --api.insecure=false
     - --providers.docker=true
     - --providers.docker.exposedbydefault=false
     - --entrypoints.web.address=:80
@@ -39,6 +48,7 @@ services:
     - EXECUTIONS_DATA_MAX_AGE=168
     - EXECUTIONS_DATA_PRUNE=true
     - N8N_PROXY_HOPS=1
+    # RISK: false lets Code nodes read process env (BACKEND_API_KEY). Leave as-is.
     - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
     - BACKEND_API_KEY=${BACKEND_API_KEY}
     - EXECUTIONS_MODE=regular

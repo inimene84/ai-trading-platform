@@ -1,7 +1,7 @@
 """Optional live four-number check for a promoted model (contract §7).
 
 side, p_win, conformal_width, costed_edge_bps — skip the order if any live
-gate fails. Missing numbers do not invent a pass; they skip the check.
+gate fails. Missing p_win / width / edge telemetry is a veto (fail-closed).
 """
 
 from __future__ import annotations
@@ -40,7 +40,8 @@ def evaluate_live_four_numbers(
     """Return whether a promoted-model order may proceed.
 
     Skip (block) if p_win < live.p_win_min OR conformal_width > live.width_max
-    OR costed_edge_bps <= gates.min_costed_edge_bps.
+    OR costed_edge_bps <= gates.min_costed_edge_bps. Missing any of the three
+    telemetry numbers is a veto — do not invent a pass from confidence alone.
     """
     geo = dict(geometry or {})
     live = dict(DEFAULT_LIVE_SIGNAL)
@@ -49,16 +50,24 @@ def evaluate_live_four_numbers(
     gates.update(dict(geo.get("gates") or {}))
 
     side = signal.get("side") or signal.get("signal")
-    p_win = _float_or_none(signal.get("p_win") if "p_win" in signal else signal.get("confidence"))
+    p_win = _float_or_none(signal.get("p_win"))
     width = _float_or_none(signal.get("conformal_width"))
     edge = _float_or_none(signal.get("costed_edge_bps"))
 
-    if p_win is None and width is None and edge is None:
+    missing = [name for name, value in (
+        ("p_win", p_win),
+        ("conformal_width", width),
+        ("costed_edge_bps", edge),
+    ) if value is None]
+    if missing:
         return LiveFourNumberDecision(
-            allowed=True,
-            reason="live four-number check skipped (numbers not provided)",
+            allowed=False,
+            reason=f"missing live telemetry: {', '.join(missing)}",
             side=str(side) if side is not None else None,
-            applied=False,
+            p_win=p_win,
+            conformal_width=width,
+            costed_edge_bps=edge,
+            applied=True,
         )
 
     p_win_min = float(live.get("p_win_min", 0.55))

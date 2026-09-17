@@ -169,9 +169,10 @@ def test_gpu_job_refuses_broker_credentials_and_trading_imports(monkeypatch):
 
 
 def test_live_four_number_stub_blocks_and_skips():
-    skipped = evaluate_live_four_numbers({"side": "BUY"})
-    assert skipped.allowed is True
-    assert skipped.applied is False
+    missing = evaluate_live_four_numbers({"side": "BUY"})
+    assert missing.allowed is False
+    assert missing.applied is True
+    assert "missing live telemetry" in missing.reason
 
     blocked = evaluate_live_four_numbers({"side": "BUY", "p_win": 0.40, "conformal_width": 0.1, "costed_edge_bps": 2.0})
     assert blocked.allowed is False

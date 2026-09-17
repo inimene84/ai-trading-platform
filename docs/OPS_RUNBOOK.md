@@ -1,10 +1,19 @@
 # Ops Runbook — QuantumTrade Pro (Hostinger VPS)
 
-> **This system trades real money.** `docker-compose.prod.yml` sets
-> `PAPER_TRADING: false`, `DRY_RUN_ALL: false`, `BINANCE_TESTNET: false`
-> (lines 16, 20–22) directly in the `environment:` block, so the live-trading
-> posture is baked into the compose file, not just `.env`. Every command below
-> can move real capital. Read the [Safety warnings](#safety-warnings) first.
+> **This system trades real money on the VPS.** The live-trading posture is
+> **authoritative in the VPS `.env`**, not hardcoded in compose. Prod compose
+> interpolates `${PAPER_TRADING:-true}`, `${DRY_RUN_ALL:-true}`,
+> `${TRADING_MODE:-paper}` — so the file on `/root/ai-trading-platform-v3/.env`
+> is what the container actually runs. Every command below can still move
+> real capital if that `.env` is live. Read the [Safety warnings](#safety-warnings)
+> first.
+>
+> **Soak risk before the next VPS pull (2026-09-16).** `main` recently merged
+> Dependabot majors `fastapi[standard]>=0.141.1` (PR #74) and `bcrypt>=5.0.0`
+> (PR #77). These have not been soaked on the live trading host. **Pin the
+> running deploy tag / image digest before `git pull`** so a FastAPI or
+> password-hash regression can be rolled back without taking the loop through
+> an untested auth stack.
 
 Scope: this document inventories the operational scripts and entrypoints that
 exist in this repo and describes what each one *actually does*, based on reading
@@ -145,11 +154,11 @@ processes/containers. **MED** = restarts services or mutates config/state.
 
 | Path | Purpose | Canonical? | Danger |
 |---|---|---|---|
-| `start.sh` | `./start.sh` = native (uvicorn `:8000` + Vite); `./start.sh docker` = `docker compose down` + `up -d --build` using **`docker-compose.yml`** | yes for local | MED–**HIGH** — `docker-compose.yml` also hardcodes `PAPER_TRADING: false`; never run on the VPS |
+| `start.sh` | `./start.sh` = native (uvicorn `:8000` + Vite); `./start.sh docker` = `docker compose down` + `up -d --build` using **`docker-compose.yml`** | yes for local | MED–**HIGH** — never run on the VPS; local compose interpolates `${TRADING_MODE:-paper}` |
 | `run.sh` | Poetry-based launcher: backend `:8080`, frontend `:3000`, traps Ctrl-C | duplicate of `start.sh` native mode | LOW |
 | `start_docker_local.sh` / `.bat`, `run.bat` | Windows/local Docker helpers | duplicates | LOW |
 | `Dockerfile.backend`, `mcp_server/Dockerfile`, `sentry_watchdog/Dockerfile` | Image builds (backend is `python:3.11-slim`, `uv pip install -r requirements.txt`) | yes | LOW |
-| `docker-compose.yml` / `docker-compose.prod.yml` | Dev vs prod stack; **both** set live-trading flags | `prod` is canonical on VPS | **HIGH** |
+| `docker-compose.yml` / `docker-compose.prod.yml` | Dev vs prod stack; prod interpolates paper/live flags from the VPS `.env` | `prod` is canonical on VPS | **HIGH** |
 
 There is **no Makefile and no systemd unit** in the repo. `scripts/vps_realtime_watchdog.sh`
 documents itself as a **cron** job instead.
@@ -186,7 +195,7 @@ documents itself as a **cron** job instead.
 
 | Path | Purpose | Canonical? | Danger |
 |---|---|---|---|
-| `scripts/ensure_influx_buckets.sh` | Idempotent creation of the 6 buckets (`trading-system` 7d … `news-sentiment` 90d) in container `vps-influxdb` | **YES** — called by the deploy | LOW |
+| `scripts/ensure_influx_buckets.sh` | Idempotent create **or update** of the 6 buckets (`trading-system` **90d** … `news-sentiment` 90d) in container `vps-influxdb`. Snapshot Influx before changing retention on a live host. | **YES** — called by the deploy | LOW |
 | `docs/ops/setup_influx_buckets.sh` | Same job, hardcoded token (now `***REMOVED***`), 5 buckets | no — superseded, **retire** | MED |
 | `docs/ops/fix_influxdb_complete.sh` | Buckets + `docker compose down backend` + rebuild | no — superseded, **retire** | **HIGH** (stops backend) |
 | `docs/ops/fix_influx_token.sh`, `docs/ops/fix_influxdb_token.sh` | Sign in to Influx with admin creds from env, mint a token, print it / `sed -i` it into `.env`, restart backend | no — near-duplicates | **HIGH** (`.env` rewrite; prints token prefix) |
@@ -358,14 +367,16 @@ curl -sf http://127.0.0.1:8001/health
 
 ## 6. Safety warnings
 
-1. **Live money by default.** `docker-compose.prod.yml` (and
-   `docker-compose.yml`) set `PAPER_TRADING: false`, `BINANCE_TESTNET: false`,
-   `BINANCE_DRY_RUN: false`, `DRY_RUN_ALL: false` in the `environment:` block.
-   Compose `environment:` **overrides** `env_file: .env`, so setting
-   `PAPER_TRADING=true` in `.env` does **not** put the container in paper mode.
-   The only real paper-mode switch today is editing the compose file. The
-   `CONFIRM_LIVE_DEPLOY=true` gate in `hostinger_vps_apply.sh` (lines 54–59)
-   therefore inspects flags that the container ignores.
+1. **VPS `.env` is authoritative.** `docker-compose.prod.yml` interpolates
+   `${PAPER_TRADING:-true}`, `${DRY_RUN_ALL:-true}`, `${TRADING_MODE:-paper}`
+   (and the matching sentry-watchdog flags). Compose no longer hardcodes
+   live-trading booleans that silently override `.env`. The VPS file at
+   `/root/ai-trading-platform-v3/.env` is what the container runs. Do not
+   change those compose defaults in a drive-by edit. The
+   `CONFIRM_LIVE_DEPLOY=true` gate in `hostinger_vps_apply.sh` still inspects
+   the same keys — they now match the container. **Before the next pull**,
+   pin the running deploy tag: FastAPI ≥0.141.1 and bcrypt ≥5.0.0 landed on
+   `main` and have not been soaked on this host.
 2. **The deploy restarts the trading loop.** Step 10 of
    `hostinger_vps_apply.sh` stops the loop and starts a fresh one. Never deploy
    in the middle of managing an open position without checking
@@ -466,11 +477,9 @@ Nothing below has been deleted or edited by this document — these are proposal
 
 **Fix (correctness / safety, beyond cleanup):**
 
-- Decide whether paper mode is reachable at all: today `PAPER_TRADING: false` in
-  the compose `environment:` overrides `.env`, so the deploy's
-  `CONFIRM_LIVE_DEPLOY` gate is checking values the container ignores. Either
-  make those flags `${PAPER_TRADING:-true}`-style or delete the gate and say
-  plainly that this stack is live-only.
+- Paper/live flags are already `${PAPER_TRADING:-true}`-style in prod compose;
+  treat the VPS `.env` as the source of truth. Do not re-hardcode live
+  booleans into `environment:`.
 - Correct the rollback procedure in `docs/ops/PRODUCTION_DEPLOY.md` (the
   `hostinger_vps_apply.sh` re-checkout of `main` defeats it) and remove the
   reference to a `github.repository` guard that does not exist in
