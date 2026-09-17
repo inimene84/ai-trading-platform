@@ -1,0 +1,262 @@
+[
+  {
+    "updatedAt": "2026-09-16T23:56:34.522Z",
+    "createdAt": "2026-09-02T23:55:11.339Z",
+    "id": "IgwckQiXmUTWMnsC",
+    "name": "4. Sentiment-Price Divergence Alerts",
+    "description": "",
+    "active": false,
+    "isArchived": false,
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours",
+                "hoursInterval": 4
+              }
+            ]
+          }
+        },
+        "name": "Schedule Every 4 Hours",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          6112,
+          7312
+        ],
+        "id": "c68c6677-999c-4dda-9415-0dd14f7aacd5"
+      },
+      {
+        "parameters": {
+          "url": "http://ai-trading-backend:8000/api/market-data/technical",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "symbols",
+                "value": "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 15000
+          }
+        },
+        "name": "Fetch Technical Data",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          6336,
+          7216
+        ],
+        "id": "205c5851-b616-46e6-b2b3-1948556dc9e4",
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "url": "http://ai-trading-backend:8000/api/news/sentiment",
+          "options": {
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            },
+            "timeout": 15000
+          }
+        },
+        "name": "Fetch Sentiment Data",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          6336,
+          7408
+        ],
+        "id": "feb47b49-9904-4b80-a4da-d92b143b9bad",
+        "continueOnFail": true,
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "jsCode": "// Detect sentiment-price divergence from GET /technical `output` (or a raw row).\nfunction rowsFrom(item) {\n  if (Array.isArray(item.output)) return item.output;\n  if (Array.isArray(item.data)) return item.data.map((r) => ({ json: r }));\n  if (item.json && item.json.symbol) return [item];\n  if (item.symbol) return [{ json: item }];\n  return [];\n}\n\nconst incoming = $input.all().map((i) => i.json);\nconst rows = incoming.flatMap(rowsFrom);\nconst results = [];\n\nfor (const wrapped of rows) {\n  const row = wrapped.json || wrapped;\n  const symbol = row.symbol;\n  const sentiment_score = Number(row.sentiment_score || 0);\n  const direction = String(row.direction || 'NEUTRAL').toUpperCase();\n  const price_change_pct = Number(row.price_change_pct || 0);\n\n  let signal = 'NEUTRAL';\n  let confidence = 0.0;\n  if (direction === 'BULLISH' && price_change_pct < 0) {\n    signal = 'SELL_DUE_TO_SENTIMENT';\n    confidence = Math.abs(price_change_pct);\n  } else if (direction === 'BEARISH' && price_change_pct > 0) {\n    signal = 'BUY_DUE_TO_SENTIMENT';\n    confidence = price_change_pct;\n  }\n\n  if (signal !== 'NEUTRAL' && Math.abs(price_change_pct) >= 0.02) {\n    results.push({\n      json: {\n        symbol,\n        sentiment_score,\n        direction,\n        price_change: price_change_pct,\n        signal,\n        confidence,\n        reasoning: `Sentiment ${direction.toLowerCase()} but price ${price_change_pct >= 0 ? 'rising' : 'falling'} by ${(Math.abs(price_change_pct) * 100).toFixed(2)}%`,\n        source: 'n8n-divergence',\n      },\n    });\n  }\n}\n\nreturn results;\n"
+        },
+        "name": "Process Divergence Analysis",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          6560,
+          7312
+        ],
+        "id": "818e44fb-0632-4aa2-9d5c-87ef1e5975b4"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://ai-trading-backend:8000/api/market-data/divergence",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-API-Key",
+                "value": "={{ $env.BACKEND_API_KEY }}"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "Accept",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify($json) }}",
+          "options": {
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "name": "Send Divergence Alert",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          6784,
+          7312
+        ],
+        "id": "faff3082-83c8-4c6c-ba87-6b2c2e000357",
+        "continueOnFail": true,
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "qt-agentzero-div-manual",
+          "responseMode": "lastNode",
+          "options": {}
+        },
+        "name": "Manual Test Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          5888,
+          7312
+        ],
+        "id": "div-manual-webhook-001",
+        "webhookId": "qt-agentzero-div-manual"
+      }
+    ],
+    "connections": {
+      "Schedule Every 4 Hours": {
+        "main": [
+          [
+            {
+              "node": "Fetch Technical Data",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch Sentiment Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Technical Data": {
+        "main": [
+          [
+            {
+              "node": "Process Divergence Analysis",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch Sentiment Data": {
+        "main": [
+          [
+            {
+              "node": "Process Divergence Analysis",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Divergence Analysis": {
+        "main": [
+          [
+            {
+              "node": "Send Divergence Alert",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Manual Test Webhook": {
+        "main": [
+          [
+            {
+              "node": "Fetch Technical Data",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch Sentiment Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Divergence Alert": {
+        "main": [
+          []
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "binaryMode": "separate",
+      "availableInMCP": true,
+      "timeSavedMode": "fixed",
+      "errorWorkflow": "p8vhXj53RK8MUxb7",
+      "callerPolicy": "workflowsFromSameOwner"
+    },
+    "meta": {
+      "aiBuilderAssisted": true,
+      "builderVariant": "mcp",
+      "templateCredsSetupCompleted": true
+    },
+    "nodeGroups": [],
+    "pinData": {},
+    "versionId": "b413ad2f-a771-4d67-9d7a-447bcb63f64f",
+    "activeVersionId": "b413ad2f-a771-4d67-9d7a-447bcb63f64f",
+    "versionCounter": 30,
+    "triggerCount": 1,
+    "sourceWorkflowId": null,
+    "tags": [
+      {
+        "updatedAt": "2026-04-20T19:35:07.631Z",
+        "createdAt": "2026-04-20T19:35:07.631Z",
+        "id": "3nYIw60vVnhGD9MO",
+        "name": "bot"
+      },
+      {
+        "updatedAt": "2026-09-16T22:56:05.202Z",
+        "createdAt": "2026-09-16T22:56:05.202Z",
+        "id": "awGtkE89DlutEcgp",
+        "name": "a0"
+      }
+    ]
+  }
+]
