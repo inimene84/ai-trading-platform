@@ -47,7 +47,7 @@
     "@types/node": "^22.14.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "autoprefixer": "^10.4.21",
+    "autoprefixer": "^10.5.5",
     "tailwindcss": "^4.2.2",
     "tsx": "^4.22.4",
     "typescript": "~5.8.2",
