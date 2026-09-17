@@ -313,6 +313,7 @@ async def test_jesse_ml_kelly_clipping_below_30_partition_trades(ml_risk_config,
     engine.promotion_state = None
     engine.account_equity = 1000.0
     engine.account_available = 1000.0
+    engine._partition_pnl_stats = MagicMock(return_value=(10, 0.0, 0.0))
     bars = _make_bars(50)
 
     mock_signal = StrategySignal(
