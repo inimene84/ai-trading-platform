@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _cache = get_cache()
 
 
-def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: dict = None, max_retries: int = 3) -> requests.Response:
+def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: dict = None, max_retries: int = 3, timeout: float = 30.0) -> requests.Response:
     """
     Make an API request with rate limiting handling and moderate backoff.
     
@@ -36,6 +36,7 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
         method: HTTP method (GET or POST)
         json_data: JSON data for POST requests
         max_retries: Maximum number of retries (default: 3)
+        timeout: Request timeout in seconds (default: 30)
     
     Returns:
         requests.Response: The response object
@@ -45,9 +46,9 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
     """
     for attempt in range(max_retries + 1):  # +1 for initial attempt
         if method.upper() == "POST":
-            response = requests.post(url, headers=headers, json=json_data)
+            response = requests.post(url, headers=headers, json=json_data, timeout=timeout)
         else:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=timeout)
         
         if response.status_code == 429 and attempt < max_retries:
             # Linear backoff: 60s, 90s, 120s, 150s...
