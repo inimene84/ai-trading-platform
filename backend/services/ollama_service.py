@@ -1,6 +1,7 @@
 import asyncio
 import os
 import platform
+import shutil
 import subprocess
 import time
 import json
@@ -213,12 +214,9 @@ class OllamaService:
         return await loop.run_in_executor(None, self._is_ollama_installed)
     
     def _is_ollama_installed(self) -> bool:
-        system = platform.system().lower()
-        command = ["which", "ollama"] if system in ["darwin", "linux"] else "where ollama"
-        shell = system == "windows"
+        # shutil.which handles PATH lookup across platforms without spawning a shell.
         try:
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=shell, timeout=2.0)
-            return result.returncode == 0
+            return shutil.which("ollama") is not None
         except Exception:
             return False
     
