@@ -1,6 +1,7 @@
 """Utilities for working with Ollama models"""
 
 import platform
+import shutil
 import subprocess
 import requests
 import time
@@ -50,22 +51,11 @@ INSTALLATION_INSTRUCTIONS = {"darwin": "curl -fsSL https://ollama.com/install.sh
 
 def is_ollama_installed() -> bool:
     """Check if Ollama is installed on the system."""
-    system = platform.system().lower()
-
-    if system == "darwin" or system == "linux":  # macOS or Linux
-        try:
-            result = subprocess.run(["which", "ollama"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            return result.returncode == 0
-        except Exception:
-            return False
-    elif system == "windows":  # Windows
-        try:
-            result = subprocess.run(["where", "ollama"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
-            return result.returncode == 0
-        except Exception:
-            return False
-    else:
-        return False  # Unsupported OS
+    # shutil.which handles PATH lookup across platforms without spawning a shell.
+    try:
+        return shutil.which("ollama") is not None
+    except Exception:
+        return False
 
 
 def is_ollama_server_running() -> bool:
@@ -108,7 +98,7 @@ def start_ollama_server() -> bool:
         if system == "darwin" or system == "linux":  # macOS or Linux
             subprocess.Popen(["ollama", "serve"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         elif system == "windows":  # Windows
-            subprocess.Popen(["ollama", "serve"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         else:
             print(f"{Fore.RED}Unsupported operating system: {system}{Style.RESET_ALL}")
             return False
