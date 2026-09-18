@@ -139,7 +139,6 @@ def get_financial_metrics(
     return financial_metrics
 
 
-  
 def search_line_items(
     ticker: str,
     line_items: list[str],
@@ -182,7 +181,6 @@ def search_line_items(
     return search_results[:limit]
 
 
-  
 def get_insider_trades(
     ticker: str,
     end_date: str,
