@@ -259,7 +259,7 @@ def name_skill(feature_summary: Dict[str, float], symbols: List[str], direction:
         sym_part = f" [{', '.join(uniq)}]"
 
     label = " ".join(parts) if parts else "Mixed setup"
-    return f"{label} \u2192 {direction}{sym_part}"
+    return f"{label} → {direction}{sym_part}"
 
 
 def skill_key_for(centroid: List[float], direction: str) -> str:
@@ -268,7 +268,8 @@ def skill_key_for(centroid: List[float], direction: str) -> str:
     lead = centroid[: len(_FEATURE_ORDER)]
     quant = ",".join(str(round(x * 4) / 4) for x in lead)  # 0.25 buckets
     raw = f"{quant}|{direction}"
-    return hashlib.sha1(raw.encode()).hexdigest()[:16]
+    # Dedup digest, not a security MAC.
+    return hashlib.sha1(raw.encode(), usedforsecurity=False).hexdigest()[:16]
 
 
 def mine_skills(
