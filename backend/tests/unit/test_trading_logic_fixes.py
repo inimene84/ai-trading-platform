@@ -103,6 +103,9 @@ async def test_scan_markets_skips_metals_when_disabled():
             return_value=[],
         ) as fetch, patch(
             "backend.services.sentry_state.is_trading_allowed", return_value=True
+        ), patch(
+            # Weekend venue closure must not gate this universe-filter test.
+            "backend.services.signal_candidate_engine.is_venue_open", return_value=True
         ):
             await engine.scan_markets(universe=["XAGUSD", "EURUSD"], timeframe="M5")
         fetched = [c.args[0] for c in fetch.call_args_list]

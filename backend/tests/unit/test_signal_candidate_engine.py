@@ -259,7 +259,11 @@ async def test_scan_markets_routes_usdcad_to_ctrader():
     ) as mock_ctrader, patch(
         "backend.services.signal_candidate_engine.binance_market_data.get_klines",
         new_callable=AsyncMock,
-    ) as mock_binance:
+    ) as mock_binance, patch(
+        # Weekend venue closure must not gate this routing test.
+        "backend.services.signal_candidate_engine.is_venue_open",
+        return_value=True,
+    ):
         await signal_candidate_engine.scan_markets(universe=["USDCAD"], timeframe="M5")
         # Signal timeframe plus the slower stop-sizing timeframe, both on cTrader.
         assert mock_ctrader.call_count == 2
@@ -821,7 +825,8 @@ def test_anti_whipsaw_symbol_cooldown():
         "sizing": {"lots": 0.01, "quantity": 0.01},
     }
     import asyncio
-    res = asyncio.run(engine.execute_candidate(cand_id, force=False))
+    with patch("backend.services.signal_candidate_engine.is_venue_open", return_value=True):
+        res = asyncio.run(engine.execute_candidate(cand_id, force=False))
     assert res.get("skipped") is True
     assert "cooldown" in res.get("error", "").lower()
 
@@ -867,7 +872,8 @@ async def test_scan_markets_dedupes_live_twin():
          patch.object(engine, "_fx_gate_mode", return_value="off"), \
          patch.object(engine, "_has_open_position", return_value=False), \
          patch.object(engine, "_portfolio_risk_breach", return_value=None), \
-         patch.object(engine, "_binance_position_cap_breach", return_value=None):
+         patch.object(engine, "_binance_position_cap_breach", return_value=None), \
+         patch("backend.services.signal_candidate_engine.is_venue_open", return_value=True):
         first = await engine.scan_markets(universe=["EURUSD"], timeframe="M5")
         second = await engine.scan_markets(universe=["EURUSD"], timeframe="M5")
 
