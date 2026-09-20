@@ -71,3 +71,7 @@ jesse_quant/storage/
 jesse_quant/.venv/
 *.joblib
 *.rejected.pt
+
+# MCP configs hold bearer tokens — never commit
+.kimi-code/mcp.json
+.cursor/mcp.json
