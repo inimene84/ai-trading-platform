@@ -711,9 +711,13 @@ def main():
         df = load_candles_from_path(args.candles, args.symbol, args.timeframe)
     else:
         df = load_candles_from_db(args.symbol, args.timeframe)
-    fracdiff_meta = select_fracdiff_d(df["close"])
+    cut = max(200, int(len(df) * 0.85))
+    fracdiff_meta = select_fracdiff_d(df["close"].iloc[:cut])
     fracdiff_d = float(fracdiff_meta["d"])
-    print(f"[*] FracDiff d={fracdiff_d} adf_p={fracdiff_meta['adf_pvalue']:.4f} source={fracdiff_meta['source']}")
+    print(
+        f"[*] FracDiff d={fracdiff_d} adf_p={fracdiff_meta['adf_pvalue']:.4f} "
+        f"source={fracdiff_meta['source']} (selected on first {cut} bars)"
+    )
     X, y, sample_weights, samples_info_sets, dataset_extra = prepare_dataset(
         df,
         labeling_mode=args.labeling,
