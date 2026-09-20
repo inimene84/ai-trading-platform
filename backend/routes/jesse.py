@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 from backend.ml.artifacts import default_artifact_dir
 from backend.ml.promotion_service import resolve_promotion
-from backend.services.jesse_bridge import jesse_bridge
+from backend.services.jesse_bridge import jesse_bridge, live_sync_contract
 from backend.services.risk_config import get_risk_config
 
 router = APIRouter(tags=["Jesse Quant Engine"])
@@ -32,6 +32,13 @@ def _promotion_status_payload() -> Dict[str, Any]:
         "gpu_artifacts_note": GPU_ARTIFACTS_NOTE,
         "promoted": False,
     }
+    contract = live_sync_contract()
+    payload.update({
+        "jesse_sync_to_live": contract["jesse_sync_to_live"],
+        "promotion_gates_required": True,
+        "live_sync_allowed": False,
+        "g2_ready": False,
+    })
     if state is None:
         payload.update({
             "status": "unconfigured",
@@ -40,6 +47,9 @@ def _promotion_status_payload() -> Dict[str, Any]:
             "failed_gate": None,
             "warnings": [],
             "details": {},
+            "promoted": False,
+            "live_sync_allowed": False,
+            "g2_ready": False,
         })
         return payload
     payload.update({
@@ -50,6 +60,8 @@ def _promotion_status_payload() -> Dict[str, Any]:
         "warnings": state.result.warnings,
         "details": state.result.details,
         "promoted": state.verdict == "PROMOTE",
+        "live_sync_allowed": bool(contract["jesse_sync_to_live"] and state.verdict == "PROMOTE"),
+        "g2_ready": state.verdict == "PROMOTE",
     })
     return payload
 
@@ -139,6 +151,9 @@ async def _ml_models_payload() -> Dict[str, Any]:
         "cached_models": cached,
         "rejected_models": rejected,
         "has_promoted_model": bool(promo.get("promoted")),
+        "jesse_sync_to_live": bool(promo.get("jesse_sync_to_live")),
+        "live_sync_allowed": bool(promo.get("live_sync_allowed")),
+        "promotion_gates_required": True,
         "promotion": promo,
     }
 

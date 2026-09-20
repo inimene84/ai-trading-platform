@@ -29,8 +29,9 @@ from backend.services.trading_loop_helpers import (
     is_ctrader_trade as _is_ctrader_trade,
 )
 from backend.services.ledger import is_binance_paper_fill
-from backend.services.equity_scope import compose_balance_payload
+from backend.services.equity_scope import compose_balance_payload, describe_equity_books
 from backend.services.ops_status import trading_ops_snapshot
+from backend.services.pnl_accounting import UNION_LABEL, attach_portfolio_accounting
 from backend.services.trading_mode import (
     TradingMode,
     get_trading_mode,
@@ -411,6 +412,7 @@ async def get_portfolio():
         available = 100000.0
         equity = 100000.0
         positions_value = total_notional
+        bal: Dict[str, Any] = {}
         try:
             bal = await _get_current_balance()
             balance = float(bal.get("balance", 100000.0))
@@ -450,26 +452,30 @@ async def get_portfolio():
                 equity = balance + total_unrealized_pnl
                 positions_value = total_notional
 
-        # Compute realized PnL from all closed trades
-        closed_pnl = db.query(Trade).filter(Trade.status == "closed").with_entities(
-            Trade.pnl
-        ).all()
-        total_pnl = round(sum((r.pnl or 0.0) for r in closed_pnl), 4)
-        pnl_pct = round((total_pnl / equity * 100) if equity > 0 else 0.0, 2)
-
-        return {
+        closed_trades = db.query(Trade).filter(Trade.status == "closed").all()
+        payload = {
             "balance": round(balance, 2),
             "available": round(available, 2),
             "equity": round(equity, 2),
             "unrealized_pnl": round(total_unrealized_pnl, 2),
             "positions": positions,
             "paper_positions": paper_positions,
-            "total_pnl": total_pnl,
-            "total_pnl_pct": pnl_pct,
             "positions_value": round(positions_value, 2),
             "open_positions_count": len(positions),
             "last_updated": datetime.now().isoformat(),
         }
+        books_meta = describe_equity_books()
+        payload["active_broker"] = books_meta.get("active_broker")
+        payload["equity_books"] = books_meta
+        payload["union_label"] = UNION_LABEL
+        payload["informational_union_equity"] = bal.get("informational_union_equity")
+        payload["display_union_equity"] = bal.get("display_union_equity")
+        payload["books"] = bal.get("books")
+        return attach_portfolio_accounting(
+            payload,
+            closed_trades=closed_trades,
+            unrealized_pnl=total_unrealized_pnl,
+        )
     finally:
         db.close()
 
@@ -480,10 +486,6 @@ async def get_performance():
     db = SessionLocal()
     try:
         closed = db.query(Trade).filter(Trade.status == "closed").all()
-        wins = sum(1 for t in closed if (t.pnl or 0) > 0)
-        losses = sum(1 for t in closed if (t.pnl or 0) < 0)
-        decided = wins + losses
-        realized = round(sum((t.pnl or 0.0) for t in closed), 4)
         equity = 0.0
         try:
             bal = await _get_current_balance()
@@ -495,14 +497,32 @@ async def get_performance():
         ).first()
         peak_val = (peak[0] if peak else 0.0) or equity
         drawdown_pct = round(((equity - peak_val) / peak_val * 100.0), 3) if peak_val > 0 else 0.0
+        accounted = attach_portfolio_accounting(
+            {"equity": equity},
+            closed_trades=closed,
+            unrealized_pnl=0.0,
+        )
+        strategy_closed = [
+            t for t in closed
+            if (getattr(t, "strategy", None) or "") != "exchange_reconciliation"
+        ]
+        wins = sum(1 for t in strategy_closed if (t.pnl or 0) > 0)
+        losses = sum(1 for t in strategy_closed if (t.pnl or 0) < 0)
+        decided = wins + losses
         return {
             "win_rate": round((wins / decided * 100.0), 2) if decided else 0.0,
             "wins": wins,
             "losses": losses,
-            "total_trades": len(closed),
-            "realized_pnl": realized,
+            "total_trades": len(strategy_closed),
+            "realized_pnl": accounted["strategy_lifetime_pnl"],
+            "realized_today": accounted["realized_today"],
+            "realized_7d": accounted["realized_7d"],
+            "reconciliation_pnl": accounted["reconciliation_pnl"],
+            "lifetime_db_pnl": accounted["lifetime_db_pnl"],
+            "lifetime_db_pnl_is_not_cash": True,
             "equity": round(equity, 4),
             "drawdown_pct": drawdown_pct,
+            "union_label": UNION_LABEL,
         }
     finally:
         db.close()

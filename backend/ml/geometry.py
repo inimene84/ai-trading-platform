@@ -95,6 +95,8 @@ def house_geometry(*, strategy_id: str = STRATEGY_ID, include_hashes_block: bool
             "pbo_n_splits": 16,
             "library": "purgedcv",
             "library_pin": "eslazarev/purged-cross-validation",
+            "purge_horizon": HOUSE_VERTICAL_TIMEOUT_BARS,
+            "embargo_bars": max(HOUSE_VERTICAL_TIMEOUT_BARS, 200),
         },
     }
     if include_hashes_block:

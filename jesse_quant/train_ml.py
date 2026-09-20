@@ -29,8 +29,15 @@ try:
 except ImportError:
     psycopg2 = None  # type: ignore[assignment]
 
-from ml_features import compute_features_df, FEATURE_NAMES
-from validation_metrics import PurgedKFold, deflated_sharpe_ratio, probability_of_backtest_overfitting, calculate_sharpe_ratio
+from calibration import calibration_deploy_control, reliability_diagram
+from embargo_audit import (
+    audit_purged_embargo,
+    embargo_bars_for_n,
+    longest_feature_lookback_bars,
+)
+from fracdiff import kernel_width, select_fracdiff_d
+from ml_features import FEATURE_NAMES, LONGEST_FEATURE_LOOKBACK_BARS, compute_features_df
+from validation_metrics import PurgedKFold, calculate_sharpe_ratio, deflated_sharpe_ratio, probability_of_backtest_overfitting
 from triple_barrier import apply_triple_barrier, compute_sample_uniqueness
 from feature_schema import FEATURE_HASH
 from gpu_device import detect_training_device, lightgbm_device_kwargs
@@ -43,6 +50,7 @@ from promotion_contract import (
 from trial_registry import record_trials
 from asset_universe import candle_timeframe_candidates
 from train_errors import TooFewEventsError
+from barrier_config import MAX_HOLDING_BARS, cost_model_dict, round_trip_cost_pct
 from promotion_gates import (
     DSR_GATE,
     PBO_GATE,
@@ -178,20 +186,21 @@ def prepare_dataset(
     labeling_mode: str = "triple_barrier",
     pt_mult: float = STRATEGY_PT_ATR,
     sl_mult: float = STRATEGY_SL_ATR,
-    max_holding: int = 24,
+    max_holding: int = MAX_HOLDING_BARS,
     forward_horizon: int = 6,
     threshold_pct: float = 0.75,
     fallback_every_bar: bool = True,
     min_events: int = 50,
+    fracdiff_d: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, pd.Series, Optional[pd.Series], Optional[pd.Series]]:
     """
     Computes features and labels outcomes using either:
     1. Triple-Barrier Method (path-dependent PT, SL, timeout with sample uniqueness weights)
     2. Fixed Horizon returns (return[t+H] vs fixed threshold)
     """
-    print("[*] Computing 26 quantitative technical indicators & features...")
+    print("[*] Computing quantitative technical indicators & FracDiff features...")
     t0 = time.time()
-    X = compute_features_df(df)
+    X = compute_features_df(df, fracdiff_d=fracdiff_d)
 
     if labeling_mode == "triple_barrier":
         events_idx = quantum_ai_event_index(df)
@@ -324,6 +333,9 @@ def train_model(
     sl_mult: float = STRATEGY_SL_ATR,
     symbol: str = "BTC-USDT",
     timeframe: str = "1h",
+    max_holding: int = MAX_HOLDING_BARS,
+    fracdiff_d: Optional[float] = None,
+    fracdiff_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Pipeline, Dict[str, Any]]:
     """Train with a hyperparameter grid so DSR/PBO see the true trial count."""
     device = detect_training_device()
@@ -336,6 +348,28 @@ def train_model(
     w_train = sample_weights.iloc[:split_idx].to_numpy() if sample_weights is not None else None
 
     print(f"\n[*] Training Window: {len(X_train):,} bars | Holdout Test Window: {len(X_test):,} bars")
+
+    lookback = longest_feature_lookback_bars(kernel_width(float(fracdiff_d)) if fracdiff_d is not None else 0)
+    lookback = max(lookback, LONGEST_FEATURE_LOOKBACK_BARS)
+    embargo_bars = embargo_bars_for_n(
+        len(X),
+        max_holding_bars=int(max_holding),
+        longest_lookback_bars=lookback,
+    )
+    purge_horizon = int(max_holding)
+    embargo_audit = audit_purged_embargo(
+        embargo_bars=embargo_bars,
+        purge_horizon_bars=purge_horizon,
+        max_holding_bars=int(max_holding),
+        longest_lookback_bars=lookback,
+        timeframe=timeframe,
+    )
+    print(
+        f"[*] Embargo audit: embargo={embargo_bars} purge={purge_horizon} "
+        f"required={embargo_audit.required_embargo_bars} ok={embargo_audit.ok}"
+    )
+    if not embargo_audit.ok:
+        raise RuntimeError("Purged-CV embargo audit failed: " + "; ".join(embargo_audit.reasons))
 
     grid = LGBM_GRID if model_type == "lightgbm" else [{}]
     scaler = RobustScaler()
@@ -401,12 +435,33 @@ def train_model(
     print(f"[*] Best trial #{best_idx + 1} holdout Sharpe={holdout_sr:.3f}; n_trials={n_trials} (ledger+grid)")
 
     base_clf = _make_clf(model_type, best_params, used_device_kwargs)
-    calibrated_clf = CalibratedClassifierCV(estimator=base_clf, method="isotonic", cv=3)
-    print(f"[*] Fitting final {model_type} pipeline with Isotonic Probability Calibration...")
-    if w_train is not None and model_type in ("lightgbm", "random_forest"):
-        calibrated_clf.fit(X_train_s, y_train, sample_weight=w_train)
-    else:
-        calibrated_clf.fit(X_train_s, y_train)
+    info_train = None
+    if samples_info_sets is not None:
+        info_train = samples_info_sets.iloc[:split_idx]
+    purged_cv = PurgedKFold(
+        n_splits=3,
+        samples_info_sets=info_train,
+        embargo_bars=embargo_bars,
+    )
+    calibrated_clf = None
+    calibration_method = "isotonic"
+    print(f"[*] Fitting final {model_type} pipeline with CalibratedClassifierCV + PurgedKFold...")
+    for method in ("isotonic", "sigmoid"):
+        try:
+            candidate = CalibratedClassifierCV(estimator=base_clf, method=method, cv=purged_cv)
+            if w_train is not None and model_type in ("lightgbm", "random_forest"):
+                candidate.fit(X_train_s, y_train, sample_weight=w_train)
+            else:
+                candidate.fit(X_train_s, y_train)
+            calibrated_clf = candidate
+            calibration_method = method
+            break
+        except Exception as exc:
+            print(f"[!] CalibratedClassifierCV({method}) with PurgedKFold failed: {exc}")
+    if calibrated_clf is None:
+        raise RuntimeError(
+            "CalibratedClassifierCV failed under PurgedKFold — refusing shuffled KFold (leakage)"
+        )
 
     pipeline = Pipeline([
         ("scaler", scaler),
@@ -416,6 +471,13 @@ def train_model(
     test_preds = pipeline.predict(X_test)
     test_acc = accuracy_score(y_test, test_preds)
     report = classification_report(y_test, test_preds, output_dict=True, zero_division=0)
+    test_prob = None
+    if hasattr(pipeline, "predict_proba"):
+        proba = pipeline.predict_proba(X_test)
+        # Binary meta-labeler: column 1 is P(TP-before-SL).
+        test_prob = proba[:, 1] if proba.shape[1] > 1 else proba[:, 0]
+    reliability = reliability_diagram(y_test.to_numpy(), test_prob if test_prob is not None else [])
+    calibration_ctl = calibration_deploy_control(reliability)
 
     importances = {}
     first_est = getattr(calibrated_clf.calibrated_classifiers_[0], "estimator", None)
@@ -449,6 +511,14 @@ def train_model(
         "used_raw_n_as_effective": False,
         "device": device.to_dict(),
         "lightgbm_device": used_device_kwargs.get("device", "cpu"),
+        "fracdiff_d": None if fracdiff_d is None else float(fracdiff_d),
+        "fracdiff": fracdiff_meta or {},
+        "embargo_audit": embargo_audit.to_dict(),
+        "calibration": calibration_ctl,
+        "calibration_method": calibration_method,
+        "payoff_ratio_kind": "theoretical_geometry_gross",
+        "costs": cost_model_dict(),
+        "round_trip_cost_pct": round_trip_cost_pct(int(max_holding)),
     }
 
     promotion = evaluate_promotion(metrics, pt_mult=pt_mult, sl_mult=sl_mult)
@@ -483,7 +553,7 @@ def main():
     parser.add_argument("--labeling", default="triple_barrier", choices=["triple_barrier", "fixed"], help="Labeling methodology")
     parser.add_argument("--pt-mult", type=float, default=STRATEGY_PT_ATR, help="Triple-barrier profit target ATR multiplier (live geometry 5.5)")
     parser.add_argument("--sl-mult", type=float, default=STRATEGY_SL_ATR, help="Triple-barrier stop loss ATR multiplier (live geometry 1.75)")
-    parser.add_argument("--holding", type=int, default=24, help="Triple-barrier maximum holding period in bars")
+    parser.add_argument("--holding", type=int, default=MAX_HOLDING_BARS, help="Triple-barrier maximum holding period in bars (live 1h = 48)")
     parser.add_argument("--horizon", type=int, default=6, help="Fixed return forward horizon in bars (default: 6)")
     parser.add_argument("--threshold", type=float, default=0.75, help="Fixed return threshold pct (default: 0.75)")
     parser.add_argument("--candles", default="", help="Parquet/CSV path (GPU node). If empty, load from Postgres.")
@@ -507,6 +577,9 @@ def main():
         df = load_candles_from_path(args.candles, args.symbol, args.timeframe)
     else:
         df = load_candles_from_db(args.symbol, args.timeframe)
+    fracdiff_meta = select_fracdiff_d(df["close"])
+    fracdiff_d = float(fracdiff_meta["d"])
+    print(f"[*] FracDiff d={fracdiff_d} adf_p={fracdiff_meta['adf_pvalue']:.4f} source={fracdiff_meta['source']}")
     X, y, sample_weights, samples_info_sets = prepare_dataset(
         df,
         labeling_mode=args.labeling,
@@ -515,6 +588,7 @@ def main():
         max_holding=args.holding,
         forward_horizon=args.horizon,
         threshold_pct=args.threshold,
+        fracdiff_d=fracdiff_d,
     )
     pipeline, metrics = train_model(
         X,
@@ -526,6 +600,9 @@ def main():
         sl_mult=args.sl_mult,
         symbol=args.symbol,
         timeframe=args.timeframe,
+        max_holding=args.holding,
+        fracdiff_d=fracdiff_d,
+        fracdiff_meta=fracdiff_meta,
     )
 
     # Save model artifact with MLOps metadata
@@ -550,6 +627,8 @@ def main():
         "pt_mult": args.pt_mult,
         "sl_mult": args.sl_mult,
         "calibrated": True,
+        "fracdiff_d": fracdiff_d,
+        "fracdiff_d_by_symbol": {args.symbol: fracdiff_d},
         "expiration_hours": 168,
         "trained_at": datetime.utcnow().isoformat(),
         "metrics": metrics,
@@ -604,6 +683,8 @@ def main():
                 "pt_mult": args.pt_mult,
                 "sl_mult": args.sl_mult,
                 "calibrated": True,
+                "fracdiff_d": fracdiff_d,
+                "fracdiff_d_by_symbol": {args.symbol: fracdiff_d},
                 "expiration_hours": 168,
                 "metrics": metrics,
                 "promotion_ok": promoted,

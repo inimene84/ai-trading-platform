@@ -4,10 +4,16 @@ Provides unified, stationary, and leak-free feature extraction for both
 training (train_ml.py) and live/backtest inference (QuantumMLStrategy).
 """
 
-from typing import List, Tuple
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
+from fracdiff import DEFAULT_D, fracdiff_feature_frame
+
+
+# Longest causal rolling window. Embargo/purge audits must be >= this.
+LONGEST_FEATURE_LOOKBACK_BARS = 200
 
 FEATURE_NAMES = [
     # Momentum & Oscillators
@@ -40,6 +46,9 @@ FEATURE_NAMES = [
     "volume_zscore_24",
     "volume_ratio_ema",
     "obv_slope_6",
+    # Fractional differentiation (d stored on the artifact; live must reuse it)
+    "fd_close",
+    "fd_logret",
 ]
 
 
@@ -53,10 +62,15 @@ def _calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100.0 - (100.0 / (1.0 + rs))
 
 
-def compute_features_df(df: pd.DataFrame) -> pd.DataFrame:
+def compute_features_df(
+    df: pd.DataFrame,
+    *,
+    fracdiff_d: Optional[float] = None,
+) -> pd.DataFrame:
     """
     Computes stationary technical indicators and price action features on an OHLCV DataFrame.
     Guarantees strict causality: all features at index t only use rows <= t.
+    `fracdiff_d` must be the artifact d at serve time; do not re-grid live.
     """
     df = df.copy()
     c = df["close"]
@@ -147,10 +161,19 @@ def compute_features_df(df: pd.DataFrame) -> pd.DataFrame:
     obv = (obv_direction * v).cumsum()
     features["obv_slope_6"] = (obv - obv.shift(6)) / (v_mean_24 * 6 + 1e-12)
 
+    d = DEFAULT_D if fracdiff_d is None else float(fracdiff_d)
+    fd = fracdiff_feature_frame(c, d)
+    features["fd_close"] = fd["fd_close"]
+    features["fd_logret"] = fd["fd_logret"]
+
     return features[FEATURE_NAMES]
 
 
-def compute_latest_features(candles: np.ndarray) -> np.ndarray:
+def compute_latest_features(
+    candles: np.ndarray,
+    *,
+    fracdiff_d: Optional[float] = None,
+) -> np.ndarray:
     """
     Extracts the feature vector for the latest candle from a Jesse candle numpy array:
     Format: [[timestamp, open, close, high, low, volume], ...]
@@ -171,6 +194,6 @@ def compute_latest_features(candles: np.ndarray) -> np.ndarray:
         }
     )
 
-    feat_df = compute_features_df(df)
+    feat_df = compute_features_df(df, fracdiff_d=fracdiff_d)
     latest = feat_df.iloc[-1].to_numpy(dtype=np.float32)
     return latest

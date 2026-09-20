@@ -189,15 +189,43 @@ def payoff_ratio_from_geometry(
     return max(0.5, min(pt / sl, 8.0))
 
 
+def net_theoretical_payoff_ratio(
+    pt_mult: Optional[float] = None,
+    sl_mult: Optional[float] = None,
+    *,
+    holding_bars: int = 48,
+    assumed_natr: float = 0.008,
+    fee_rate: float = 0.0006,
+    slip_rate: float = 0.0003,
+    funding_rate_8h: float = 0.0001,
+) -> float:
+    """Geometry b after fees/slip/funding — not the raw TP/SL 5.5/1.75 ≈ 3.14.
+
+    ``size_multiplier`` later scales baseline ``trade_usdt`` (and stop-risk
+    when equity sizing is on). It is not a 25% wallet clip.
+    """
+    pt = _as_float(pt_mult) or STRATEGY_PT_ATR
+    sl = _as_float(sl_mult) or STRATEGY_SL_ATR
+    n_funding = int((int(holding_bars) * 1.0) // 8)
+    cost_frac = 2.0 * fee_rate + 2.0 * slip_rate + n_funding * funding_rate_8h
+    natr = max(float(assumed_natr), 1e-6)
+    cost_atr = cost_frac / natr
+    pt_net = max(pt - cost_atr, 0.1)
+    sl_net = sl + cost_atr
+    return max(0.5, min(pt_net / sl_net, 8.0))
+
+
 def empirical_payoff_ratio(
     avg_win: float,
     avg_loss_abs: float,
     closed_count: int,
     *,
-    fallback: float = STRATEGY_PAYOFF_RATIO,
+    fallback: Optional[float] = None,
     min_closed: int = MIN_CLOSED_TRADES_FOR_EMPIRICAL_B,
 ) -> float:
-    """b = avg win / avg |loss|. Geometry fallback until the book has enough trades."""
+    """b from *net* closed-trade PnL. Thin-book fallback is cost-adjusted geometry."""
+    if fallback is None:
+        fallback = net_theoretical_payoff_ratio()
     if closed_count < min_closed or avg_win <= 0 or avg_loss_abs <= 0:
         return fallback
     return max(0.5, min(avg_win / avg_loss_abs, 8.0))

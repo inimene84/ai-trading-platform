@@ -22,7 +22,7 @@ from backend.services.jesse_ml_gates import (
     STRATEGY_SL_ATR,
     annotate_ml_prediction,
 )
-from backend.services.risk_config import refresh_risk_config
+from backend.services.risk_config import get_risk_config, refresh_risk_config
 from backend.services.trading_mode import live_exchange_orders_allowed
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,31 @@ JESSE_PASSWORD = os.getenv("JESSE_PASSWORD", "").strip()
 # Do not copy QTP bundles into jesse-trading/storage/models, do not set
 # JESSE_SYNC_TO_LIVE, and do not point the live ML gate at a new artifact.
 # QTP_SHADOW_INGEST_ENABLED=false
+
+
+def jesse_sync_to_live_enabled() -> bool:
+    """Fail-closed: only the literal true enables live geometry sync."""
+    return os.getenv("JESSE_SYNC_TO_LIVE", "false").strip().lower() == "true"
+
+
+def live_sync_contract(risk_config: Any = None) -> Dict[str, Any]:
+    """G2 wiring: live sync needs the env flag AND a PROMOTE verdict."""
+    try:
+        state = resolve_promotion(risk_config if risk_config is not None else get_risk_config())
+    except Exception as exc:
+        logger.warning("Promotion contract unreadable — live sync fail-closed: %s", exc)
+        state = None
+    verdict = None if state is None else state.verdict
+    promoted = verdict == "PROMOTE"
+    flag = jesse_sync_to_live_enabled()
+    return {
+        "jesse_sync_to_live": flag,
+        "promotion_gates_required": True,
+        "promoted": promoted,
+        "verdict": verdict,
+        "live_sync_allowed": bool(flag and promoted),
+        "g2_ready": promoted,
+    }
 
 # Predict errors that mean "this symbol has no live model". Live mode
 # fail-closes (veto) on no_model; paper stays fail-open. Do not rewrite
@@ -266,12 +291,31 @@ class JesseBridgeService:
         half-written. The /jesse/sync route maps rejected → HTTP 409.
         Rejected B200 artifacts are never promoted by this path.
         """
-        if os.getenv("JESSE_SYNC_TO_LIVE", "false").lower() != "true":
+        if not jesse_sync_to_live_enabled():
             logger.info("JESSE_SYNC_TO_LIVE is disabled — strategy sync is a no-op")
             return {
                 "status": "blocked",
                 "message": "JESSE_SYNC_TO_LIVE is disabled; sync is a no-op",
                 "synced": False,
+                "jesse_sync_to_live": False,
+                "promotion_gates_required": True,
+                "live_sync_allowed": False,
+            }
+
+        contract = live_sync_contract()
+        if not contract["live_sync_allowed"]:
+            logger.info(
+                "Live strategy sync blocked — promotion contract is %s (G2)",
+                contract.get("verdict"),
+            )
+            return {
+                "status": "blocked",
+                "message": (
+                    "live sync requires JESSE_SYNC_TO_LIVE=true and a PROMOTE "
+                    "promotion-contract verdict (G2). Models are not promoted by this path."
+                ),
+                "synced": False,
+                **contract,
             }
 
         env_path = os.getenv("ENV_FILE_PATH", ".env")

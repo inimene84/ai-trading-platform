@@ -247,8 +247,10 @@ def default_geometry() -> Dict[str, Any]:
         },
         "validation": {
             "purge_horizon": MAX_HOLDING_BARS,
+            "embargo_bars": max(MAX_HOLDING_BARS, 200),
             "embargo_fraction": 0.01,
             "cpcv_n_splits": 16,
+            "note": "embargo_bars wins over embargo_fraction; must be >= max(48, longest lookback)",
         },
     }
     geo["hashes"] = {"geometry_hash": geometry_hash(geo)}

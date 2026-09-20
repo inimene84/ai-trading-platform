@@ -11,6 +11,7 @@ from backend.services.jesse_ml_gates import (
     empirical_payoff_ratio,
     evaluate_promotion,
     geometry_matches_live,
+    net_theoretical_payoff_ratio,
     payoff_ratio_from_geometry,
 )
 
@@ -100,9 +101,11 @@ def test_evaluate_promotion_missing_metrics_fail_closed():
     assert "missing DSR or PBO" in decision.reason
 
 
-def test_empirical_payoff_uses_geometry_until_30_closed_trades():
+def test_empirical_payoff_uses_net_geometry_until_30_closed_trades():
     fallback = empirical_payoff_ratio(avg_win=80.0, avg_loss_abs=20.0, closed_count=12)
-    assert abs(fallback - STRATEGY_PAYOFF_RATIO) < 1e-9
+    net_b = net_theoretical_payoff_ratio()
+    assert abs(fallback - net_b) < 1e-9
+    assert fallback < STRATEGY_PAYOFF_RATIO  # costs shrink b below raw 5.5/1.75
     realized = empirical_payoff_ratio(avg_win=80.0, avg_loss_abs=20.0, closed_count=40)
     assert abs(realized - 4.0) < 1e-9
 
