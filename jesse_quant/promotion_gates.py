@@ -19,11 +19,17 @@ try:
     from barrier_config import PBO_MAX as _PBO_MAX
     from barrier_config import SL_ATR_MULT as _SL_ATR
     from barrier_config import TP_ATR_MULT as _TP_ATR
+    from barrier_config import round_trip_cost_pct as _round_trip_cost_pct
 except ImportError:
     _SL_ATR = 1.75
     _TP_ATR = 5.5
     _DSR_MIN = 0.95
     _PBO_MAX = 0.30
+
+    def _round_trip_cost_pct(holding_bars: int, bar_hours: float = 1.0, zero_cost: bool = False) -> float:
+        if zero_cost:
+            return 0.0
+        return float((2.0 * 0.0006 + 2.0 * 0.0003 + int((holding_bars * bar_hours) // 8) * 0.0001) * 100.0)
 
 # Live strategy geometry (jesse4 / optimizer-confirmed).
 STRATEGY_SL_ATR = float(_SL_ATR)
@@ -200,15 +206,44 @@ def payoff_ratio_from_geometry(
     return max(0.5, min(pt / sl, 8.0))
 
 
+def net_theoretical_payoff_ratio(
+    pt_mult: Optional[float] = None,
+    sl_mult: Optional[float] = None,
+    *,
+    holding_bars: int = 48,
+    assumed_natr: float = 0.008,
+) -> float:
+    """Geometry b after fees/slip/funding — not the raw TP/SL 5.5/1.75 ≈ 3.14.
+
+    Cost is expressed in ATR units via assumed NATR (0.8% of price is the
+    1h research default). This is the thin-book fallback only.
+    """
+    pt = _as_float(pt_mult) or STRATEGY_PT_ATR
+    sl = _as_float(sl_mult) or STRATEGY_SL_ATR
+    cost_frac = _round_trip_cost_pct(int(holding_bars)) / 100.0
+    natr = max(float(assumed_natr), 1e-6)
+    cost_atr = cost_frac / natr
+    pt_net = max(pt - cost_atr, 0.1)
+    sl_net = sl + cost_atr
+    return max(0.5, min(pt_net / sl_net, 8.0))
+
+
 def empirical_payoff_ratio(
     avg_win: float,
     avg_loss_abs: float,
     closed_count: int,
     *,
-    fallback: float = STRATEGY_PAYOFF_RATIO,
+    fallback: Optional[float] = None,
     min_closed: int = MIN_CLOSED_TRADES_FOR_EMPIRICAL_B,
 ) -> float:
-    """b = avg win / avg |loss|. Geometry fallback until the book has enough trades."""
+    """b = avg net win / avg |net loss|. Fallback is cost-adjusted geometry, not 3.14.
+
+    Callers must pass *net* outcomes (fees/slip/funding already in Trade.pnl).
+    The returned number is a payoff ratio; Decision Engine multiplies
+    ``trade_usdt`` / stop-risk by ``size_multiplier``, not a wallet fraction.
+    """
+    if fallback is None:
+        fallback = net_theoretical_payoff_ratio()
     if closed_count < min_closed or avg_win <= 0 or avg_loss_abs <= 0:
         return fallback
     return max(0.5, min(avg_win / avg_loss_abs, 8.0))

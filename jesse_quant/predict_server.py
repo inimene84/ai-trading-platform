@@ -45,6 +45,7 @@ from barrier_config import (
     theoretical_payoff_ratio,
 )
 from feature_schema import FEATURE_HASH
+from fracdiff import resolve_artifact_d
 from ml_features import FEATURE_NAMES, compute_latest_features
 from asset_universe import candle_timeframe_candidates, normalize_symbol as jesse_symbol_from_compact
 from promotion_gates import MIN_CLASS_RECALL, annotate_ml_prediction, artifact_gate as evaluate_artifact_gate
@@ -122,9 +123,21 @@ def resolve_payoff_ratio(model_data: Optional[Dict[str, Any]]) -> Dict[str, Any]
     all_attempts = payoff_meta.get("all_attempts_train") or {}
 
     if model_trades.get("payoff_ratio") and int(model_trades.get("n_trades", 0)) >= MIN_TRADES_FOR_EMPIRICAL_PAYOFF:
-        return {"payoff_ratio": float(model_trades["payoff_ratio"]), "source": "empirical_holdout_model_trades", "n": int(model_trades["n_trades"]), "theoretical": theoretical}
+        return {
+            "payoff_ratio": float(model_trades["payoff_ratio"]),
+            "source": "empirical_holdout_model_trades",
+            "kind": "net_realized",
+            "n": int(model_trades["n_trades"]),
+            "theoretical": theoretical,
+        }
     if all_attempts.get("payoff_ratio"):
-        return {"payoff_ratio": float(all_attempts["payoff_ratio"]), "source": "empirical_training_attempts", "n": int(all_attempts.get("n_trades", 0)), "theoretical": theoretical}
+        return {
+            "payoff_ratio": float(all_attempts["payoff_ratio"]),
+            "source": "empirical_training_attempts",
+            "kind": "net_realized",
+            "n": int(all_attempts.get("n_trades", 0)),
+            "theoretical": theoretical,
+        }
     emp = (model_data or {}).get("payoff_ratio_empirical")
     if emp:
         return {"payoff_ratio": float(emp), "source": str((model_data or {}).get("payoff_ratio_source", "artifact")), "n": None, "theoretical": theoretical}
@@ -520,7 +533,7 @@ def run_inference(
 
     try:
         candles = fetch_recent_candles(norm_symbol, timeframe)
-        feats = compute_latest_features(candles)
+        feats = compute_latest_features(candles, fracdiff_d=resolve_artifact_d(model_data, symbol=norm_symbol))
     except Exception as e:
         return {"status": "error", "error": str(e)}
 

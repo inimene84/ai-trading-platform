@@ -42,11 +42,11 @@ export const PortfolioView = () => {
     return () => clearInterval(iv);
   }, [fetchAll]);
 
-  // Computed stats
-  const winningTrades = trades.filter(t => t.pnl && t.pnl > 0);
-  const losingTrades = trades.filter(t => t.pnl && t.pnl < 0);
-  const winRate = trades.length > 0 ? (winningTrades.length / trades.length) * 100 : 0;
-  const totalRealizedPnl = trades.reduce((acc, t) => acc + (t.pnl || 0), 0);
+  // Computed stats — exchange_reconciliation is not strategy PnL (Phase C).
+  const strategyTrades = trades.filter(t => t.strategy !== 'exchange_reconciliation');
+  const winningTrades = strategyTrades.filter(t => t.pnl && t.pnl > 0);
+  const losingTrades = strategyTrades.filter(t => t.pnl && t.pnl < 0);
+  const winRate = strategyTrades.length > 0 ? (winningTrades.length / strategyTrades.length) * 100 : 0;
 
   // Asset allocation from positions
   const assetAllocationMap: { [key: string]: number } = {};
@@ -101,8 +101,11 @@ export const PortfolioView = () => {
 
   const balance = portfolio?.balance ?? 0;
   const equity = portfolio?.equity ?? 0;
-  const totalPnl = portfolio?.total_pnl ?? 0;
-  const totalPnlPct = portfolio?.total_pnl_pct ?? 0;
+  const realizedToday = portfolio?.realized_today ?? 0;
+  const realized7d = portfolio?.realized_7d ?? 0;
+  const openUpnl = portfolio?.open_unrealized_pnl ?? portfolio?.unrealized_pnl ?? 0;
+  const unionEquity = portfolio?.informational_union_equity ?? portfolio?.display_union_equity;
+  const unionLabel = portfolio?.union_label ?? 'union = cTrader + Binance';
   const positionsValue = portfolio?.positions_value ?? 0;
   const available = portfolio?.available ?? balance;
 
@@ -131,7 +134,7 @@ export const PortfolioView = () => {
       {/* Top Stats */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="bg-[#141416] p-6 rounded-2xl border border-zinc-800">
-          <p className="text-zinc-500 text-[10px] uppercase font-bold tracking-widest mb-1">Total Equity</p>
+          <p className="text-zinc-500 text-[10px] uppercase font-bold tracking-widest mb-1">Risk Equity</p>
           <p className="text-3xl font-bold font-mono tracking-tight">${equity.toLocaleString(undefined, { minimumFractionDigits: 2 })}</p>
           <div className="mt-4 flex flex-col gap-2">
             <div className="flex justify-between items-center text-sm">
@@ -142,25 +145,32 @@ export const PortfolioView = () => {
               <span className="text-zinc-500">In Positions</span>
               <span className="font-mono text-white">${positionsValue.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
             </div>
+            {typeof unionEquity === 'number' && (
+              <div className="flex justify-between items-center text-sm">
+                <span className="text-zinc-500">{unionLabel}</span>
+                <span className="font-mono text-white">${unionEquity.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+              </div>
+            )}
           </div>
         </div>
         
         <div className="bg-[#141416] p-6 rounded-2xl border border-zinc-800">
-          <p className="text-zinc-500 text-[10px] uppercase font-bold tracking-widest mb-1">Total P&L</p>
-          <p className={cn("text-3xl font-bold font-mono tracking-tight", totalPnl >= 0 ? "text-emerald-400" : "text-rose-400")}>
-            {totalPnl >= 0 ? '+' : ''}{totalPnlPct.toFixed(2)}%
+          <p className="text-zinc-500 text-[10px] uppercase font-bold tracking-widest mb-1">Realized (strategy)</p>
+          <p className={cn("text-3xl font-bold font-mono tracking-tight", realizedToday >= 0 ? "text-emerald-400" : "text-rose-400")}>
+            {realizedToday >= 0 ? '+' : ''}${realizedToday.toLocaleString(undefined, { minimumFractionDigits: 2 })}
           </p>
+          <p className="text-[10px] text-zinc-500 mt-1">Today — not lifetime DB PnL</p>
           <div className="mt-4 flex flex-col gap-2">
             <div className="flex justify-between items-center text-sm">
-              <span className="text-zinc-500">Net Profit</span>
-              <span className={cn("font-mono", totalPnl >= 0 ? "text-emerald-400" : "text-rose-400")}>
-                {totalPnl >= 0 ? '+' : ''}${totalPnl.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+              <span className="text-zinc-500">7d realized</span>
+              <span className={cn("font-mono", realized7d >= 0 ? "text-emerald-400" : "text-rose-400")}>
+                {realized7d >= 0 ? '+' : ''}${realized7d.toLocaleString(undefined, { minimumFractionDigits: 2 })}
               </span>
             </div>
             <div className="flex justify-between items-center text-sm">
-              <span className="text-zinc-500">Realized</span>
-              <span className={cn("font-mono", totalRealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400")}>
-                {totalRealizedPnl >= 0 ? '+' : ''}${totalRealizedPnl.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+              <span className="text-zinc-500">Open uPnL</span>
+              <span className={cn("font-mono", openUpnl >= 0 ? "text-emerald-400" : "text-rose-400")}>
+                {openUpnl >= 0 ? '+' : ''}${openUpnl.toLocaleString(undefined, { minimumFractionDigits: 2 })}
               </span>
             </div>
           </div>

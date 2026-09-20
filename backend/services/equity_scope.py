@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 from typing import Any, Literal, Optional
 
+from backend.services.pnl_accounting import UNION_LABEL
 from backend.services.trading_mode import (
     TradingMode,
     binance_paper_parallel_enabled,
@@ -192,6 +193,7 @@ def describe_equity_books() -> dict[str, Any]:
         "equity_scope": effective_risk_scope(),
         "risk_broker": risk_broker_name(),
         "split_book_warning": SPLIT_BOOK_WARNING if split else None,
+        "union_label": UNION_LABEL,
     }
 
 
@@ -230,7 +232,16 @@ def compose_balance_payload(books: list[dict[str, Any]]) -> dict[str, Any]:
         "equity": 0.0,
         "margin_used": 0.0,
         "display_union_equity": None,
+        "informational_union_equity": None,
+        "union_label": UNION_LABEL,
+        "informational_union_is_risk_equity": False,
     }
+
+    healthy = [b for b in tagged if not b.get("error")]
+    if healthy:
+        payload["informational_union_equity"] = sum(
+            float(b.get("equity") or b.get("balance") or 0.0) for b in healthy
+        )
 
     same_mode = not meta["split_book"]
     if same_mode and effective_risk_scope() == "union":
@@ -239,9 +250,8 @@ def compose_balance_payload(books: list[dict[str, Any]]) -> dict[str, Any]:
             return payload
         healthy = [b for b in tagged if not b.get("error")]
         if healthy:
-            payload["display_union_equity"] = sum(
-                float(b.get("equity") or b.get("balance") or 0.0) for b in healthy
-            )
+            payload["display_union_equity"] = payload["informational_union_equity"]
+            payload["informational_union_is_risk_equity"] = True
             payload["equity"] = payload["display_union_equity"]
             payload["balance"] = sum(float(b.get("balance") or 0.0) for b in healthy)
             payload["available"] = sum(float(b.get("available") or 0.0) for b in healthy)

@@ -3,7 +3,7 @@ import logging
 from typing import Optional, Dict, Any, List, Never, Tuple
 from dataclasses import dataclass
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from backend.database.connection import SessionLocal
 from backend.database.models import Trade
@@ -15,6 +15,7 @@ from backend.ml.promotion_service import (
     resolve_promotion,
 )
 from backend.services.equity_scope import risk_broker_name
+from backend.services.pnl_accounting import RECONCILIATION_STRATEGIES
 from backend.services.jesse_bridge import jesse_bridge
 from backend.services.jesse_ml_gates import (
     STRATEGY_PAYOFF_RATIO,
@@ -1070,6 +1071,12 @@ class DecisionEngine:
                 current_mode = get_trading_mode().value if hasattr(get_trading_mode(), "value") else str(get_trading_mode())
                 closed_filter = Trade.status.in_(["closed", "exit"])
                 q = db.query(Trade).filter(closed_filter)
+                q = q.filter(
+                    or_(
+                        Trade.strategy.is_(None),
+                        ~Trade.strategy.in_(sorted(RECONCILIATION_STRATEGIES)),
+                    )
+                )
                 if active_broker == "ctrader":
                     q = q.filter(Trade.broker.in_(["ctrader", "ctrader:paper", "ic", "icmarkets"]))
                 elif active_broker in {"binance", "binance_futures"}:

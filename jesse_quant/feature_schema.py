@@ -13,7 +13,7 @@ import numpy as np
 from ml_features import FEATURE_NAMES
 
 
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "2.1.0"
 
 
 def compute_feature_schema_hash(feature_names: List[str] = FEATURE_NAMES) -> str:
