@@ -347,6 +347,20 @@ export const StatusView = () => {
         </div>
       </div>
 
+      {status.equity_books && (
+        <div className="bg-[#141416] border border-zinc-800 rounded-xl p-4">
+          <p className="text-[10px] uppercase text-zinc-500 font-bold tracking-widest">
+            {status.equity_books.union_label || 'union = cTrader + Binance'}
+          </p>
+          <p className="text-sm text-zinc-300 mt-2">
+            Active broker: <span className="font-mono font-bold">{status.active_broker || status.equity_books.active_broker || 'ctrader'}</span>
+            {' · '}
+            Risk book: <span className="font-mono font-bold">{String(status.equity_books.risk_broker || '—')}</span>
+            {status.equity_books.split_book ? ' · split book (union is display-only, not kill equity)' : ''}
+          </p>
+        </div>
+      )}
+
       {/* LLM Providers */}
       <div>
         <h3 className="text-sm font-bold mb-4 flex items-center gap-2">

@@ -1,6 +1,12 @@
 import os
+import sys
+from pathlib import Path
 
 import pytest
+
+_JESSE_QUANT = Path(__file__).resolve().parents[2] / "jesse_quant"
+if str(_JESSE_QUANT) not in sys.path:
+    sys.path.insert(0, str(_JESSE_QUANT))
 
 @pytest.fixture
 def anyio_backend():

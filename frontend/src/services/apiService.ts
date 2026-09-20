@@ -73,14 +73,25 @@ async function directGet<T = any>(path: string): Promise<T> {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+export interface EquityBooks {
+  active_broker?: string;
+  risk_broker?: string;
+  split_book?: boolean;
+  union_label?: string;
+  informational_union_equity?: number | null;
+  [key: string]: unknown;
+}
+
 export interface SystemStatus {
   backend: string;
   strategies_loaded: number;
   dry_run: boolean;
   mode: string;
+  active_broker?: string;
   llm_providers: { name: string; model: string; status: string; type: string; role?: string }[];
   brokers: { name: string; env: string; status: string }[];
   data_providers: { name: string; status: string; note?: string }[];
+  equity_books?: EquityBooks;
   risk_config: {
     risk_per_trade: number;
     max_positions: number;
@@ -237,6 +248,18 @@ export interface Portfolio {
   positions: any[];
   total_pnl: number;
   total_pnl_pct: number;
+  total_pnl_is_not_cash?: boolean;
+  total_pnl_source?: string;
+  lifetime_db_pnl?: number;
+  lifetime_db_pnl_is_not_cash?: boolean;
+  realized_today?: number;
+  realized_7d?: number;
+  open_unrealized_pnl?: number;
+  unrealized_pnl?: number;
+  informational_union_equity?: number | null;
+  display_union_equity?: number | null;
+  union_label?: string;
+  active_broker?: string;
   positions_value: number;
   open_positions_count: number;
   last_updated: string;

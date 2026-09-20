@@ -368,6 +368,7 @@ class PurgedKFold:
         n_splits: int = 5,
         samples_info_sets: Optional[pd.Series] = None,
         embargo_pct: float = 0.01,
+        embargo_bars: Optional[int] = None,
     ):
         """
         Parameters:
@@ -375,10 +376,16 @@ class PurgedKFold:
           samples_info_sets: Series mapping sample index -> label expiration index (t1).
                              If None, assumes 1-bar horizon (no overlap purge, only embargo).
           embargo_pct: Fraction of total observations to embargo immediately after test set.
+          embargo_bars: Absolute embargo length. When set, wins over embargo_pct.
+                        Must be >= max(max_holding_bars, longest feature lookback).
         """
         self.n_splits = n_splits
         self.samples_info_sets = samples_info_sets
         self.embargo_pct = embargo_pct
+        self.embargo_bars = embargo_bars
+
+    def get_n_splits(self, X=None, y=None, groups=None) -> int:
+        return int(self.n_splits)
 
     def split(
         self,
@@ -388,7 +395,10 @@ class PurgedKFold:
     ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
         n_samples = len(X)
         indices = np.arange(n_samples)
-        embargo = int(n_samples * self.embargo_pct)
+        if self.embargo_bars is not None:
+            embargo = max(0, int(self.embargo_bars))
+        else:
+            embargo = int(n_samples * self.embargo_pct)
 
         # Create contiguous test chunks
         fold_bounds = [(int(i * n_samples / self.n_splits), int((i + 1) * n_samples / self.n_splits))

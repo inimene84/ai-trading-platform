@@ -20,6 +20,17 @@ def test_jesse_bridge_sync_parameters(tmp_path, monkeypatch):
     dummy_env.write_text("SL_ATR_MULT=1.0\nTP_ATR_MULT=2.5\nTRAIL_ACTIVATION_ATR=1.5\nTRAIL_ATR_MULT=0.8\n")
     monkeypatch.setenv("ENV_FILE_PATH", str(dummy_env))
     monkeypatch.setenv("JESSE_SYNC_TO_LIVE", "true")
+    monkeypatch.setattr(
+        "backend.services.jesse_bridge.live_sync_contract",
+        lambda risk_config=None: {
+            "jesse_sync_to_live": True,
+            "promotion_gates_required": True,
+            "promoted": True,
+            "verdict": "PROMOTE",
+            "live_sync_allowed": True,
+            "g2_ready": True,
+        },
+    )
 
     service = JesseBridgeService()
     result = service.sync_strategy_to_risk_config(
@@ -41,6 +52,33 @@ def test_jesse_bridge_sync_parameters(tmp_path, monkeypatch):
     assert "TP_ATR_MULT=4.5" in content
     assert "TRAIL_ACTIVATION_ATR=2.1" in content
     assert "TRAIL_ATR_MULT=1.4" in content
+
+
+def test_jesse_bridge_sync_blocked_when_gates_not_promote(tmp_path, monkeypatch):
+    """JESSE_SYNC_TO_LIVE=true is not enough — G2 still requires PROMOTE."""
+    dummy_env = tmp_path / ".env"
+    dummy_env.write_text("SL_ATR_MULT=1.0\nTP_ATR_MULT=2.5\n")
+    monkeypatch.setenv("ENV_FILE_PATH", str(dummy_env))
+    monkeypatch.setenv("JESSE_SYNC_TO_LIVE", "true")
+    monkeypatch.setattr(
+        "backend.services.jesse_bridge.live_sync_contract",
+        lambda risk_config=None: {
+            "jesse_sync_to_live": True,
+            "promotion_gates_required": True,
+            "promoted": False,
+            "verdict": None,
+            "live_sync_allowed": False,
+            "g2_ready": False,
+        },
+    )
+
+    service = JesseBridgeService()
+    result = service.sync_strategy_to_risk_config(sl_atr_mult=3.0, tp_atr_mult=6.0)
+
+    assert result["status"] == "blocked"
+    assert result["synced"] is False
+    assert result["live_sync_allowed"] is False
+    assert "SL_ATR_MULT=1.0" in dummy_env.read_text()
 
 
 def test_jesse_bridge_sync_blocked_when_flag_disabled(tmp_path, monkeypatch):
@@ -77,6 +115,17 @@ def test_jesse_sync_route(client, monkeypatch, tmp_path):
     dummy_env.write_text("SL_ATR_MULT=1.0\nTP_ATR_MULT=2.0\n")
     monkeypatch.setenv("ENV_FILE_PATH", str(dummy_env))
     monkeypatch.setenv("JESSE_SYNC_TO_LIVE", "true")
+    monkeypatch.setattr(
+        "backend.services.jesse_bridge.live_sync_contract",
+        lambda risk_config=None: {
+            "jesse_sync_to_live": True,
+            "promotion_gates_required": True,
+            "promoted": True,
+            "verdict": "PROMOTE",
+            "live_sync_allowed": True,
+            "g2_ready": True,
+        },
+    )
 
     api_key = os.getenv("ADMIN_API_KEY", "test_key")
     monkeypatch.setenv("ADMIN_API_KEY", api_key)
@@ -209,6 +258,9 @@ def test_jesse_promotion_status_unconfigured(client, monkeypatch):
     assert body["status"] == "unconfigured"
     assert body["verdict"] is None
     assert body["promoted"] is False
+    assert body["jesse_sync_to_live"] is False
+    assert body["live_sync_allowed"] is False
+    assert body["promotion_gates_required"] is True
     assert "gpu-artifacts" in body["gpu_artifacts_note"]
 
 

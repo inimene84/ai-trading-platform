@@ -31,6 +31,7 @@ def test_split_book_when_ctrader_demo_and_binance_live(monkeypatch):
     assert meta["ctrader_env"] == "sandbox"
     assert meta["binance_env"] == "live"
     assert meta["split_book_warning"] == SPLIT_BOOK_WARNING
+    assert meta["union_label"] == "union = cTrader + Binance"
 
 
 def test_compose_does_not_union_demo_and_live_equity(monkeypatch):
@@ -52,6 +53,9 @@ def test_compose_does_not_union_demo_and_live_equity(monkeypatch):
     assert payload["split_book"] is True
     assert payload["equity"] == 918.0
     assert payload["display_union_equity"] is None
+    assert payload["informational_union_equity"] == 1068.0
+    assert payload["union_label"] == "union = cTrader + Binance"
+    assert payload["informational_union_is_risk_equity"] is False
     assert payload["risk_broker"] == "binance_futures"
 
 
@@ -162,4 +166,7 @@ def test_union_scope_sums_same_mode_books(monkeypatch):
     assert payload["split_book"] is False
     assert payload["equity"] == 1100.0
     assert payload["display_union_equity"] == 1100.0
+    assert payload["informational_union_equity"] == 1100.0
+    assert payload["informational_union_is_risk_equity"] is True
+    assert payload["union_label"] == "union = cTrader + Binance"
     assert payload.get("error") is None

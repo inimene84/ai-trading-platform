@@ -211,11 +211,51 @@ def test_jesse_sync_reject_restores_env_byte_for_byte(tmp_path, monkeypatch):
         result = service.sync_strategy_to_risk_config(
             sl_atr_mult=3.0, tp_atr_mult=6.0, trail_activation_atr=2.5, trail_atr_mult=1.0,
         )
+    # G2: REJECT never reaches the .env writer.
+    assert result["status"] == "blocked"
+    assert result["synced"] is False
+    assert result["live_sync_allowed"] is False
+    assert dummy_env.read_bytes() == original
+    assert os.environ.get("SL_ATR_MULT") == "1.75"
+    assert os.environ.get("TP_ATR_MULT") == "5.5"
+
+
+def test_jesse_sync_post_g2_reject_restores_env(tmp_path, monkeypatch):
+    """If G2 was already PROMOTE, a later REJECT still restores .env."""
+    dummy_env = tmp_path / ".env"
+    original = b"SL_ATR_MULT=1.75\nTP_ATR_MULT=5.5\nTRAIL_ACTIVATION_ATR=2.0\nTRAIL_ATR_MULT=0.8\n# keep me\n"
+    dummy_env.write_bytes(original)
+    monkeypatch.setenv("ENV_FILE_PATH", str(dummy_env))
+    monkeypatch.setenv("JESSE_SYNC_TO_LIVE", "true")
+    monkeypatch.setenv("SL_ATR_MULT", "1.75")
+    monkeypatch.setenv("TP_ATR_MULT", "5.5")
+    monkeypatch.setattr(
+        "backend.services.jesse_bridge.live_sync_contract",
+        lambda risk_config=None: {
+            "jesse_sync_to_live": True,
+            "promotion_gates_required": True,
+            "promoted": True,
+            "verdict": "PROMOTE",
+            "live_sync_allowed": True,
+            "g2_ready": True,
+        },
+    )
+    rejected = PromotionState(
+        result=GateResult(
+            verdict="REJECT",
+            reason="GEOMETRY_LIVE_LOCK: training geometry locked fields != live RiskConfig",
+            failed_gate="GEOMETRY_LIVE_LOCK",
+        )
+    )
+    service = JesseBridgeService()
+    with patch("backend.services.jesse_bridge.resolve_promotion", return_value=rejected):
+        result = service.sync_strategy_to_risk_config(
+            sl_atr_mult=3.0, tp_atr_mult=6.0, trail_activation_atr=2.5, trail_atr_mult=1.0,
+        )
     assert result["status"] == "rejected"
     assert result["synced"] is False
     assert dummy_env.read_bytes() == original
     assert os.environ.get("SL_ATR_MULT") == "1.75"
-    assert os.environ.get("TP_ATR_MULT") == "5.5"
 
 
 def test_jesse_sync_exception_restores_env(tmp_path, monkeypatch):
@@ -225,6 +265,17 @@ def test_jesse_sync_exception_restores_env(tmp_path, monkeypatch):
     monkeypatch.setenv("ENV_FILE_PATH", str(dummy_env))
     monkeypatch.setenv("JESSE_SYNC_TO_LIVE", "true")
     monkeypatch.setenv("SL_ATR_MULT", "1.75")
+    monkeypatch.setattr(
+        "backend.services.jesse_bridge.live_sync_contract",
+        lambda risk_config=None: {
+            "jesse_sync_to_live": True,
+            "promotion_gates_required": True,
+            "promoted": True,
+            "verdict": "PROMOTE",
+            "live_sync_allowed": True,
+            "g2_ready": True,
+        },
+    )
     service = JesseBridgeService()
     with patch(
         "backend.services.jesse_bridge.resolve_promotion",
