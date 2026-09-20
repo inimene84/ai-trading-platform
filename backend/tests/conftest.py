@@ -42,3 +42,18 @@ def clean_trading_mode_for_tests(monkeypatch):
     monkeypatch.setenv("CTRADER_LIVE_CONFIRM", "I_UNDERSTAND")
     monkeypatch.setenv("DISABLE_DRAWDOWN_IN_TESTING", "false")
     monkeypatch.setenv("TESTING_MODE", "false")
+
+
+@pytest.fixture(autouse=True)
+def fx_venue_open_for_engine_tests(monkeypatch):
+    """Keep IC/cTrader engine scans deterministic on weekend CI.
+
+    ``is_venue_open`` follows Sun 21:00–Fri 21:00 UTC. Sunday runners would
+    otherwise skip every FX scan before the assertion under test. Tests that
+    need a closed venue patch ``signal_candidate_engine.is_venue_open`` locally.
+    The real ``market_hours.is_venue_open`` is left untouched for hour tests.
+    """
+    monkeypatch.setattr(
+        "backend.services.signal_candidate_engine.is_venue_open",
+        lambda symbol, now=None: True,
+    )
