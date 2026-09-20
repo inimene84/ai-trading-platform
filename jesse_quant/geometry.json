@@ -1,11 +1,13 @@
 {
   "spec_version": "1.0.0",
   "strategy_id": "QuantumAIStrategy",
-  "triple_barrier": {
+    "triple_barrier": {
     "sl_atr_mult": 1.75,
     "pt_atr_mult": 5.5,
     "atr_period": 14,
-    "vertical_timeout_bars": 48
+    "vertical_timeout_bars": 48,
+    "trail_activation_atr": 2.2,
+    "trail_atr_mult": 1.6
   },
   "bar": {
     "timeframe": "1h",
@@ -30,8 +32,9 @@
     "p_win_min": 0.45,
     "width_max": 0.50
   },
-  "validation": {
+    "validation": {
     "purge_horizon": 48,
+    "embargo_bars": 200,
     "embargo_fraction": 0.01,
     "cpcv_n_splits": 16
   }

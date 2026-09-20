@@ -4,10 +4,10 @@
 Runs on the Hostinger GPU node:
   1. Detect CUDA (B200 / whatever is attached)
   2. Load dumped Jesse candles (parquet/csv) or Postgres
-  3. QuantumAI-event triple-barrier labels at live 5.5 / 1.75 ATR geometry
-  4. LightGBM (CUDA if available) + optional LSTM sequence model
-  5. Write geometry.json / metrics.json / contract.json
-  6. Promote to production *.joblib ONLY if DSR/PBO/recall gates pass
+  3. QuantumAI-event triple-barrier labels at live 5.5 / 1.75 ATR, trail 2.2/1.6, 48x1h
+  4. LightGBM GBDT meta-labeler (CUDA if available) + optional LSTM
+  5. FracDiff d per symbol stored on the artifact; calibrate on net outcomes
+  6. Write geometry.json / metrics.json / contract.json (SHADOW/REJECT only; no live promote)
 
 Huge binaries stay on the GPU/trading VPS. This script never talks to brokers.
 
@@ -42,6 +42,8 @@ from gpu_device import detect_training_device
 from promotion_contract import SPEC_VERSION, default_geometry, evaluate_contract, write_geometry
 from promotion_gates import evaluate_promotion
 from train_cli import MIN_TRAIN_EVENTS, build_parser, find_candle_path
+from barrier_config import MAX_HOLDING_BARS, TRAIL_ACTIVATION_ATR, TRAIL_ATR_MULT
+from fracdiff import select_fracdiff_d
 from train_ml import (
     MODELS_DIR,
     TooFewEventsError,
@@ -143,9 +145,17 @@ def train_one_symbol(
         print(f"[!] {symbol}: {summary['skip_reason']}")
         return summary
 
+    fracdiff_meta = select_fracdiff_d(df["close"])
+    fracdiff_d = float(fracdiff_meta["d"])
+    print(
+        f"[*] Recipe: GBDT+meta SL={sl_mult} TP={pt_mult} trail={TRAIL_ACTIVATION_ATR}/{TRAIL_ATR_MULT} "
+        f"hold={holding} (live {MAX_HOLDING_BARS}) FracDiff d={fracdiff_d} net-of-costs"
+    )
+    print(f"[*] FracDiff d={fracdiff_d} adf_p={fracdiff_meta['adf_pvalue']:.4f} source={fracdiff_meta['source']}")
+
     everybar = events == "everybar"
     try:
-        X, y, sample_weights, samples_info_sets = prepare_dataset(
+        X, y, sample_weights, samples_info_sets, net_returns = prepare_dataset(
             df,
             labeling_mode="triple_barrier",
             pt_mult=pt_mult,
@@ -153,6 +163,7 @@ def train_one_symbol(
             max_holding=holding,
             fallback_every_bar=everybar,
             min_events=10**9 if everybar else MIN_TRAIN_EVENTS,
+            fracdiff_d=fracdiff_d,
         )
     except TooFewEventsError as exc:
         summary["skipped"] = True
@@ -173,7 +184,15 @@ def train_one_symbol(
         "timeframe": timeframe,
         "pt_mult": pt_mult,
         "sl_mult": sl_mult,
+        "max_holding_bars": holding,
+        "trail_activation_atr": TRAIL_ACTIVATION_ATR,
+        "trail_atr_mult": TRAIL_ATR_MULT,
+        "fracdiff_d": fracdiff_d,
+        "fracdiff_d_by_symbol": {symbol: fracdiff_d},
+        "fracdiff": fracdiff_meta,
         "asset_class": asset_class,
+        "labeling": "triple_barrier_net",
+        "promote_requested": False,
     }
     lgbm_metrics: Dict[str, Any] = {}
     lstm_metrics: Dict[str, Any] = {}
@@ -190,6 +209,10 @@ def train_one_symbol(
             sl_mult=sl_mult,
             symbol=symbol,
             timeframe=timeframe,
+            max_holding=holding,
+            fracdiff_d=fracdiff_d,
+            fracdiff_meta=fracdiff_meta,
+            net_returns=net_returns,
         )
         promo = evaluate_promotion(lgbm_metrics, pt_mult=pt_mult, sl_mult=sl_mult)
         lgbm_metrics["promotion_ok"] = promo.ok
@@ -212,7 +235,10 @@ def train_one_symbol(
                 "model_type": "lightgbm",
                 "pt_mult": pt_mult,
                 "sl_mult": sl_mult,
+                "max_holding_bars": holding,
                 "calibrated": True,
+                "fracdiff_d": fracdiff_d,
+                "fracdiff_d_by_symbol": {symbol: fracdiff_d},
                 "trained_at": datetime.now(timezone.utc).isoformat(),
                 "metrics": lgbm_metrics,
                 "promotion_ok": promo.ok,
@@ -273,6 +299,9 @@ def train_one_symbol(
                 "trained_at": datetime.now(timezone.utc).isoformat(),
                 "pt_mult": pt_mult,
                 "sl_mult": sl_mult,
+                "max_holding_bars": holding,
+                "fracdiff_d": fracdiff_d,
+                "fracdiff_d_by_symbol": {symbol: fracdiff_d},
             },
             path,
         )
@@ -405,6 +434,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Torch:         {device.torch_version} cuda={device.torch_cuda}")
     print(f"LightGBM:      {device.lightgbm_device}")
     print(f"Feature Hash:  {FEATURE_HASH}")
+    print(f"Geometry:      SL={args.sl_mult} TP={args.pt_mult} trail={TRAIL_ACTIVATION_ATR}/{TRAIL_ATR_MULT} hold={args.holding}")
+    print("Calibrate:     net outcomes (fees/slip/funding) — not theoretical b≈3.14")
+    print("Promote:       never from this GPU recipe (SHADOW / REJECT only)")
     print("=========================================================")
 
     candles_dir = args.candles_dir or os.path.join(

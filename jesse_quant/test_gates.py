@@ -27,6 +27,9 @@ class TestGeometrySingleSourceOfTruth(unittest.TestCase):
         g = barrier_config.geometry_dict()
         self.assertEqual(g["sl_atr_mult"], 1.75)
         self.assertEqual(g["tp_atr_mult"], 5.5)
+        self.assertEqual(g["max_holding_bars"], 48)
+        self.assertAlmostEqual(g["trail_activation_atr"], 2.2)
+        self.assertAlmostEqual(g["trail_atr_mult"], 1.6)
         self.assertAlmostEqual(g["breakeven_win_probability"], 1.0 / (1.0 + 5.5 / 1.75), places=4)
 
     def test_promotion_gates_use_barrier_config(self):

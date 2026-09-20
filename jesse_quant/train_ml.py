@@ -12,12 +12,12 @@ import os
 import sys
 import time
 from datetime import datetime
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Optional, Tuple
 
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.metrics import classification_report, accuracy_score, precision_score
+from sklearn.metrics import classification_report, accuracy_score
 from sklearn.preprocessing import RobustScaler
 from sklearn.pipeline import Pipeline
 from sklearn.calibration import CalibratedClassifierCV
@@ -30,6 +30,7 @@ except ImportError:
     psycopg2 = None  # type: ignore[assignment]
 
 from calibration import calibration_deploy_control, reliability_diagram
+from monte_carlo import moving_block_bootstrap
 from embargo_audit import (
     audit_purged_embargo,
     embargo_bars_for_n,
@@ -38,7 +39,6 @@ from embargo_audit import (
 from fracdiff import kernel_width, select_fracdiff_d
 from ml_features import FEATURE_NAMES, LONGEST_FEATURE_LOOKBACK_BARS, compute_features_df
 from validation_metrics import PurgedKFold, calculate_sharpe_ratio, deflated_sharpe_ratio, probability_of_backtest_overfitting
-from triple_barrier import apply_triple_barrier, compute_sample_uniqueness
 from feature_schema import FEATURE_HASH
 from gpu_device import detect_training_device, lightgbm_device_kwargs
 from promotion_contract import (
@@ -50,15 +50,22 @@ from promotion_contract import (
 from trial_registry import record_trials
 from asset_universe import candle_timeframe_candidates
 from train_errors import TooFewEventsError
-from barrier_config import MAX_HOLDING_BARS, cost_model_dict, round_trip_cost_pct
+from barrier_config import (
+    MAX_HOLDING_BARS,
+    TRAIL_ACTIVATION_ATR,
+    TRAIL_ATR_MULT,
+    cost_model_dict,
+    round_trip_cost_pct,
+)
 from promotion_gates import (
     DSR_GATE,
     PBO_GATE,
     STRATEGY_PT_ATR,
     STRATEGY_SL_ATR,
     evaluate_promotion,
-    payoff_ratio_from_geometry,
+    net_theoretical_payoff_ratio,
 )
+from triple_barrier import apply_triple_barrier, compute_sample_uniqueness, realized_payoff_stats
 
 # Database settings — never hardcode credentials; the Jesse container injects these.
 DB_HOST = os.getenv("POSTGRES_HOST", "postgres")
@@ -192,11 +199,14 @@ def prepare_dataset(
     fallback_every_bar: bool = True,
     min_events: int = 50,
     fracdiff_d: Optional[float] = None,
-) -> Tuple[pd.DataFrame, pd.Series, Optional[pd.Series], Optional[pd.Series]]:
+) -> Tuple[pd.DataFrame, pd.Series, Optional[pd.Series], Optional[pd.Series], pd.Series]:
     """
     Computes features and labels outcomes using either:
     1. Triple-Barrier Method (path-dependent PT, SL, timeout with sample uniqueness weights)
     2. Fixed Horizon returns (return[t+H] vs fixed threshold)
+
+    Meta-labels are P(net outcome > 0 | primary signal) after fees/slip/funding,
+    not the theoretical b≈3.14 TP-before-SL event.
     """
     print("[*] Computing quantitative technical indicators & FracDiff features...")
     t0 = time.time()
@@ -206,7 +216,8 @@ def prepare_dataset(
         events_idx = quantum_ai_event_index(df)
         print(
             f"[*] Applying Triple-Barrier Method on {len(events_idx):,} QuantumAI entry events: "
-            f"PT={pt_mult}x ATR, SL={sl_mult}x ATR, Max Holding={max_holding} bars..."
+            f"PT={pt_mult}x ATR, SL={sl_mult}x ATR, trail={TRAIL_ACTIVATION_ATR}/{TRAIL_ATR_MULT}, "
+            f"Max Holding={max_holding} bars, net of costs..."
         )
         if len(events_idx) < min_events:
             if not fallback_every_bar:
@@ -219,25 +230,25 @@ def prepare_dataset(
             pt_multiplier=pt_mult,
             sl_multiplier=sl_mult,
             max_holding_bars=max_holding,
+            trail_activation_atr=TRAIL_ACTIVATION_ATR,
+            trail_atr_mult=TRAIL_ATR_MULT,
+            apply_costs=True,
         )
         sample_weights = compute_sample_uniqueness(tb_df, df.index)
 
-        # Meta-label relative to the long primary: TP-before-SL is class 1,
-        # everything else (SL or timeout) is class 0. Served as a 2-class
-        # P(setup works) so the live BUY gate is not a majority-class veto.
-        y_raw = tb_df["label"]
-        y = pd.Series(0, index=tb_df.index, dtype=int)
-        y[y_raw == 1] = 1
+        net = tb_df["net_ret"] if "net_ret" in tb_df.columns else tb_df["ret"]
+        y = pd.Series((net > 0).astype(int), index=tb_df.index, dtype=int)
 
         samples_info_sets = tb_df["t1"]
         common_idx = X.index.intersection(y.index)
-        valid_mask = ~(X.loc[common_idx].isna().any(axis=1) | y.loc[common_idx].isna())
+        valid_mask = ~(X.loc[common_idx].isna().any(axis=1) | y.loc[common_idx].isna() | net.loc[common_idx].isna())
         final_idx = common_idx[valid_mask]
 
         X_clean = X.loc[final_idx]
         y_clean = y.loc[final_idx]
         w_clean = sample_weights.loc[final_idx]
         info_sets_clean = samples_info_sets.loc[final_idx]
+        net_clean = net.loc[final_idx]
     else:
         # Fixed forward horizon
         forward_return = (df["close"].shift(-forward_horizon) / df["close"] - 1.0) * 100.0
@@ -250,11 +261,12 @@ def prepare_dataset(
         y_clean = y[valid_mask]
         w_clean = None
         info_sets_clean = None
+        net_clean = forward_return[valid_mask]
 
     class_counts = y_clean.value_counts().to_dict()
     print(f"    Dataset prepared in {time.time()-t0:.2f}s: {len(X_clean):,} valid rows")
-    print(f"    Class Distribution: Fail/Timeout(0)={class_counts.get(0, 0):,}, TP-hit(1)={class_counts.get(1, 0):,}, Bearish(2)={class_counts.get(2, 0):,}")
-    return X_clean, y_clean, w_clean, info_sets_clean
+    print(f"    Class Distribution: Net-loss(0)={class_counts.get(0, 0):,}, Net-win(1)={class_counts.get(1, 0):,}, Bearish(2)={class_counts.get(2, 0):,}")
+    return X_clean, y_clean, w_clean, info_sets_clean, net_clean
 
 
 
@@ -336,6 +348,7 @@ def train_model(
     max_holding: int = MAX_HOLDING_BARS,
     fracdiff_d: Optional[float] = None,
     fracdiff_meta: Optional[Dict[str, Any]] = None,
+    net_returns: Optional[pd.Series] = None,
 ) -> Tuple[Pipeline, Dict[str, Any]]:
     """Train with a hyperparameter grid so DSR/PBO see the true trial count."""
     device = detect_training_device()
@@ -401,9 +414,13 @@ def train_model(
             else:
                 raise
         preds = clf.predict(X_test_s)
-        pred_signal = np.where(preds == 1, 1.0, -1.0)
-        actual_signal = np.where(y_test.to_numpy() == 1, 1.0, -1.0)
-        rets = pred_signal * actual_signal * 0.01
+        if net_returns is not None:
+            holdout_net = net_returns.iloc[split_idx:].to_numpy(dtype=float) / 100.0
+            rets = np.where(preds == 1, holdout_net, 0.0)
+        else:
+            pred_signal = np.where(preds == 1, 1.0, -1.0)
+            actual_signal = np.where(y_test.to_numpy() == 1, 1.0, -1.0)
+            rets = pred_signal * actual_signal * 0.01
         holdout_columns.append(rets)
         sr = calculate_sharpe_ratio(rets)
         trial_sharpes.append(sr)
@@ -433,6 +450,19 @@ def train_model(
     dsr_holdout = deflated_sharpe_ratio(holdout_returns, n_trials=n_trials, variance_of_trials=var_sharpe)
 
     print(f"[*] Best trial #{best_idx + 1} holdout Sharpe={holdout_sr:.3f}; n_trials={n_trials} (ledger+grid)")
+    monte = moving_block_bootstrap(holdout_returns)
+    print(f"[*] Monte Carlo: {monte.get('reason')} scenarios={monte.get('n_scenarios')}")
+    if net_returns is not None:
+        payoff = realized_payoff_stats(net_returns.to_numpy(dtype=float))
+    else:
+        payoff = realized_payoff_stats(holdout_returns * 100.0)
+    fallback_b = net_theoretical_payoff_ratio(pt_mult, sl_mult, holding_bars=int(max_holding))
+    if payoff["n_wins"] >= 30 and payoff["avg_loss_abs"] > 0:
+        b_hat = float(payoff["payoff_ratio"])
+        payoff_kind = "net_realized"
+    else:
+        b_hat = float(fallback_b)
+        payoff_kind = "net_theoretical_geometry"
 
     base_clf = _make_clf(model_type, best_params, used_device_kwargs)
     info_train = None
@@ -498,7 +528,7 @@ def train_model(
         "best_params": best_params,
         "pt_mult": float(pt_mult),
         "sl_mult": float(sl_mult),
-        "payoff_ratio": float(payoff_ratio_from_geometry(pt_mult, sl_mult)),
+        "payoff_ratio": float(b_hat),
         "pbo_median_rank": float(med_rank),
         "bullish_precision": float(report.get("1", {}).get("precision", 0)),
         "bullish_recall": float(report.get("1", {}).get("recall", 0)),
@@ -516,7 +546,12 @@ def train_model(
         "embargo_audit": embargo_audit.to_dict(),
         "calibration": calibration_ctl,
         "calibration_method": calibration_method,
-        "payoff_ratio_kind": "theoretical_geometry_gross",
+        "payoff_ratio_kind": payoff_kind,
+        "realized_payoff": payoff,
+        "monte_carlo": monte,
+        "max_holding_bars": int(max_holding),
+        "trail_activation_atr": float(TRAIL_ACTIVATION_ATR),
+        "trail_atr_mult": float(TRAIL_ATR_MULT),
         "costs": cost_model_dict(),
         "round_trip_cost_pct": round_trip_cost_pct(int(max_holding)),
     }
@@ -580,7 +615,7 @@ def main():
     fracdiff_meta = select_fracdiff_d(df["close"])
     fracdiff_d = float(fracdiff_meta["d"])
     print(f"[*] FracDiff d={fracdiff_d} adf_p={fracdiff_meta['adf_pvalue']:.4f} source={fracdiff_meta['source']}")
-    X, y, sample_weights, samples_info_sets = prepare_dataset(
+    X, y, sample_weights, samples_info_sets, net_returns = prepare_dataset(
         df,
         labeling_mode=args.labeling,
         pt_mult=args.pt_mult,
@@ -603,6 +638,7 @@ def main():
         max_holding=args.holding,
         fracdiff_d=fracdiff_d,
         fracdiff_meta=fracdiff_meta,
+        net_returns=net_returns,
     )
 
     # Save model artifact with MLOps metadata

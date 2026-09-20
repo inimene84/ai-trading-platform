@@ -185,6 +185,27 @@ def evaluate_promotion(
     else:
         reason = f"PASS DSR={dsr:.4f} PBO={pbo:.1%} geometry={pt}x/{sl}x"
 
+    monte = metrics.get("monte_carlo")
+    if isinstance(monte, Mapping) and not bool(monte.get("gate_ok")):
+        return PromotionDecision(
+            ok=False,
+            reason=f"Monte Carlo gate failed: {monte.get('reason') or 'worst-5% ruin'}",
+            dsr=dsr,
+            pbo=pbo,
+            pt_mult=pt,
+            sl_mult=sl,
+        )
+    calibration = metrics.get("calibration")
+    if isinstance(calibration, Mapping) and "calibration_ok" in calibration and not bool(calibration.get("calibration_ok")):
+        return PromotionDecision(
+            ok=False,
+            reason=f"calibration not near diagonal: {calibration.get('reason') or 'reliability'}",
+            dsr=dsr,
+            pbo=pbo,
+            pt_mult=pt,
+            sl_mult=sl,
+        )
+
     return PromotionDecision(
         ok=True,
         reason=("OVERRIDE " if allow_overfit and (dsr < DSR_GATE or pbo >= PBO_GATE) else "") + reason,

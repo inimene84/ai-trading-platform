@@ -26,6 +26,8 @@ from barrier_config import (
     PBO_MAX,
     SL_ATR_MULT,
     TP_ATR_MULT,
+    TRAIL_ACTIVATION_ATR,
+    TRAIL_ATR_MULT,
 )
 from promotion_gates import (
     DSR_GATE,
@@ -221,6 +223,8 @@ def default_geometry() -> Dict[str, Any]:
             "pt_atr_mult": TP_ATR_MULT,
             "atr_period": ATR_PERIOD,
             "vertical_timeout_bars": MAX_HOLDING_BARS,
+            "trail_activation_atr": TRAIL_ACTIVATION_ATR,
+            "trail_atr_mult": TRAIL_ATR_MULT,
         },
         "bar": {
             "timeframe": "1h",

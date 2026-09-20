@@ -7,9 +7,20 @@ Implements Marcos López de Prado's path-dependent labeling framework:
 3. Meta-Labeling: Secondary binary labels determining if a primary model signal hits profit before stop
 """
 
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Union
+
 import numpy as np
 import pandas as pd
+
+from barrier_config import (
+    MAX_HOLDING_BARS,
+    SL_ATR_MULT,
+    TP_ATR_MULT,
+    TRAIL_ACTIVATION_ATR,
+    TRAIL_ATR_MULT,
+    ZERO_COST,
+    round_trip_cost_pct,
+)
 
 
 def get_daily_volatility(close: pd.Series, lookback: int = 50) -> pd.Series:
@@ -32,26 +43,45 @@ def get_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return tr.ewm(span=period, adjust=False).mean()
 
 
+def net_round_trip_return_pct(
+    gross_ret_pct: float,
+    holding_bars: int,
+    *,
+    bar_hours: float = 1.0,
+    apply_costs: bool = True,
+) -> float:
+    """Gross barrier return minus taker fees, slippage and expected funding."""
+    if not apply_costs or ZERO_COST:
+        return float(gross_ret_pct)
+    return float(gross_ret_pct) - float(round_trip_cost_pct(int(holding_bars), bar_hours=bar_hours))
+
+
 def apply_triple_barrier(
     df: pd.DataFrame,
     events_idx: Optional[pd.Index] = None,
-    pt_multiplier: float = 5.5,
-    sl_multiplier: float = 1.75,
-    max_holding_bars: int = 24,
+    pt_multiplier: float = TP_ATR_MULT,
+    sl_multiplier: float = SL_ATR_MULT,
+    max_holding_bars: int = MAX_HOLDING_BARS,
     use_atr: bool = True,
+    trail_activation_atr: float = TRAIL_ACTIVATION_ATR,
+    trail_atr_mult: float = TRAIL_ATR_MULT,
+    apply_costs: bool = True,
+    bar_hours: float = 1.0,
 ) -> pd.DataFrame:
     """
-    Computes path-dependent triple-barrier outcomes for each observation:
-      - Upper Barrier: entry + pt_multiplier * volatility
-      - Lower Barrier: entry - sl_multiplier * volatility
-      - Vertical Barrier: entry + max_holding_bars
-    
+    Computes path-dependent triple-barrier outcomes matching live geometry:
+      - Upper Barrier: entry + pt_multiplier * ATR (live 5.5)
+      - Lower Barrier: entry - sl_multiplier * ATR (live 1.75)
+      - Trail: once MFE >= trail_activation_atr, SL ratchets to high - trail_atr_mult * ATR (live 2.2 / 1.6)
+      - Vertical Barrier: entry + max_holding_bars (live 48 x 1h)
+
     Returns DataFrame with columns:
       - t1: Timestamp when first barrier was touched (expiration)
       - trgt: Volatility threshold applied (in price units)
-      - ret: Realized return at barrier touch
-      - label: +1 (Bullish/TP hit first), -1 (Bearish/SL hit first), 0 (Vertical barrier hit / timeout)
-      - touch_type: 'pt', 'sl', or 'timeout'
+      - ret: Gross realized return at barrier touch (percent)
+      - net_ret: ret minus fees / slip / funding (percent)
+      - label: +1 (TP first), -1 (SL / trail stop first), 0 (timeout)
+      - touch_type: 'pt', 'sl', 'trail', or 'timeout'
     """
     if events_idx is None:
         events_idx = df.index[:-max_holding_bars]
@@ -79,6 +109,8 @@ def apply_triple_barrier(
 
         upper_barrier = entry_price + (pt_multiplier * v)
         lower_barrier = entry_price - (sl_multiplier * v)
+        current_sl = lower_barrier
+        highest = entry_price
 
         # Scan forward along the price path
         sub_high = high.iloc[loc + 1 : loc + 1 + max_holding_bars]
@@ -88,43 +120,51 @@ def apply_triple_barrier(
         touch_time = None
         touch_type = "timeout"
         label = 0
-        realized_ret = 0.0
+        exit_price = float(sub_close.iloc[-1]) if len(sub_close) else entry_price
+        held_bars = int(len(sub_close))
 
         for step in range(len(sub_close)):
             bar_time = sub_close.index[step]
-            h_bar = sub_high.iloc[step]
-            l_bar = sub_low.iloc[step]
+            h_bar = float(sub_high.iloc[step])
+            l_bar = float(sub_low.iloc[step])
+            highest = max(highest, h_bar)
+            if trail_activation_atr > 0 and v > 0:
+                gain_atr = (highest - entry_price) / v
+                if gain_atr >= float(trail_activation_atr):
+                    trail_sl = highest - (float(trail_atr_mult) * v)
+                    if trail_sl > current_sl:
+                        current_sl = trail_sl
 
             tp_hit = h_bar >= upper_barrier
-            sl_hit = l_bar <= lower_barrier
+            sl_hit = l_bar <= current_sl
+            trailed = current_sl > lower_barrier + 1e-12
 
-            if tp_hit and not sl_hit:
+            if sl_hit:
+                # Same-bar TP+SL: fail closed (SL first), matching the prior conservative rule.
+                touch_time = bar_time
+                touch_type = "trail" if trailed else "sl"
+                label = -1
+                exit_price = current_sl
+                held_bars = step + 1
+                break
+            if tp_hit:
                 touch_time = bar_time
                 touch_type = "pt"
                 label = 1
-                realized_ret = (upper_barrier / entry_price - 1.0) * 100.0
-                break
-            elif sl_hit and not tp_hit:
-                touch_time = bar_time
-                touch_type = "sl"
-                label = -1
-                realized_ret = (lower_barrier / entry_price - 1.0) * 100.0
-                break
-            elif tp_hit and sl_hit:
-                # Both hit in same bar (worst-case assumption: hit SL first)
-                touch_time = bar_time
-                touch_type = "sl"
-                label = -1
-                realized_ret = (lower_barrier / entry_price - 1.0) * 100.0
+                exit_price = upper_barrier
+                held_bars = step + 1
                 break
 
         if touch_time is None:
-            # Vertical barrier reached
             touch_time = sub_close.index[-1]
-            final_p = sub_close.iloc[-1]
-            realized_ret = (final_p / entry_price - 1.0) * 100.0
+            exit_price = float(sub_close.iloc[-1])
+            held_bars = int(len(sub_close))
             touch_type = "timeout"
-            label = 1 if realized_ret > (0.2 * sl_multiplier * v / entry_price * 100) else (-1 if realized_ret < (-0.2 * sl_multiplier * v / entry_price * 100) else 0)
+            realized_probe = (exit_price / entry_price - 1.0) * 100.0
+            label = 1 if realized_probe > (0.2 * sl_multiplier * v / entry_price * 100) else (-1 if realized_probe < (-0.2 * sl_multiplier * v / entry_price * 100) else 0)
+
+        realized_ret = (exit_price / entry_price - 1.0) * 100.0
+        net_ret = net_round_trip_return_pct(realized_ret, held_bars, bar_hours=bar_hours, apply_costs=apply_costs)
 
         out.append({
             "datetime": idx,
@@ -132,8 +172,10 @@ def apply_triple_barrier(
             "entry_price": entry_price,
             "trgt": v,
             "ret": realized_ret,
+            "net_ret": net_ret,
             "label": label,
             "touch_type": touch_type,
+            "held_bars": int(held_bars),
         })
 
     out_df = pd.DataFrame(out).set_index("datetime")
@@ -196,9 +238,9 @@ def compute_sample_uniqueness(df_events: pd.DataFrame, total_bars_index: pd.Inde
 def generate_meta_labels(
     df: pd.DataFrame,
     primary_signals: pd.Series,
-    pt_multiplier: float = 5.5,
-    sl_multiplier: float = 1.75,
-    max_holding_bars: int = 24,
+    pt_multiplier: float = TP_ATR_MULT,
+    sl_multiplier: float = SL_ATR_MULT,
+    max_holding_bars: int = MAX_HOLDING_BARS,
 ) -> pd.DataFrame:
     """
     Generates Meta-Labels for a primary strategy signal (+1 for Long, -1 for Short):
