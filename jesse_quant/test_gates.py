@@ -13,7 +13,13 @@ import numpy as np
 
 import barrier_config
 import trial_registry
-from promotion_gates import evaluate_promotion
+from promotion_gates import (
+    KELLY_ABS_CAP,
+    KELLY_FRACTION,
+    STRATEGY_PAYOFF_RATIO,
+    calculate_fractional_kelly,
+    evaluate_promotion,
+)
 from signal_policy import decide_signal, expected_value_r
 from triple_barrier import realized_payoff_stats
 from validation_metrics import evaluate_gate
@@ -91,6 +97,17 @@ class TestTrialRegistry(unittest.TestCase):
 
     def test_historical_seed_present(self):
         self.assertGreater(trial_registry.total_trials("ml:BTC-USDT:1h"), 1)
+
+
+class TestHalfKellyCap(unittest.TestCase):
+    def test_half_kelly_wallet_fraction_capped_at_two_percent(self):
+        self.assertEqual(KELLY_FRACTION, 0.5)
+        self.assertEqual(KELLY_ABS_CAP, 0.02)
+        strong = calculate_fractional_kelly(0.90, payoff_ratio=STRATEGY_PAYOFF_RATIO)
+        self.assertLessEqual(strong["fractional_kelly"], KELLY_ABS_CAP)
+        self.assertGreater(strong["fractional_kelly_uncapped"], KELLY_ABS_CAP)
+        self.assertGreaterEqual(strong["size_multiplier"], 0.20)
+        self.assertLessEqual(strong["size_multiplier"], 1.0)
 
 
 class TestPayoffAndDecision(unittest.TestCase):

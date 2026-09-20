@@ -36,6 +36,7 @@ from asset_universe import (
     normalize_symbol,
     resolve_universe,
 )
+from fracdiff import select_fracdiff_d
 from ml_features import FEATURE_NAMES
 from feature_schema import FEATURE_HASH
 from gpu_device import detect_training_device
@@ -112,6 +113,7 @@ def train_one_symbol(
     device: Any,
     asset_class: str = "",
     events: str = "quantum_ai",
+    use_fracdiff: bool = False,
 ) -> Dict[str, Any]:
     """Train LightGBM and/or LSTM for one symbol.
 
@@ -144,8 +146,19 @@ def train_one_symbol(
         return summary
 
     everybar = events == "everybar"
+    fracdiff_meta: Optional[Dict[str, Any]] = None
+    fracdiff_d: Optional[float] = None
+    if use_fracdiff:
+        cut = max(200, int(len(df) * 0.85))
+        fracdiff_meta = select_fracdiff_d(df["close"].iloc[:cut])
+        fracdiff_d = float(fracdiff_meta["d"])
+        print(
+            f"[*] {symbol} FracDiff d={fracdiff_d} "
+            f"adf_p={fracdiff_meta['adf_pvalue']:.4f} source={fracdiff_meta['source']} "
+            f"(selected on first {cut} bars)"
+        )
     try:
-        X, y, sample_weights, samples_info_sets = prepare_dataset(
+        X, y, sample_weights, samples_info_sets, dataset_extra = prepare_dataset(
             df,
             labeling_mode="triple_barrier",
             pt_mult=pt_mult,
@@ -153,6 +166,7 @@ def train_one_symbol(
             max_holding=holding,
             fallback_every_bar=everybar,
             min_events=10**9 if everybar else MIN_TRAIN_EVENTS,
+            fracdiff_d=fracdiff_d,
         )
     except TooFewEventsError as exc:
         summary["skipped"] = True
@@ -174,6 +188,9 @@ def train_one_symbol(
         "pt_mult": pt_mult,
         "sl_mult": sl_mult,
         "asset_class": asset_class,
+        "fracdiff_d": fracdiff_d,
+        "fracdiff_d_by_symbol": {symbol: fracdiff_d},
+        "holding": holding,
     }
     lgbm_metrics: Dict[str, Any] = {}
     lstm_metrics: Dict[str, Any] = {}
@@ -190,6 +207,10 @@ def train_one_symbol(
             sl_mult=sl_mult,
             symbol=symbol,
             timeframe=timeframe,
+            max_holding=holding,
+            fracdiff_d=fracdiff_d,
+            fracdiff_meta=fracdiff_meta,
+            event_returns=dataset_extra.get("net_returns"),
         )
         promo = evaluate_promotion(lgbm_metrics, pt_mult=pt_mult, sl_mult=sl_mult)
         lgbm_metrics["promotion_ok"] = promo.ok
@@ -212,6 +233,9 @@ def train_one_symbol(
                 "model_type": "lightgbm",
                 "pt_mult": pt_mult,
                 "sl_mult": sl_mult,
+                "fracdiff_d": fracdiff_d,
+                "fracdiff_d_by_symbol": {symbol: fracdiff_d},
+                "fracdiff": fracdiff_meta,
                 "calibrated": True,
                 "trained_at": datetime.now(timezone.utc).isoformat(),
                 "metrics": lgbm_metrics,
@@ -273,6 +297,8 @@ def train_one_symbol(
                 "trained_at": datetime.now(timezone.utc).isoformat(),
                 "pt_mult": pt_mult,
                 "sl_mult": sl_mult,
+                "fracdiff_d": fracdiff_d,
+                "fracdiff_d_by_symbol": {symbol: fracdiff_d},
             },
             path,
         )
@@ -301,6 +327,7 @@ def train_universe(
     symbols: Optional[Sequence[str]] = None,
     events: str = "quantum_ai",
     exclude: Optional[Sequence[str]] = None,
+    use_fracdiff: bool = False,
 ) -> Dict[str, Any]:
     rows: List[UniverseSymbol] = resolve_universe(asset_class, symbols=symbols)
     skip = {normalize_symbol(s) for s in (exclude or []) if s}
@@ -359,6 +386,7 @@ def train_universe(
             device=device,
             asset_class=item.asset_class,
             events=events,
+            use_fracdiff=use_fracdiff,
         )
         batch["results"].append(rec)
         if rec.get("skipped"):
@@ -423,6 +451,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             device=device,
             events=args.events,
             exclude=[s.strip() for s in args.exclude.split(",") if s.strip()],
+            use_fracdiff=args.fracdiff,
         )
         print(f"[*] Batch elapsed {time.time() - t0:.1f}s")
         if batch.get("promoted"):
@@ -444,6 +473,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         device=device,
         asset_class=(lookup_symbol(args.symbol).asset_class if lookup_symbol(args.symbol) else ""),
         events=args.events,
+        use_fracdiff=args.fracdiff,
     )
     if rec.get("skipped"):
         return 2

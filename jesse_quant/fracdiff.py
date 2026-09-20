@@ -13,6 +13,13 @@ from typing import Any, Dict, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+try:
+    from statsmodels.tsa.stattools import adfuller as _adfuller
+except ImportError:
+    _adfuller = None
+
+D_SEARCH_MIN = 0.20
+D_SEARCH_MAX = 0.70
 D_MIN = 0.35
 D_MAX = 0.55
 D_STEP = 0.05
@@ -70,12 +77,11 @@ def _adf_pvalue(values: np.ndarray) -> float:
     arr = arr[np.isfinite(arr)]
     if len(arr) < 30:
         return 1.0
-    try:
-        from statsmodels.tsa.stattools import adfuller
-
-        return float(adfuller(arr, maxlag=1, regression="c", autolag=None)[1])
-    except Exception:
-        pass
+    if _adfuller is not None:
+        try:
+            return float(_adfuller(arr, maxlag=1, regression="c", autolag=None)[1])
+        except Exception:
+            pass
     y = np.diff(arr)
     lag = arr[:-1]
     design = np.column_stack([np.ones(len(lag)), lag])
@@ -119,12 +125,18 @@ def select_fracdiff_d(
     adf_p_max: float = ADF_P_MAX,
     default_d: float = DEFAULT_D,
 ) -> Dict[str, Any]:
-    """Grid-search the smallest stationary d in [d_min, d_max]."""
+    """Grid-search the smallest stationary d.
+
+    Full search is [0.20, 0.70]; the research band [0.35, 0.55] wins when any
+    candidate there is ADF-stationary (p < adf_p_max).
+    """
     if isinstance(series, pd.Series):
         raw = series.to_numpy(dtype=float)
     else:
         raw = np.asarray(series, dtype=float)
-    grid = [round(float(d), 4) for d in np.arange(d_min, d_max + 1e-9, d_step)]
+    search_min = min(float(d_min), D_SEARCH_MIN)
+    search_max = max(float(d_max), D_SEARCH_MAX)
+    grid = [round(float(d), 4) for d in np.arange(search_min, search_max + 1e-9, d_step)]
     candidates: list[dict[str, Any]] = []
     for d in grid:
         transformed = fracdiff_series(raw, d).to_numpy()
@@ -133,18 +145,21 @@ def select_fracdiff_d(
         row = {"d": d, "adf_pvalue": p_value, "level_corr": corr, "stationary": p_value < adf_p_max}
         candidates.append(row)
     stationary = [row for row in candidates if row["stationary"]]
-    if stationary:
-        # Smallest d, then highest remaining level correlation.
+    preferred = [row for row in stationary if d_min - 1e-9 <= row["d"] <= d_max + 1e-9]
+    if preferred:
+        chosen = min(preferred, key=lambda row: (row["d"], -row["level_corr"]))
+        source = "prefer_band_stationary"
+    elif stationary:
         chosen = min(stationary, key=lambda row: (row["d"], -row["level_corr"]))
+        source = "extended_grid_stationary"
+    elif candidates:
+        prefer_only = [row for row in candidates if d_min - 1e-9 <= row["d"] <= d_max + 1e-9]
+        pool = prefer_only or candidates
+        chosen = min(pool, key=lambda row: (row["adf_pvalue"], -row["level_corr"]))
+        source = "default_or_best_effort"
     else:
-        chosen = min(candidates, key=lambda row: (row["adf_pvalue"], -row["level_corr"])) if candidates else {
-            "d": default_d,
-            "adf_pvalue": 1.0,
-            "level_corr": 0.0,
-            "stationary": False,
-        }
-        if not candidates:
-            chosen = {"d": default_d, "adf_pvalue": 1.0, "level_corr": 0.0, "stationary": False}
+        chosen = {"d": default_d, "adf_pvalue": 1.0, "level_corr": 0.0, "stationary": False}
+        source = "default_or_best_effort"
     return {
         "d": float(chosen["d"]),
         "adf_pvalue": float(chosen["adf_pvalue"]),
@@ -153,7 +168,9 @@ def select_fracdiff_d(
         "grid": candidates,
         "d_min": d_min,
         "d_max": d_max,
-        "source": "purged_cv_grid" if stationary else "default_or_best_effort",
+        "d_search_min": search_min,
+        "d_search_max": search_max,
+        "source": source,
     }
 
 

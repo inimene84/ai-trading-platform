@@ -11,6 +11,8 @@ from typing import Dict, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 
+from barrier_config import MAX_HOLDING_BARS
+
 
 def get_daily_volatility(close: pd.Series, lookback: int = 50) -> pd.Series:
     """Computes rolling exponential standard deviation of returns as volatility proxy."""
@@ -37,7 +39,7 @@ def apply_triple_barrier(
     events_idx: Optional[pd.Index] = None,
     pt_multiplier: float = 5.5,
     sl_multiplier: float = 1.75,
-    max_holding_bars: int = 24,
+    max_holding_bars: int = MAX_HOLDING_BARS,
     use_atr: bool = True,
 ) -> pd.DataFrame:
     """
@@ -198,7 +200,7 @@ def generate_meta_labels(
     primary_signals: pd.Series,
     pt_multiplier: float = 5.5,
     sl_multiplier: float = 1.75,
-    max_holding_bars: int = 24,
+    max_holding_bars: int = MAX_HOLDING_BARS,
 ) -> pd.DataFrame:
     """
     Generates Meta-Labels for a primary strategy signal (+1 for Long, -1 for Short):

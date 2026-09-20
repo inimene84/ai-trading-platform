@@ -38,8 +38,9 @@ STRATEGY_PAYOFF_RATIO = STRATEGY_PT_ATR / STRATEGY_SL_ATR  # ~3.14
 
 DSR_GATE = float(_DSR_MIN)
 PBO_GATE = float(_PBO_MAX)
-KELLY_FRACTION = 0.25
-KELLY_BASELINE = 0.125  # quarter-Kelly at 55% win / 2:1 payoff
+KELLY_FRACTION = 0.5  # half-Kelly (ML pack 2026-09-20)
+KELLY_ABS_CAP = 0.02  # 2% equity ceiling on f
+KELLY_BASELINE = 0.1625  # half-Kelly at 55% win / 2:1 payoff
 MIN_CLOSED_TRADES_FOR_EMPIRICAL_B = 30
 MIN_CLASS_RECALL = 0.10
 
@@ -297,26 +298,32 @@ def calculate_fractional_kelly(
     win_prob: float,
     payoff_ratio: float = STRATEGY_PAYOFF_RATIO,
     fraction: float = KELLY_FRACTION,
+    abs_cap: float = KELLY_ABS_CAP,
 ) -> Dict[str, float]:
     """
-    f* = fraction * (p * b - (1 - p)) / b
-    Size multiplier is scaled to a 0.125 quarter-Kelly baseline and clipped
-    to a 1.0 upper bound (unconditional). Thin-book clip keeps a 0.25 floor.
+    f = min(fraction * (p * b - (1 - p)) / b, abs_cap)
+    Default fraction is half-Kelly; abs_cap is the 2% equity ceiling.
+    size_multiplier scales configured trade_usdt from the uncapped half-Kelly
+    so a 2% wallet cap does not collapse every size to the 0.20 floor.
     """
     b = payoff_ratio if payoff_ratio > 0 else 1.0
     p = min(max(float(win_prob), 0.0), 1.0)
     full_kelly = (p * b - (1.0 - p)) / b
-    fractional = max(0.0, full_kelly) * fraction
-    if fractional <= 0:
+    uncapped = max(0.0, full_kelly) * fraction
+    fractional = min(uncapped, float(abs_cap))
+    if uncapped <= 0:
         size_multiplier = 0.0
     else:
-        size_multiplier = float(max(0.20, min(fractional / KELLY_BASELINE, 1.0)))
+        size_multiplier = float(max(0.20, min(uncapped / KELLY_BASELINE, 1.0)))
     return {
         "fractional_kelly": round(float(fractional), 4),
+        "fractional_kelly_uncapped": round(float(uncapped), 4),
         "full_kelly": round(float(full_kelly), 4),
         "payoff_ratio": round(float(b), 4),
         "size_multiplier": round(size_multiplier, 3),
         "win_prob": round(p, 4),
+        "kelly_fraction": float(fraction),
+        "kelly_abs_cap": float(abs_cap),
     }
 
 
