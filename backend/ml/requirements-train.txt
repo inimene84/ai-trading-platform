@@ -1,6 +1,6 @@
 # GPU / training-node extras. Do not install on the VPS Decision Engine.
 # The engine re-reads metrics.json; it never recomputes DSR/PBO.
-purgedcv>=0.1.2
-purgedcv[optuna]>=0.1.2
+purgedcv>=0.1.6
+purgedcv[optuna]>=0.1.6
 pyarrow>=14.0.0
 joblib>=1.3.0
