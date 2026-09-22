@@ -426,6 +426,71 @@ def test_get_trendbars_live_missing_symbol_id_returns_empty():
     assert bars == []
 
 
+def test_trendbar_lookback_is_count_bounded_for_m5():
+    """M5 requests must not ask for a 7-day payload."""
+    ms = CTraderService.trendbar_lookback_ms(5, 40)
+    seven_days = 7 * 86400 * 1000
+    assert ms < seven_days
+    assert ms >= 40 * 300 * 1000
+    assert ms <= (40 + 2) * 300 * 1000
+
+
+def test_trendbar_lookback_caps_long_periods_at_seven_days():
+    ms = CTraderService.trendbar_lookback_ms(11, 500)
+    assert ms == 7 * 86400 * 1000
+
+
+def test_rate_limit_does_not_drop_the_session():
+    assert CTraderService.protocol_error_should_disconnect("BLOCKED_PAYLOAD_TYPE", "You are being rate limited") is False
+    assert CTraderService.protocol_error_should_disconnect("OA_ERROR", "rate limit exceeded") is False
+    assert CTraderService.protocol_error_should_disconnect("CANT_ROUTE_REQUEST", "no route") is True
+
+
+def test_get_trendbars_live_window_follows_count():
+    """The protobuf window is the count lookback, not a flat week."""
+    svc = CTraderService()
+    svc._dry_run = False
+    svc._connected = True
+    svc._authenticated = True
+    svc._symbol_ids["EURUSD"] = 1
+    svc._trendbar_cache.clear()
+    svc._trendbar_last_req.clear()
+    captured = {}
+
+    class FakeProtocol:
+        def _send(self, req, ptype):
+            captured["from"] = req.fromTimestamp
+            captured["to"] = req.toTimestamp
+            waiter = svc._trendbar_events.get("EURUSD_5")
+            svc._trendbar_cache["EURUSD_5"] = [{
+                "timestamp": 1, "time": 1, "open": 1.0, "high": 1.0,
+                "low": 1.0, "close": 1.0, "volume": 1.0,
+            }]
+            waiter.set()
+
+    svc._protocol = FakeProtocol()
+    reactor = MagicMock()
+    reactor.callFromThread.side_effect = lambda fn: fn()
+    twisted_mod = MagicMock()
+    twisted_internet = MagicMock()
+    twisted_internet.reactor = reactor
+    messages_mod = MagicMock()
+    with patch.dict(
+        "sys.modules",
+        {
+            "twisted": twisted_mod,
+            "twisted.internet": twisted_internet,
+            "ctrader_open_api": MagicMock(),
+            "ctrader_open_api.messages": messages_mod,
+        },
+    ):
+        svc.get_trendbars("EURUSD", "M5", count=40)
+
+    span = captured["to"] - captured["from"]
+    assert span == CTraderService.trendbar_lookback_ms(5, 40)
+    assert span < 7 * 86400 * 1000
+
+
 def test_pick_trader_account_prefers_configured_id():
     rows = [
         {"id": 111, "is_live": True},

@@ -471,12 +471,14 @@ class CTraderProtocol:
                 desc = str(getattr(err, "description", "") or "")
                 logger.error(f"cTrader Protocol Error: {code} — {desc}")
                 self._service._last_protocol_error = f"{code} — {desc}".strip(" —")
-                if code == "BLOCKED_PAYLOAD_TYPE" or "rate limit" in desc.lower():
+                if not CTraderService.protocol_error_should_disconnect(code, desc):
                     # Spotware is throttling us: serve stale trendbar cache and
-                    # stop making fresh requests for a minute instead of
-                    # piling onto the rate limiter (59 hits in 6h on 2026-09-08).
+                    # stop making fresh requests for a minute. Do not drop the
+                    # socket — a disconnect re-auths, reloads the symbol catalog,
+                    # and reconciles, which is what piles onto the limiter.
                     self._service._rate_limited_until = time.time() + 60
-                    logger.warning("cTrader rate-limited — 60s request cooldown")
+                    logger.warning("cTrader rate-limited — 60s request cooldown, session kept")
+                    return
                 self._service._auth_event.set()
                 if self.transport:
                     try:
@@ -587,6 +589,32 @@ class CTraderService(BrokerService):
         "1W": 12, "W1": 12,
         "1MO": 13, "MN1": 13
     }
+    # Spotware ProtoOATrendbarPeriod seconds. Unknown enums fall back to M5.
+    PERIOD_SECONDS = {
+        1: 60, 2: 120, 3: 180, 4: 240, 5: 300,
+        6: 900, 7: 1800, 8: 3600, 9: 14400, 10: 43200,
+        11: 86400, 12: 604800, 13: 2592000,
+    }
+    TRENDBAR_LOOKBACK_CAP_MS = 7 * 86400 * 1000
+
+    @classmethod
+    def trendbar_lookback_ms(cls, period_enum: int, count: int) -> int:
+        """Bound a live trendbar request to about ``count`` bars.
+
+        Callers only keep the tail (``cached[-count:]``). Asking Spotware for
+        a flat 7 days of M5 bars (~2000 rows) on every refresh is what trips
+        BLOCKED_PAYLOAD_TYPE. Daily and weekly requests stay capped at 7 days.
+        """
+        sec = cls.PERIOD_SECONDS.get(int(period_enum), 300)
+        bars = max(int(count), 1) + 2
+        return min(bars * sec * 1000, cls.TRENDBAR_LOOKBACK_CAP_MS)
+
+    @staticmethod
+    def protocol_error_should_disconnect(code: str, desc: str) -> bool:
+        """Rate limits keep the socket. Other protocol errors drop it."""
+        if code == "BLOCKED_PAYLOAD_TYPE" or "rate limit" in (desc or "").lower():
+            return False
+        return True
 
     def __init__(self):
         self._connected = False
@@ -2198,7 +2226,7 @@ class CTraderService(BrokerService):
                         )
                     else:
                         now_ms = int(time.time() * 1000)
-                        f_ts = from_ts or (now_ms - 7 * 86400 * 1000)
+                        f_ts = from_ts or (now_ms - self.trendbar_lookback_ms(period_enum, count))
                         t_ts = to_ts or now_ms
 
                         req = msgs.ProtoOAGetTrendbarsReq()
