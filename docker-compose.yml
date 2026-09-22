@@ -36,6 +36,10 @@ services:
       OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-https://omni.allikas.online/v1}
       # Safety: risk guard ENABLED by default. Only disable for explicit testing by setting DISABLE_RISK_GUARD=true in .env
       DISABLE_RISK_GUARD: ${DISABLE_RISK_GUARD:-false}
+      # Jev typed-eval is advisory and off until explicitly enabled.
+      JEV_ANALYSIS_ENABLED: ${JEV_ANALYSIS_ENABLED:-false}
+      JEV_REPLACE_PERSONAS: ${JEV_REPLACE_PERSONAS:-false}
+      JEV_INCLUDE_SOCIAL: ${JEV_INCLUDE_SOCIAL:-false}
       # MiCA/EEA: trade USDC-margined perpetuals (USDT restricted for EU users).
       # Override via TRADING_SYMBOLS in .env. ADA dropped (weekly loss leader).
       TRADING_SYMBOLS: ${TRADING_SYMBOLS:-BTCUSDC,ETHUSDC,SOLUSDC,BNBUSDC,XRPUSDC,AVAXUSDC,LINKUSDC,UNIUSDC}

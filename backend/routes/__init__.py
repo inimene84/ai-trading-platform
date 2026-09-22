@@ -25,6 +25,7 @@ from backend.routes.sentiment import router as sentiment_router
 from backend.routes.calendar import router as calendar_router
 from backend.routes.research import router as research_router
 from backend.routes.jesse import router as jesse_router
+from backend.routes.jev import router as jev_router
 
 # Main API router
 api_router = APIRouter()
@@ -69,4 +70,6 @@ api_router.include_router(research_router, tags=["research"])
 api_router.include_router(research_router, prefix="/api", tags=["research-api"])
 api_router.include_router(jesse_router, prefix="/jesse", tags=["jesse"])
 api_router.include_router(jesse_router, prefix="/api/jesse", tags=["jesse-api"])
+api_router.include_router(jev_router, tags=["jev"])
+api_router.include_router(jev_router, prefix="/api", tags=["jev-api"])
 

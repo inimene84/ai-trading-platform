@@ -31,6 +31,7 @@ from backend.services.qdrant_client import qdrant
 from backend.services.trade_memory import trade_memory
 from backend.services.skill_miner import skill_miner
 from backend.services.persona_adapter import run_all_personas, get_persona_weights, set_persona_weight
+from backend.jev.opinion import evaluate_opinion, should_skip_personas
 
 logger = logging.getLogger(__name__)
 
@@ -470,6 +471,8 @@ _AGENT_WEIGHTS = _LOADED_CONFIG.get("base_agents", {
     "learned_skill": 0.10,
     # FINMEM Cognitive Agent (Stevens Institute of Technology / arXiv:2311.13743v2)
     "finmem_cognitive_agent": 0.20,
+    # Jev typed-eval (TypeSafe). Advisory only; unused until JEV_ANALYSIS_ENABLED.
+    "jev_analyst": 0.16,
 })
 _AGG_CFG = _LOADED_CONFIG.get("aggregation", {})
 _BUY_THRESHOLD = float(_AGG_CFG.get("buy_threshold", 0.15))
@@ -767,7 +770,39 @@ async def analyze_symbol(
     except Exception as e:
         logger.warning(f"Learned skill match failed for {symbol}: {e}")
 
-    if include_personas:
+    # Jev is the cheap typed-eval alternative to the persona LLM fan-out.
+    # It votes only on a validated response. Failures leave the existing
+    # agents in place and never invent a buy.
+    jev_result = None
+    try:
+        jev_result = await evaluate_opinion(symbol, bars, metrics)
+    except Exception as e:
+        logger.warning(f"Jev opinion failed for {symbol}: {e}")
+        jev_result = None
+    if jev_result and jev_result.get("signal") in {"bullish", "bearish", "neutral"} and not jev_result.get("vetoed"):
+        opinions.append(AgentOpinion(
+            agent="jev_analyst",
+            signal=str(jev_result["signal"]),
+            confidence=float(jev_result.get("confidence") or 0.0),
+            reasoning=str(jev_result.get("reason") or ""),
+            metadata={
+                "advisory": True,
+                "action": jev_result.get("action"),
+                "answers": jev_result.get("answers"),
+                "vetoed": False,
+            },
+        ))
+        logger.info(
+            "[%s] Jev analyst: %s conf=%.2f",
+            symbol,
+            jev_result.get("signal"),
+            float(jev_result.get("confidence") or 0.0),
+        )
+
+    jev_status = jev_result.get("status") if isinstance(jev_result, dict) else None
+    if should_skip_personas(include_personas, jev_status):
+        logger.info("[%s] Jev replaced persona LLM agents for this cycle", symbol)
+    elif include_personas:
         try:
             persona_results = await run_all_personas(symbol, bars, metrics)
             for po in persona_results:
