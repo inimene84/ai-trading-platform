@@ -30,6 +30,7 @@ SENSITIVE_PREFIXES = (
 SENTRY_PREFIXES = ("/sentry",)
 TRADING_PREFIXES = ("/trading", "/api/trading")
 JESSE_PREFIXES = ("/jesse", "/api/jesse")
+JEV_PREFIXES = ("/jev", "/api/jev")
 PUBLIC_TRADING_PATHS = {
     "/trading/strategies",
     "/api/trading/strategies",
@@ -68,6 +69,10 @@ def is_sensitive_request(request: Request) -> bool:
 
     if path.startswith(JESSE_PREFIXES):
         # Protect quant parameters, FINMEM memory ingestion/evaluation, and inference.
+        return True
+
+    if path.startswith(JEV_PREFIXES):
+        # Jev evaluations are advisory research, same auth surface as Jesse.
         return True
 
     return method not in {"GET", "HEAD"}

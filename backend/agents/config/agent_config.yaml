@@ -13,6 +13,7 @@ base_agents:
   semantic_trade_memory: 0.08
   learned_skill: 0.08
   trade_memory: 0.04
+  jev_analyst: 0.16          # TypeSafe Jev typed-eval; inert until JEV_ANALYSIS_ENABLED
 
 # Active personas (can be toggled without code changes)
 # Override with ACTIVE_PERSONAS env var (comma-separated)
