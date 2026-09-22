@@ -22,6 +22,8 @@ from backend.jev.conformal import conformal_for
 from backend.jev.journal import get_journal
 from backend.jev.meta import meta_take, order_size_fraction
 from backend.jev.questions import analysis_questions
+from backend.jev.research import lint_questions
+from backend.jev.trust import allows_book_influence, trust_report
 from backend.jev.sinks import persist_social
 from backend.jev.state import base_asset, build_market_state, futures_symbol
 from backend.jev.stats import process_posts
@@ -197,9 +199,15 @@ async def evaluate_symbol(
         return payload
 
     jev = client or JevClient()
+    questions = analysis_questions()
+    problems = lint_questions(questions)
+    if problems:
+        failure = _no_signal(asset_symbol, "question lint failed: " + "; ".join(problems), market=_summary(state), social=social_meta)
+        _govern(failure, jev_state, None, client, 0.0)
+        return failure
     started = time.perf_counter()
     try:
-        validated = await jev.system_one(jev_state, analysis_questions())
+        validated = await jev.system_one(jev_state, questions)
     except JevUnavailable as exc:
         log_unavailable(asset_symbol, exc)
         failure = _no_signal(asset_symbol, str(exc), market=_summary(state), social=social_meta)
@@ -280,6 +288,7 @@ def _govern(
         logger.warning("Jev journal read skipped: %s", exc)
         labeled = []
     report = calibration_report(labeled)
+    trust = trust_report(labeled)
     direction_probs = {}
     margin = 0.0
     if isinstance(validated, dict):
@@ -311,11 +320,13 @@ def _govern(
         and result.get("status") == "ok"
         and result.get("signal") in {"bullish", "bearish", "neutral"}
         and not result.get("vetoed")
+        and allows_book_influence(str(trust["verdict"]))
     )
     result["decision_id"] = journal_meta.get("decision_id")
     result["state_hash"] = journal_meta.get("state_hash")
     result["question_schema_version"] = journal_meta.get("question_schema_version")
     result["calibration"] = report
+    result["trust"] = trust
     result["display_probabilities"] = display_probability(direction_probs, report.get("temperature")) if direction_probs else {}
     result["meta"] = meta
     result["influence_book"] = influence

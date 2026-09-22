@@ -56,6 +56,7 @@ services:
       JEV_INCLUDE_SOCIAL: ${JEV_INCLUDE_SOCIAL:-false}
       JEV_INFLUENCE_BOOK: ${JEV_INFLUENCE_BOOK:-false}
       JEV_PROVIDER: ${JEV_PROVIDER:-typesafe}
+      JEV_RESEARCH_CLASSIFY: ${JEV_RESEARCH_CLASSIFY:-false}
       # MiCA/EEA: trade USDC-margined perpetuals (USDT restricted for EU users).
       # 9 USDC pairs (DOT has no USDC perp). Override via TRADING_SYMBOLS in .env.
       TRADING_SYMBOLS: ${TRADING_SYMBOLS:-BTCUSDC,ETHUSDC,SOLUSDC,BNBUSDC,XRPUSDC,AVAXUSDC,LINKUSDC,UNIUSDC}
