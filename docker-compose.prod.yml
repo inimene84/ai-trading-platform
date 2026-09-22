@@ -50,6 +50,15 @@ services:
       OMNIROUTE_BASE_URL: ${OMNIROUTE_BASE_URL:-https://omni.allikas.online/v1}
       # Safety: risk guard ENABLED by default. Only disable for explicit testing by setting DISABLE_RISK_GUARD=true in .env
       DISABLE_RISK_GUARD: ${DISABLE_RISK_GUARD:-false}
+      # Jev via OpenRouter is advisory. It journals analysis and cannot size or vote
+      # until calibration reaches FACE_VALUE and JEV_INFLUENCE_BOOK is turned on.
+      JEV_ANALYSIS_ENABLED: ${JEV_ANALYSIS_ENABLED:-true}
+      JEV_REPLACE_PERSONAS: ${JEV_REPLACE_PERSONAS:-false}
+      JEV_INCLUDE_SOCIAL: ${JEV_INCLUDE_SOCIAL:-false}
+      JEV_INFLUENCE_BOOK: ${JEV_INFLUENCE_BOOK:-false}
+      JEV_PROVIDER: ${JEV_PROVIDER:-openrouter}
+      JEV_OPENROUTER_MODEL: ${JEV_OPENROUTER_MODEL:-typesafe/jev-1.13}
+      JEV_RESEARCH_CLASSIFY: ${JEV_RESEARCH_CLASSIFY:-false}
       # MiCA/EEA: trade USDC-margined perpetuals (USDT restricted for EU users).
       # 9 USDC pairs (DOT has no USDC perp). Override via TRADING_SYMBOLS in .env.
       TRADING_SYMBOLS: ${TRADING_SYMBOLS:-BTCUSDC,ETHUSDC,SOLUSDC,BNBUSDC,XRPUSDC,AVAXUSDC,LINKUSDC,UNIUSDC}

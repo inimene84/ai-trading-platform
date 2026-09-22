@@ -1,4 +1,7 @@
 model_list:
+  # Jev is not a chat model. The backend calls OpenRouter System One directly:
+  # POST ${OPENROUTER_BASE_URL}/systemone with model typesafe/jev-1.13
+  # (JEV_PROVIDER=openrouter). Do not add it to this chat model_list.
   # ── OpenRouter Free Router (auto-picks working free models) ──
   - model_name: openrouter/free
     litellm_params:
