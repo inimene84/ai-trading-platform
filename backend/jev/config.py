@@ -11,6 +11,11 @@ DEFAULT_CACHE_SECONDS = 600
 DEFAULT_MIN_PROB_MARGIN = 0.12
 DEFAULT_TWEET_TARGET = 100
 MIN_BARS = 16
+QUESTION_SCHEMA_VERSION = "crypto-advisory-1"
+STATE_BUILDER_VERSION = "perp-state-2"
+JEV_INPUT_USD_PER_MILLION = 0.042
+DEFAULT_CALIBRATION_MIN_LABELS = 200
+DEFAULT_PAUSE_MS = 30_000
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -85,3 +90,31 @@ def jev_cache_seconds() -> int:
 
 def jev_min_prob_margin() -> float:
     return min(1.0, max(0.0, env_float("JEV_MIN_PROB_MARGIN", DEFAULT_MIN_PROB_MARGIN)))
+
+
+def jev_provider() -> str:
+    """typesafe (direct), litellm, or mock. Mock never influences the book."""
+    return os.getenv("JEV_PROVIDER", "typesafe").strip().lower() or "typesafe"
+
+
+def jev_fallback_provider() -> str:
+    return os.getenv("JEV_FALLBACK_PROVIDER", "").strip().lower()
+
+
+def jev_influence_book() -> bool:
+    """Uncalibrated Jev probabilities stay display-only unless this is explicitly on."""
+    return env_flag("JEV_INFLUENCE_BOOK", False)
+
+
+def calibration_min_labels() -> int:
+    return max(1, env_int("JEV_CALIBRATION_MIN_LABELS", DEFAULT_CALIBRATION_MIN_LABELS))
+
+
+def jev_pause_seconds() -> float:
+    return max(0.0, env_float("JEV_PAUSE_MS", DEFAULT_PAUSE_MS) / 1000.0)
+
+
+def estimate_cost_usd(input_tokens: int | None) -> float | None:
+    if input_tokens is None:
+        return None
+    return round(int(input_tokens) * JEV_INPUT_USD_PER_MILLION / 1_000_000, 8)

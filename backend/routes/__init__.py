@@ -25,6 +25,7 @@ from backend.routes.sentiment import router as sentiment_router
 from backend.routes.calendar import router as calendar_router
 from backend.routes.research import router as research_router
 from backend.routes.jesse import router as jesse_router
+from backend.routes.jev import crypto_router as jev_crypto_router
 from backend.routes.jev import router as jev_router
 
 # Main API router
@@ -72,4 +73,6 @@ api_router.include_router(jesse_router, prefix="/jesse", tags=["jesse"])
 api_router.include_router(jesse_router, prefix="/api/jesse", tags=["jesse-api"])
 api_router.include_router(jev_router, tags=["jev"])
 api_router.include_router(jev_router, prefix="/api", tags=["jev-api"])
+api_router.include_router(jev_crypto_router, tags=["jev-signals"])
+api_router.include_router(jev_crypto_router, prefix="/api", tags=["jev-signals-api"])
 
