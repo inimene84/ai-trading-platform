@@ -16,9 +16,9 @@ from typing import Any
 import httpx
 
 from backend.jev.client import JevUnavailable
-from backend.jev.config import env_flag, env_int, jev_base_url, jev_model, jev_timeout_seconds, typesafe_api_key
+from backend.jev.config import env_flag, env_int, jev_base_url, jev_model, jev_provider, jev_timeout_seconds, typesafe_api_key
 from backend.jev.evidence import EVIDENCE_CATEGORIES, select_passages
-from backend.jev.gateway import circuit_open, note_credit_failure
+from backend.jev.gateway import circuit_open, note_credit_failure, post_openrouter_decision
 from backend.jev.meta import order_size_fraction
 from backend.jev.schema import JevSchemaError
 
@@ -238,7 +238,9 @@ async def classify_research(
     try:
         if circuit_open():
             raise JevUnavailable("Jev provider paused after credit errors")
-        if client is None:
+        if client is None and jev_provider() == "openrouter":
+            payload = await post_openrouter_decision(state, questions)
+        elif client is None:
             payload = await _post_research(state, questions)
         else:
             payload = await client.system_one(state, questions)

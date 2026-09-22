@@ -14,8 +14,17 @@ from typing import Any
 import httpx
 
 from backend.jev.client import JevClient, JevUnavailable
-from backend.jev.config import jev_fallback_provider, jev_pause_seconds, jev_provider, jev_timeout_seconds
-from backend.jev.schema import validate_system_one
+from backend.jev.config import (
+    jev_fallback_provider,
+    jev_openrouter_model,
+    jev_pause_seconds,
+    jev_provider,
+    jev_timeout_seconds,
+    openrouter_api_key,
+    openrouter_base_url,
+    openrouter_headers,
+)
+from backend.jev.schema import JevSchemaError, validate_system_one
 
 _paused_until = 0.0
 
@@ -72,6 +81,59 @@ class MockJevClient:
         return validate_system_one(payload)
 
 
+async def post_openrouter_decision(
+    state: dict[str, Any],
+    questions: dict[str, Any],
+    transport: httpx.BaseTransport | None = None,
+) -> dict[str, Any]:
+    """POST OpenRouter's System One endpoint. Jev does not speak chat completions.
+
+    Docs: https://openrouter.ai/docs/guides/community/typesafe-sdk
+    The repo's OPENROUTER_BASE_URL already ends in /v1, so the path is /systemone.
+    """
+    if circuit_open():
+        raise JevUnavailable("Jev provider paused after credit errors")
+    key = openrouter_api_key()
+    if not key:
+        raise JevUnavailable("OPENROUTER_API_KEY not configured")
+    url = f"{openrouter_base_url()}/systemone"
+    body = {"model": jev_openrouter_model(), "state": state, "questions": questions}
+    try:
+        async with httpx.AsyncClient(timeout=jev_timeout_seconds(), transport=transport) as client:
+            response = await client.post(url, headers=openrouter_headers(key), json=body)
+            if response.status_code == 402:
+                note_credit_failure("402 insufficient credits")
+                raise JevUnavailable("OpenRouter Jev returned 402")
+            response.raise_for_status()
+            payload = response.json()
+    except JevUnavailable:
+        raise
+    except httpx.HTTPError as exc:
+        note_credit_failure(str(exc))
+        raise JevUnavailable(f"OpenRouter Jev HTTP error: {exc}") from exc
+    except ValueError as exc:
+        raise JevUnavailable("OpenRouter Jev response was not JSON") from exc
+    if not isinstance(payload, dict):
+        raise JevUnavailable("OpenRouter Jev response was not an object")
+    return payload
+
+
+class OpenRouterJevClient:
+    """Advisory System One calls billed to the existing OpenRouter key."""
+
+    name = "openrouter"
+
+    def __init__(self, transport: httpx.BaseTransport | None = None) -> None:
+        self._transport = transport
+
+    async def system_one(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+        payload = await post_openrouter_decision(state, questions, transport=self._transport)
+        try:
+            return validate_system_one(payload)
+        except JevSchemaError as exc:
+            raise JevUnavailable(f"Jev schema rejected: {exc}") from exc
+
+
 class LiteLLMJevClient:
     name = "litellm"
 
@@ -109,6 +171,8 @@ def build_client(name: str | None = None, transport: httpx.BaseTransport | None 
     provider = (name or jev_provider()).strip().lower()
     if provider == "mock":
         return MockJevClient()
+    if provider == "openrouter":
+        return OpenRouterJevClient(transport=transport)
     if provider == "litellm":
         return LiteLLMJevClient(transport=transport)
     client = JevClient(transport=transport)
