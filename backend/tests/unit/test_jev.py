@@ -10,7 +10,9 @@ import pytest
 
 from backend.jev.backtest import realized_direction, score_t_plus_one
 from backend.jev.client import JevClient, JevUnavailable
+from backend.jev.meta import order_size_fraction
 from backend.jev.questions import PRICE_DIRECTIONS, TRADE_ACTIONS
+from backend.jev.quote import live_submit_allowed
 from backend.jev.schema import JevSchemaError, validate_system_one
 from backend.jev.service import clear_evaluation_cache, evaluate_symbol, vote_from_answers
 from backend.jev.state import build_market_state, rsi
@@ -288,7 +290,9 @@ async def test_opinion_layer_uses_jev_and_keeps_personas_on_failure(monkeypatch)
         "action": "BUY",
         "answers": {"trade_action": "BUY"},
         "vetoed": False,
-        "influence_book": True,
+        "influence_book": False,
+        "order_size_fraction": 0.0,
+        "sizing_allowed": False,
     }
     monkeypatch.setattr("backend.services.opinion_layer.evaluate_opinion", AsyncMock(return_value=jev_ok))
     opinion = await analyze_symbol(
@@ -303,7 +307,12 @@ async def test_opinion_layer_uses_jev_and_keeps_personas_on_failure(monkeypatch)
     )
     names = [item.agent for item in opinion.agent_opinions]
     assert "jev_analyst" in names
+    jev_vote = next(item for item in opinion.agent_opinions if item.agent == "jev_analyst")
+    assert jev_vote.metadata["persona_replacement"] is True
+    assert jev_vote.metadata["sizing_allowed"] is False
     personas.assert_not_awaited()
+    assert order_size_fraction() == 0.0
+    assert live_submit_allowed() is False
 
     personas.reset_mock()
     monkeypatch.setattr("backend.services.opinion_layer.evaluate_opinion", AsyncMock(return_value=None))

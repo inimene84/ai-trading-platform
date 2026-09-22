@@ -23,6 +23,20 @@ def should_skip_personas(include_personas: bool, jev_status: str | None) -> bool
     return jev_status == "ok"
 
 
+def jev_occupies_persona_slot(result: dict | None) -> bool:
+    """A validated, non-vetoed Jev answer is the persona stage when replacement is on.
+
+    This does not require JEV_INFLUENCE_BOOK or a FACE_VALUE calibration verdict.
+    Those gates still block Jev from sizing or submitting an order. An invalid
+    result does not occupy the slot, so the LLM personas keep running.
+    """
+    if not isinstance(result, dict) or not jev_replace_personas():
+        return False
+    if result.get("status") != "ok" or result.get("vetoed"):
+        return False
+    return result.get("signal") in {"bullish", "bearish", "neutral"}
+
+
 async def evaluate_opinion(
     symbol: str,
     bars: list,

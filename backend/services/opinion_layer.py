@@ -31,7 +31,7 @@ from backend.services.qdrant_client import qdrant
 from backend.services.trade_memory import trade_memory
 from backend.services.skill_miner import skill_miner
 from backend.services.persona_adapter import run_all_personas, get_persona_weights, set_persona_weight
-from backend.jev.opinion import evaluate_opinion, should_skip_personas
+from backend.jev.opinion import evaluate_opinion, jev_occupies_persona_slot, should_skip_personas
 
 logger = logging.getLogger(__name__)
 
@@ -779,13 +779,15 @@ async def analyze_symbol(
     except Exception as e:
         logger.warning(f"Jev opinion failed for {symbol}: {e}")
         jev_result = None
-    # Uncalibrated Jev output is logged, not weighted, unless JEV_INFLUENCE_BOOK
-    # is on and the calibration / meta / conformal gates all pass.
+    # Persona replacement uses a validated Jev answer even when the book-influence
+    # gate is closed. JEV_INFLUENCE_BOOK remains the extra uncalibrated vote.
+    # Neither path sizes or submits an order.
+    occupies_persona_slot = jev_occupies_persona_slot(jev_result)
     if (
         jev_result
-        and jev_result.get("influence_book")
         and jev_result.get("signal") in {"bullish", "bearish", "neutral"}
         and not jev_result.get("vetoed")
+        and (jev_result.get("influence_book") or occupies_persona_slot)
     ):
         opinions.append(AgentOpinion(
             agent="jev_analyst",
@@ -794,6 +796,9 @@ async def analyze_symbol(
             reasoning=str(jev_result.get("reason") or ""),
             metadata={
                 "advisory": True,
+                "persona_replacement": occupies_persona_slot,
+                "influence_book": bool(jev_result.get("influence_book")),
+                "sizing_allowed": False,
                 "action": jev_result.get("action"),
                 "answers": jev_result.get("answers"),
                 "vetoed": False,

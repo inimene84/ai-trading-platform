@@ -53,7 +53,7 @@ services:
       # Jev via OpenRouter is advisory. It journals analysis and cannot size or vote
       # until calibration reaches FACE_VALUE and JEV_INFLUENCE_BOOK is turned on.
       JEV_ANALYSIS_ENABLED: ${JEV_ANALYSIS_ENABLED:-true}
-      JEV_REPLACE_PERSONAS: ${JEV_REPLACE_PERSONAS:-false}
+      JEV_REPLACE_PERSONAS: ${JEV_REPLACE_PERSONAS:-true}
       JEV_INCLUDE_SOCIAL: ${JEV_INCLUDE_SOCIAL:-false}
       JEV_INFLUENCE_BOOK: ${JEV_INFLUENCE_BOOK:-false}
       JEV_PROVIDER: ${JEV_PROVIDER:-openrouter}
