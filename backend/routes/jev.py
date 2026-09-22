@@ -7,6 +7,7 @@ the rest of the sensitive API surface.
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -14,7 +15,9 @@ from pydantic import BaseModel, Field
 from backend.jev.calibration import calibration_report
 from backend.jev.evidence import gather_evidence
 from backend.jev.journal import get_journal, reset_journal_cache
+from backend.jev.research import classify_research, signing_key_path
 from backend.jev.service import evaluate_symbol
+from backend.jev.trust import replay_hysteresis, sign_jsonl, trust_report
 from backend.security import validate_admin_request
 
 logger = logging.getLogger(__name__)
@@ -80,17 +83,59 @@ async def evidence(
 ):
     """Research evidence by category. Empty evidence is a 404, not a buy."""
     validate_admin_request(request)
+    started = time.perf_counter()
     gathered = await gather_evidence(symbol)
+    evidence_ms = (time.perf_counter() - started) * 1000.0
     if gathered["empty"]:
         raise HTTPException(status_code=404, detail="no evidence in any category")
+    classified = await classify_research(symbol, gathered["categories"])
+    decision_ms = float(classified.get("decision_ms") or 0.0)
     return {
-        "symbol": symbol.upper(),
-        "decision_engine": "research",
+        "symbol": classified["symbol"],
+        "decision_engine": "jev" if classified.get("status") == "ok" else "research",
         "advisory": True,
+        "influence_book": False,
         "sizing_allowed": False,
+        "order_size_fraction": 0.0,
         "evidence": gathered["categories"],
-        "classification": None,
+        "passages": classified.get("passages") or [],
+        "classification": classified.get("classification"),
+        "status": classified.get("status"),
+        "reason": classified.get("reason"),
+        "timing": {
+            "evidence_ms": round(evidence_ms, 2),
+            "decision_ms": round(decision_ms, 2),
+            "total_ms": round(evidence_ms + decision_ms, 2),
+        },
     }
+
+
+class ReplayBody(BaseModel):
+    scores: list[float] = Field(..., min_length=1, max_length=500)
+    enter: float = Field(..., ge=0.0, le=1.0)
+    exit_below: float = Field(..., ge=0.0, le=1.0)
+
+
+@router.get("/trust")
+async def trust(request: Request):
+    """Brier, ECE, and a research verdict. Does not enable sizing."""
+    validate_admin_request(request)
+    reset_journal_cache()
+    report = trust_report(get_journal().labeled_choices())
+    report["sizing_allowed"] = False
+    report["export_signing"] = sign_jsonl("trust-report", signing_key_path()) if signing_key_path() else {"signed": False}
+    return report
+
+
+@router.post("/replay")
+async def replay(body: ReplayBody, request: Request):
+    """Replay a threshold band over recorded scores without calling Jev."""
+    validate_admin_request(request)
+    try:
+        path = replay_hysteresis(body.scores, body.enter, body.exit_below)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"path": path, "called_jev": False, "sizing_allowed": False}
 
 
 @crypto_router.get("/crypto")

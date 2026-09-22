@@ -91,3 +91,48 @@ async def gather_evidence(symbol: str, search: SearchFn | None = None) -> dict[s
         "filled_categories": filled,
         "empty": filled == 0,
     }
+
+
+def select_passages(
+    categories: dict[str, list[dict[str, Any]]],
+    token_budget: int = 800,
+) -> list[dict[str, Any]]:
+    """Keep cited snippets inside a token budget.
+
+    Ranking is local: higher source credibility first, then shorter text.
+    Near-duplicate snippets are skipped. This does not call Jev and does not
+    invent a relevance probability.
+    """
+    budget = max(1, int(token_budget))
+    ranked: list[tuple[float, int, str, dict[str, Any]]] = []
+    for category, items in categories.items():
+        for item in items:
+            snippet = str(item.get("snippet") or "")
+            if not snippet.strip():
+                continue
+            credibility = float(item.get("source_credibility") or 0.0)
+            ranked.append((credibility, len(snippet), category, item))
+    ranked.sort(key=lambda row: (-row[0], row[1]))
+    chosen: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    used = 0
+    for _credibility, _length, category, item in ranked:
+        fingerprint = _fingerprint(item)
+        if fingerprint in seen:
+            continue
+        tokens = max(1, len(str(item.get("snippet") or "")) // 4)
+        if chosen and used + tokens > budget:
+            continue
+        if not chosen and tokens > budget:
+            clipped = dict(item)
+            clipped["snippet"] = str(item.get("snippet") or "")[: budget * 4]
+            clipped["category"] = category
+            clipped["selection"] = "local_budget"
+            return [clipped]
+        seen.add(fingerprint)
+        kept = dict(item)
+        kept["category"] = category
+        kept["selection"] = "local_budget"
+        chosen.append(kept)
+        used += tokens
+    return chosen
