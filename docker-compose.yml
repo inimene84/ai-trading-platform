@@ -40,6 +40,8 @@ services:
       JEV_ANALYSIS_ENABLED: ${JEV_ANALYSIS_ENABLED:-false}
       JEV_REPLACE_PERSONAS: ${JEV_REPLACE_PERSONAS:-false}
       JEV_INCLUDE_SOCIAL: ${JEV_INCLUDE_SOCIAL:-false}
+      JEV_INFLUENCE_BOOK: ${JEV_INFLUENCE_BOOK:-false}
+      JEV_PROVIDER: ${JEV_PROVIDER:-typesafe}
       # MiCA/EEA: trade USDC-margined perpetuals (USDT restricted for EU users).
       # Override via TRADING_SYMBOLS in .env. ADA dropped (weekly loss leader).
       TRADING_SYMBOLS: ${TRADING_SYMBOLS:-BTCUSDC,ETHUSDC,SOLUSDC,BNBUSDC,XRPUSDC,AVAXUSDC,LINKUSDC,UNIUSDC}
