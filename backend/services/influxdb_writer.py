@@ -282,6 +282,124 @@ class InfluxDBWriter:
         }
         await self._write(self.BUCKET_NEWS, "market_alert", tags, fields)
 
+    async def write_onchain_signal(
+        self,
+        symbol: str,
+        score: float,
+        direction: str = "NEUTRAL",
+        whale_notional: float = 0.0,
+        oi_change_pct: float = 0.0,
+        funding_rate: float = 0.0,
+        impact_score: float = 0.0,
+        source: str = "n8n-onchain",
+    ) -> None:
+        """Write an on-chain / whale-activity signal to news-sentiment."""
+        tags = {
+            "symbol": symbol.upper(),
+            "source": source,
+            "direction": self._normalize_direction(direction),
+        }
+        fields: dict[str, Any] = {
+            "score": float(score),
+            "whale_notional": float(whale_notional),
+            "oi_change_pct": float(oi_change_pct),
+            "funding_rate": float(funding_rate),
+            "impact_score": float(impact_score),
+        }
+        await self._write(self.BUCKET_NEWS, "onchain_signal", tags, fields)
+
+    async def write_macro_signal(
+        self,
+        symbol: str = "BTCUSDT",
+        score: float = 0.0,
+        direction: str = "NEUTRAL",
+        btc_price: float = 0.0,
+        sp500_price: float = 0.0,
+        gold_price: float = 0.0,
+        dxy: float = 0.0,
+        vix: float = 0.0,
+        gold_btc_ratio: float = 0.0,
+        risk_regime: str = "NEUTRAL",
+        source: str = "n8n-macro",
+    ) -> None:
+        """Write a macro / cross-asset signal to news-sentiment."""
+        tags = {
+            "symbol": symbol.upper(),
+            "source": source,
+            "direction": self._normalize_direction(direction),
+            "risk_regime": str(risk_regime or "NEUTRAL"),
+        }
+        fields: dict[str, Any] = {
+            "score": float(score),
+            "btc_price": float(btc_price),
+            "sp500_price": float(sp500_price),
+            "gold_price": float(gold_price),
+            "dxy": float(dxy),
+            "vix": float(vix),
+            "gold_btc_ratio": float(gold_btc_ratio),
+        }
+        await self._write(self.BUCKET_NEWS, "macro_signal", tags, fields)
+
+    async def write_technical_signal(
+        self,
+        symbol: str,
+        score: float,
+        direction: str = "NEUTRAL",
+        rsi: float = 50.0,
+        macd_histogram: float = 0.0,
+        price_change_pct: float = 0.0,
+        funding_rate: float = 0.0,
+        confidence: float = 0.0,
+        source: str = "n8n-technical",
+    ) -> None:
+        """Write a technical / indicator-divergence signal to news-sentiment."""
+        tags = {
+            "symbol": symbol.upper(),
+            "source": source,
+            "direction": self._normalize_direction(direction),
+        }
+        fields: dict[str, Any] = {
+            "score": float(score),
+            "rsi": float(rsi),
+            "macd_histogram": float(macd_histogram),
+            "price_change_pct": float(price_change_pct),
+            "funding_rate": float(funding_rate),
+            "confidence": float(confidence),
+        }
+        await self._write(self.BUCKET_NEWS, "technical_signal", tags, fields)
+
+    async def write_divergence_alert(
+        self,
+        symbol: str,
+        score: float,
+        direction: str = "NEUTRAL",
+        sentiment_score: float = 0.0,
+        price_change_pct: float = 0.0,
+        confidence: float = 0.0,
+        signal: str = "NEUTRAL",
+        source: str = "n8n-divergence",
+    ) -> None:
+        """Write a sentiment-vs-price divergence alert to news-sentiment."""
+        tags = {
+            "symbol": symbol.upper(),
+            "source": source,
+            "direction": self._normalize_direction(direction),
+            "signal": str(signal or "NEUTRAL"),
+        }
+        fields: dict[str, Any] = {
+            "score": float(score),
+            "sentiment_score": float(sentiment_score),
+            "price_change_pct": float(price_change_pct),
+            "confidence": float(confidence),
+        }
+        await self._write(self.BUCKET_NEWS, "divergence_alert", tags, fields)
+
+    @staticmethod
+    def _normalize_direction(direction: str) -> str:
+        valid = {"BULLISH", "BEARISH", "NEUTRAL", "BUY", "SELL"}
+        tag = (direction or "NEUTRAL").upper()
+        return tag if tag in valid else "NEUTRAL"
+
     async def write_feed_snapshot(self, snapshot: dict) -> None:
         """Write unified-feed dashboard snapshot summary to trading-system bucket.
 

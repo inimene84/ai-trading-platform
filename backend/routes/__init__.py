@@ -10,6 +10,7 @@ from backend.routes.language_models import router as language_models_router
 from backend.routes.api_keys import router as api_keys_router
 from backend.routes.trading import router as trading_router
 from backend.routes.news import router as news_router
+from backend.routes.market_data import alerts_router as market_alerts_router
 from backend.routes.market_data import router as market_data_router
 from backend.routes.feed import router as feed_router
 from backend.routes.forecast import router as forecast_router
@@ -46,6 +47,7 @@ api_router.include_router(trading_router, tags=["trading"])
 api_router.include_router(trading_router, prefix="/api", tags=["trading-api"])
 api_router.include_router(news_router, tags=["news"])
 api_router.include_router(market_data_router, tags=["market-data"])
+api_router.include_router(market_alerts_router, tags=["alerts"])
 api_router.include_router(feed_router, tags=["feed"])
 api_router.include_router(forecast_router, tags=["forecast"])
 api_router.include_router(historical_router)

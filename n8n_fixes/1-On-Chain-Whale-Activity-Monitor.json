@@ -1,0 +1,241 @@
+[
+  {
+    "updatedAt": "2026-09-16T23:48:32.112Z",
+    "createdAt": "2026-04-21T16:55:53.076Z",
+    "id": "QBak2CBfsizXBTkj",
+    "name": "1. On-Chain Whale Activity Monitor",
+    "description": "A0 workflow",
+    "active": false,
+    "isArchived": false,
+    "nodes": [
+      {
+        "parameters": {
+          "content": "## Agent Zero enrichment (research-only)\n\n- No order / trade-execution nodes\n- Workflow **03** (`2Wo50hT9z1xqjBXT`) left untouched\n- Backend writes use `X-API-Key: {{ $env.BACKEND_API_KEY }}`\n- Keep **inactive** until backend `/api/market-data/*` routes are deployed\n- Manual webhook paths: `qt-agentzero-*-manual` for smoke only",
+          "height": 320,
+          "width": 380,
+          "color": 5
+        },
+        "id": "d8a050b9-73a5-4397-9b0f-4455b381ce18",
+        "name": "Agent Zero Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "typeVersion": 1,
+        "position": [
+          96,
+          -112
+        ]
+      },
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "qt-agentzero-whale-manual",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "id": "f5db4729-ddb1-459e-a459-0f888d20a9e0",
+        "name": "Manual Test Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          240,
+          48
+        ],
+        "webhookId": "be0e2f3f-66ae-4511-b926-f971cc24cb68"
+      },
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 15
+              }
+            ]
+          }
+        },
+        "id": "4c544463-e221-45d1-8f3c-2f10a4b438e1",
+        "name": "Schedule Every 15min",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          240,
+          240
+        ],
+        "disabled": true
+      },
+      {
+        "parameters": {
+          "jsCode": "return [{ json: { status: 'skipped', error: 'GLASSNODE_API_KEY missing' } }];"
+        },
+        "id": "1f962ba4-2006-4b4a-9442-bee03173b9ad",
+        "name": "Glassnode Unavailable Stub",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          464,
+          144
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// Agent Zero WF1 \u2014 Glassnode key missing; emit NEUTRAL placeholders\nconst symbols = ['BTC', 'ETH'];\nconst results = [];\nfor (const sym of symbols) {\n  results.push({\n    json: {\n      id: `${sym}_whale_${Date.now()}`,\n      symbol: `${sym}USDT`,\n      source: 'on-chain-whale',\n      whale_sentiment: 'NEUTRAL',\n      whale_score: 0,\n      whale_impact: 0,\n      whale_volume_24h: 0,\n      exchange_net_flow: 0,\n      published_at: Math.floor(Date.now() / 1000),\n      time_horizon: 'medium',\n      topics: 'whale-activity,on-chain',\n      error: 'GLASSNODE_API_KEY missing',\n    },\n  });\n}\nreturn results;\n"
+        },
+        "id": "3c68805f-de73-4a51-ba11-868b7f0a597c",
+        "name": "Process Whale Data",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          688,
+          144
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://ai-trading-backend:8000/api/market-data/on-chain",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-API-Key",
+                "value": "={{ $env.BACKEND_API_KEY }}"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "Accept",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify($json) }}",
+          "options": {
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "id": "64434cd0-c9f9-4219-bec5-17234ace0d56",
+        "name": "Save Whale Data to Backend",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          912,
+          144
+        ],
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { ok: true, workflow: $workflow.name, items: $('Process Whale Data').all().map(i => i.json), backend: $input.all().map(i => i.json) } }}",
+          "options": {}
+        },
+        "id": "506887aa-0a35-4909-9cc1-c7d8fffc46ff",
+        "name": "Respond to Webhook",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          1136,
+          144
+        ]
+      }
+    ],
+    "connections": {
+      "Manual Test Webhook": {
+        "main": [
+          [
+            {
+              "node": "Glassnode Unavailable Stub",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Schedule Every 15min": {
+        "main": [
+          [
+            {
+              "node": "Glassnode Unavailable Stub",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Glassnode Unavailable Stub": {
+        "main": [
+          [
+            {
+              "node": "Process Whale Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Whale Data": {
+        "main": [
+          [
+            {
+              "node": "Save Whale Data to Backend",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save Whale Data to Backend": {
+        "main": [
+          [
+            {
+              "node": "Respond to Webhook",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "binaryMode": "separate",
+      "availableInMCP": true,
+      "timeSavedMode": "fixed",
+      "errorWorkflow": "p8vhXj53RK8MUxb7",
+      "callerPolicy": "workflowsFromSameOwner"
+    },
+    "meta": {
+      "templateId": "10306",
+      "templateCredsSetupCompleted": true
+    },
+    "nodeGroups": [],
+    "pinData": {},
+    "versionId": "418df7db-9630-4683-ae81-2508e181ed3a",
+    "activeVersionId": "418df7db-9630-4683-ae81-2508e181ed3a",
+    "versionCounter": 24,
+    "triggerCount": 1,
+    "sourceWorkflowId": null,
+    "tags": [
+      {
+        "updatedAt": "2026-04-20T19:35:07.631Z",
+        "createdAt": "2026-04-20T19:35:07.631Z",
+        "id": "3nYIw60vVnhGD9MO",
+        "name": "bot"
+      },
+      {
+        "updatedAt": "2026-09-16T22:56:05.202Z",
+        "createdAt": "2026-09-16T22:56:05.202Z",
+        "id": "awGtkE89DlutEcgp",
+        "name": "a0"
+      }
+    ]
+  }
+]

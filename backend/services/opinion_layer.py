@@ -1,36 +1,5 @@
 """
 Opinion Layer — Multi-Agent Market Analysis Pipeline
-====================================================
-Integrates:
-  1. ai-hedge-fund agents (technical, sentiment, risk, portfolio)
-  2. Kronos foundation model forecast
-  3. n8n social sentiment (X/Reddit/Discord/News)
-  4. Market alerts (trending/pumps/whales)
-
-Produces a unified TradingOpinion with direction, confidence, and reasoning.
-"""
-
-from __future__ import annotations
-
-import asyncio
-import logging
-import os
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import List, Optional
-
-import pandas as pd
-import sqlalchemy as sa
-from backend.database.connection import SessionLocal
-from backend.database.models import Trade
-
-from backend.services import kronos_service
-from backend.services.influxdb_sentiment_reader import sentiment_reader
-from backend.services.qdrant_client import qdrant
-from backend.services.trade_memory import trade_memory
-from backend.services.skill_miner import skill_miner
-from backend.services.persona_adapter import run_all_personas, get_persona_weights, set_persona_weight
 from backend.jev.opinion import evaluate_opinion, jev_occupies_persona_slot, should_skip_personas
 
 logger = logging.getLogger(__name__)
