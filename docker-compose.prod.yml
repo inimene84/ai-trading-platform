@@ -173,6 +173,27 @@ services:
       - backend
     networks:
       - trading-net
+    labels:
+      # Public dashboard: https://trading.thorai.cloud (Traefik on :443).
+      # Login/logout stay on qtp-gate; everything else is ForwardAuth'd then nginx.
+      - traefik.enable=true
+      - traefik.docker.network=trading-net
+      - traefik.http.routers.qtp.rule=Host(`trading.thorai.cloud`)
+      - traefik.http.routers.qtp.entrypoints=websecure
+      - traefik.http.routers.qtp.tls=true
+      - traefik.http.routers.qtp.tls.certresolver=letsencrypt
+      - traefik.http.routers.qtp.priority=10
+      - traefik.http.routers.qtp.middlewares=qtp-auth
+      - traefik.http.routers.qtp.service=qtp
+      - traefik.http.services.qtp.loadbalancer.server.port=80
+      - traefik.http.middlewares.qtp-auth.forwardauth.address=http://qtp-gate:8089/verify
+      - traefik.http.middlewares.qtp-auth.forwardauth.trustForwardHeader=false
+      - "traefik.http.routers.qtp-http.rule=Host(`trading.thorai.cloud`) && !PathPrefix(`/.well-known/acme-challenge`)"
+      - traefik.http.routers.qtp-http.entrypoints=web
+      - traefik.http.routers.qtp-http.middlewares=qtp-https-redirect
+      - traefik.http.routers.qtp-http.service=qtp
+      - traefik.http.middlewares.qtp-https-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.qtp-https-redirect.redirectscheme.permanent=true
     deploy:
       resources:
         limits:
@@ -181,6 +202,44 @@ services:
         reservations:
           cpus: '0.05'
           memory: 32M
+  qtp-gate:
+    image: python:3.12-alpine
+    container_name: qtp-gate
+    restart: unless-stopped
+    command: ["python", "/app/qtp_gate.py"]
+    environment:
+      QTP_CREDS_FILE: /run/secrets/qtp-ui.txt
+      QTP_GATE_SECRET_FILE: /run/secrets/qtp-gate-secret
+      QTP_PUBLIC_HOST: trading.thorai.cloud
+    volumes:
+      - ./scripts/qtp_gate.py:/app/qtp_gate.py:ro
+      - ./.secrets/qtp-ui.txt:/run/secrets/qtp-ui.txt:ro
+      - ./.secrets/qtp-gate-secret:/run/secrets/qtp-gate-secret:ro
+    networks:
+      - trading-net
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=trading-net
+      - "traefik.http.routers.qtp-login.rule=Host(`trading.thorai.cloud`) && (PathPrefix(`/login`) || Path(`/logout`))"
+      - traefik.http.routers.qtp-login.entrypoints=websecure
+      - traefik.http.routers.qtp-login.tls=true
+      - traefik.http.routers.qtp-login.tls.certresolver=letsencrypt
+      - traefik.http.routers.qtp-login.priority=20
+      - traefik.http.routers.qtp-login.service=qtp-gate
+      - traefik.http.services.qtp-gate.loadbalancer.server.port=8089
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8089/healthz')"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
+        reservations:
+          cpus: '0.02'
+          memory: 16M
   qdrant:
     image: qdrant/qdrant:v1.14.1
     container_name: vps-qdrant
