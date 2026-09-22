@@ -422,18 +422,20 @@ export function MultiAssetPanel({ currentSymbol, onSelectSymbol, onQuickTrade }:
         const merged = { ...(cryptoData[sym] || {}), ...(forexData[sym] || {}) };
         const sig = signalData[sym] || signalData[binanceToYahoo(sym)];
         next[sym] = {
-          symbol: sym,
-          displayName: getDisplayName(sym),
-          price: 0,
-          change24h: 0,
-          changeAbs: 0,
-          volume: 0,
-          provider: isForexPair(sym) ? 'alphavantage' : 'binance',
-          isForex: isForexPair(sym),
-          priceHistory: [],
-          loading: false,
+          // Spreads first so explicit defaults below only fill missing keys
           ...prev[sym],
           ...merged,
+          // Ensure required fields always present
+          symbol: sym,
+          displayName: (merged as { displayName?: string }).displayName ?? prev[sym]?.displayName ?? getDisplayName(sym),
+          price: (merged as { price?: number }).price ?? prev[sym]?.price ?? 0,
+          change24h: (merged as { change24h?: number }).change24h ?? prev[sym]?.change24h ?? 0,
+          changeAbs: (merged as { changeAbs?: number }).changeAbs ?? prev[sym]?.changeAbs ?? 0,
+          volume: (merged as { volume?: number }).volume ?? prev[sym]?.volume ?? 0,
+          provider: ((merged as { provider?: 'binance' | 'alphavantage' }).provider ?? prev[sym]?.provider ?? (isForexPair(sym) ? 'alphavantage' : 'binance')) as 'binance' | 'alphavantage',
+          isForex: (merged as { isForex?: boolean }).isForex ?? prev[sym]?.isForex ?? isForexPair(sym),
+          priceHistory: (merged as { priceHistory?: number[] }).priceHistory ?? prev[sym]?.priceHistory ?? [],
+          loading: (merged as { loading?: boolean }).loading ?? prev[sym]?.loading ?? false,
           ...(sig ? { signal: sig.signal, confidence: sig.confidence, strategy: sig.strategy } : {}),
         };
       }

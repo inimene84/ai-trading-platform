@@ -263,6 +263,38 @@ services:
       start_period: 120s
     networks:
       - trading-net
+  ai-memory:
+    # Local MCP memory server from C:\Users\thori\ai-memory-main.
+    # Published image for a fast start. To run the checkout instead:
+    #   image: ai-memory:local
+    #   build:
+    #     context: ../../ai-memory-main
+    #     dockerfile: docker/Dockerfile
+    image: akitaonrails/ai-memory:latest
+    container_name: ai-memory
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:49374:49374"
+    volumes:
+      - ai-memory-data:/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      RUST_LOG: ai_memory=info,ai_memory_store=info,ai_memory_wiki=info,ai_memory_mcp=info,tracing_appender=warn
+      # Zero-LLM by default (FTS5 search still works). To enable consolidation
+      # through this stack's LiteLLM, add these to .env:
+      #   AI_MEMORY_LLM_PROVIDER=openai-compat
+      #   AI_MEMORY_LLM_BASE_URL=http://litellm:4000/v1
+      #   LLM_API_KEY=<same as LITELLM_API_KEY / sk-local-litellm-key>
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/ai-memory", "status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - trading-net
 networks:
 
   trading-net:
@@ -274,3 +306,5 @@ volumes:
   app-logs:
   influxdb-storage:
   kronos-model-cache:
+  ai-memory-data:
+    name: ai-memory-data
