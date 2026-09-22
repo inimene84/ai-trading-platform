@@ -32,8 +32,6 @@ def _finite(value: Any, field: str) -> float:
 
 def _unit_probability(value: Any, field: str) -> float:
     number = _finite(value, field)
-    if number > 1.0 and number <= 100.0:
-        number = number / 100.0
     if number < 0.0 or number > 1.0:
         raise JevSchemaError(f"{field} probability out of range")
     return number
@@ -45,7 +43,13 @@ def _probability_map(raw: Any, allowed: tuple[str, ...], field: str) -> dict[str
     unknown = [key for key in raw if key not in allowed]
     if unknown:
         raise JevSchemaError(f"{field} has unknown keys: {unknown}")
-    parsed = {key: _unit_probability(raw[key], f"{field}.{key}") for key in allowed if key in raw}
+    numbers = {key: _finite(raw[key], f"{field}.{key}") for key in raw}
+    # Some gateways emit 0-100. Scale the whole map, never a single noul.
+    if numbers and max(numbers.values()) > 1.0:
+        if max(numbers.values()) > 100.0:
+            raise JevSchemaError(f"{field} probability out of range")
+        numbers = {key: value / 100.0 for key, value in numbers.items()}
+    parsed = {key: _unit_probability(numbers[key], f"{field}.{key}") for key in allowed if key in numbers}
     if set(parsed) != set(allowed):
         raise JevSchemaError(f"{field} probabilities must cover {allowed}")
     total = sum(parsed.values())
