@@ -10,12 +10,17 @@ import logging
 import time
 from typing import Any
 
+from backend.jev.calibration import calibration_report, display_probability
 from backend.jev.client import JevClient, JevUnavailable, log_unavailable
 from backend.jev.config import (
     jev_cache_seconds,
     jev_include_social,
+    jev_influence_book,
     jev_min_prob_margin,
 )
+from backend.jev.conformal import conformal_for
+from backend.jev.journal import get_journal
+from backend.jev.meta import meta_take, order_size_fraction
 from backend.jev.questions import analysis_questions
 from backend.jev.sinks import persist_social
 from backend.jev.state import base_asset, build_market_state, futures_symbol
@@ -128,6 +133,7 @@ async def evaluate_symbol(
     client: JevClient | None = None,
     twitter: TwitterIngestor | None = None,
     fetch_bars: bool = True,
+    social_sample: int | None = None,
 ) -> dict[str, Any]:
     """Evaluate one symbol. Never returns a buy when Jev is unavailable."""
     asset_symbol = (symbol or "").strip()
@@ -145,13 +151,15 @@ async def evaluate_symbol(
 
     state = build_market_state(asset_symbol, history, metrics)
     if state is None:
-        return _no_signal(asset_symbol, "insufficient past-only history")
+        failure = _no_signal(asset_symbol, "insufficient past-only history")
+        _govern(failure, {"symbol": asset_symbol, "reason": "insufficient history"}, None, None, 0.0)
+        return failure
 
     social_stats = process_posts([])
     social_meta: dict[str, Any] = {"status": "skipped", "sample_size": 0}
     if social_on:
         ingestor = twitter or TwitterIngestor()
-        social_pull = await ingestor.fetch(state["asset"])
+        social_pull = await ingestor.fetch(state["asset"], target_count=social_sample)
         social_stats = process_posts(social_pull.get("tweets") or [])
         social_meta = {
             "status": social_pull.get("status"),
@@ -174,6 +182,8 @@ async def evaluate_symbol(
             "sample_size": social_stats["sample_size"],
             "author_diversity_pct": social_stats["author_diversity_pct"],
             "polarity_score": social_stats["polarity_score"],
+            "weighted_polarity_score": social_stats.get("weighted_polarity_score", 0.0),
+            "bot_downweight_mean": social_stats.get("bot_downweight_mean", 1.0),
             "sentiment_label": social_stats["sentiment_label"],
         },
         "representative_posts": social_stats["stratified_sample"][:20],
@@ -187,14 +197,19 @@ async def evaluate_symbol(
         return payload
 
     jev = client or JevClient()
+    started = time.perf_counter()
     try:
         validated = await jev.system_one(jev_state, analysis_questions())
     except JevUnavailable as exc:
         log_unavailable(asset_symbol, exc)
-        return _no_signal(asset_symbol, str(exc), market=_summary(state), social=social_meta)
+        failure = _no_signal(asset_symbol, str(exc), market=_summary(state), social=social_meta)
+        _govern(failure, jev_state, None, client, (time.perf_counter() - started) * 1000.0)
+        return failure
     except Exception as exc:
         log_unavailable(asset_symbol, exc)
-        return _no_signal(asset_symbol, "Jev evaluation failed", market=_summary(state), social=social_meta)
+        failure = _no_signal(asset_symbol, "Jev evaluation failed", market=_summary(state), social=social_meta)
+        _govern(failure, jev_state, None, client, (time.perf_counter() - started) * 1000.0)
+        return failure
 
     vote = vote_from_answers(validated)
     result = {
@@ -226,9 +241,86 @@ async def evaluate_symbol(
         "cached": False,
         "model": validated.get("model"),
     }
+    _govern(result, jev_state, validated, client, (time.perf_counter() - started) * 1000.0)
     if ttl > 0 and result["status"] == "ok":
         _cache[cache_key] = (time.time() + ttl, result)
     return result
+
+
+def _govern(
+    result: dict[str, Any],
+    state: dict[str, Any],
+    validated: dict[str, Any] | None,
+    client: Any,
+    latency_ms: float,
+) -> None:
+    """Attach journal, calibration, and the book-influence gate. Sizing stays zero."""
+    provider = str(getattr(client, "name", "typesafe") or "typesafe")
+    usage = (validated or {}).get("usage") if isinstance(validated, dict) else None
+    tokens = None
+    if isinstance(usage, dict) and usage.get("input_tokens") is not None:
+        tokens = int(usage["input_tokens"])
+    journal_meta: dict[str, Any] = {}
+    try:
+        journal_meta = get_journal().record(
+            symbol=str(result.get("symbol") or state.get("asset") or ""),
+            state=state,
+            status=str(result.get("status") or "no_signal"),
+            provider=provider,
+            model_version=(validated or {}).get("model") if isinstance(validated, dict) else None,
+            raw_answers=result.get("answers") if isinstance(result.get("answers"), dict) else None,
+            input_tokens=tokens,
+            latency_ms=latency_ms,
+        )
+    except Exception as exc:
+        logger.warning("Jev journal write skipped: %s", exc)
+    try:
+        labeled = get_journal().labeled_choices()
+    except Exception as exc:
+        logger.warning("Jev journal read skipped: %s", exc)
+        labeled = []
+    report = calibration_report(labeled)
+    direction_probs = {}
+    margin = 0.0
+    if isinstance(validated, dict):
+        direction_probs = dict(validated.get("direction_probabilities") or {})
+        margin = float(validated.get("direction_margin") or 0.0)
+    conformal_veto = False
+    if direction_probs:
+        conformal_veto = conformal_for(str(result.get("symbol") or "")).veto(direction_probs)
+    if conformal_veto and result.get("status") == "ok":
+        result["signal"] = None
+        result["action"] = None
+        result["confidence"] = 0.0
+        result["vetoed"] = True
+        result["reason"] = "adaptive conformal set is too wide"
+    result["conformal_veto"] = conformal_veto
+    meta = meta_take(
+        labels=int(report["labels"]),
+        min_labels=int(report["min_labels"]),
+        margin=margin,
+        min_margin=jev_min_prob_margin(),
+        probabilities=direction_probs or {"FLAT": 1.0},
+        conformal_veto=conformal_veto,
+    )
+    influence = bool(
+        jev_influence_book()
+        and report["ready"]
+        and meta["take"]
+        and provider != "mock"
+        and result.get("status") == "ok"
+        and result.get("signal") in {"bullish", "bearish", "neutral"}
+        and not result.get("vetoed")
+    )
+    result["decision_id"] = journal_meta.get("decision_id")
+    result["state_hash"] = journal_meta.get("state_hash")
+    result["question_schema_version"] = journal_meta.get("question_schema_version")
+    result["calibration"] = report
+    result["display_probabilities"] = display_probability(direction_probs, report.get("temperature")) if direction_probs else {}
+    result["meta"] = meta
+    result["influence_book"] = influence
+    result["sizing_allowed"] = False
+    result["order_size_fraction"] = order_size_fraction()
 
 
 def _summary(state: dict[str, Any]) -> dict[str, Any]:

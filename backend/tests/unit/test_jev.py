@@ -288,6 +288,7 @@ async def test_opinion_layer_uses_jev_and_keeps_personas_on_failure(monkeypatch)
         "action": "BUY",
         "answers": {"trade_action": "BUY"},
         "vetoed": False,
+        "influence_book": True,
     }
     monkeypatch.setattr("backend.services.opinion_layer.evaluate_opinion", AsyncMock(return_value=jev_ok))
     opinion = await analyze_symbol(

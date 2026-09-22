@@ -779,7 +779,14 @@ async def analyze_symbol(
     except Exception as e:
         logger.warning(f"Jev opinion failed for {symbol}: {e}")
         jev_result = None
-    if jev_result and jev_result.get("signal") in {"bullish", "bearish", "neutral"} and not jev_result.get("vetoed"):
+    # Uncalibrated Jev output is logged, not weighted, unless JEV_INFLUENCE_BOOK
+    # is on and the calibration / meta / conformal gates all pass.
+    if (
+        jev_result
+        and jev_result.get("influence_book")
+        and jev_result.get("signal") in {"bullish", "bearish", "neutral"}
+        and not jev_result.get("vetoed")
+    ):
         opinions.append(AgentOpinion(
             agent="jev_analyst",
             signal=str(jev_result["signal"]),

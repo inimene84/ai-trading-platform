@@ -8,14 +8,19 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 
+from backend.jev.calibration import calibration_report
+from backend.jev.evidence import gather_evidence
+from backend.jev.journal import get_journal, reset_journal_cache
 from backend.jev.service import evaluate_symbol
 from backend.security import validate_admin_request
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/jev", tags=["jev"])
+crypto_router = APIRouter(prefix="/signals/jev", tags=["jev-signals"])
 
 
 @router.get("/evaluate")
@@ -28,3 +33,78 @@ async def evaluate(
     validate_admin_request(request)
     logger.info("Jev evaluate requested for %s social=%s", symbol, include_social)
     return await evaluate_symbol(symbol, include_social=include_social, fetch_bars=True)
+
+
+class OutcomeBody(BaseModel):
+    outcome: int = Field(..., ge=-1, le=1)
+    horizon: str = Field(default="t+1", max_length=32)
+
+
+@router.get("/journal")
+async def journal(
+    request: Request,
+    symbol: str | None = Query(default=None, max_length=32),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """Recent Jev decisions with state hashes. Does not place orders."""
+    validate_admin_request(request)
+    reset_journal_cache()
+    return {"decisions": get_journal().recent(symbol=symbol, limit=limit)}
+
+
+@router.post("/journal/{decision_id}/outcome")
+async def label_outcome(decision_id: int, body: OutcomeBody, request: Request):
+    """Store a later triple-barrier or direction label. Does not size a trade."""
+    validate_admin_request(request)
+    reset_journal_cache()
+    updated = get_journal().label(decision_id, body.outcome, body.horizon)
+    if not updated:
+        raise HTTPException(status_code=404, detail="decision not found")
+    return {"decision_id": decision_id, "outcome": body.outcome, "sizing_allowed": False}
+
+
+@router.get("/calibration")
+async def calibration(request: Request):
+    """Whether enough labels exist to display a calibrated probability."""
+    validate_admin_request(request)
+    reset_journal_cache()
+    report = calibration_report(get_journal().labeled_choices())
+    report["sizing_allowed"] = False
+    return report
+
+
+@router.post("/evidence")
+async def evidence(
+    request: Request,
+    symbol: str = Query(..., min_length=1, max_length=32),
+):
+    """Research evidence by category. Empty evidence is a 404, not a buy."""
+    validate_admin_request(request)
+    gathered = await gather_evidence(symbol)
+    if gathered["empty"]:
+        raise HTTPException(status_code=404, detail="no evidence in any category")
+    return {
+        "symbol": symbol.upper(),
+        "decision_engine": "research",
+        "advisory": True,
+        "sizing_allowed": False,
+        "evidence": gathered["categories"],
+        "classification": None,
+    }
+
+
+@crypto_router.get("/crypto")
+async def crypto_sentiment(
+    request: Request,
+    symbol: str = Query(..., min_length=1, max_length=32),
+    sample_size: int = Query(default=100, ge=1, le=1000),
+    include_social: bool = Query(default=False),
+):
+    """Read-only crypto sentiment evaluation. Social pulls stay opt-in."""
+    validate_admin_request(request)
+    return await evaluate_symbol(
+        symbol,
+        include_social=include_social,
+        fetch_bars=True,
+        social_sample=sample_size,
+    )

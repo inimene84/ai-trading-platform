@@ -6,9 +6,10 @@ slices history before calling this so a forecast cannot see the next close.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
-from backend.jev.config import MIN_BARS
+from backend.jev.config import MIN_BARS, STATE_BUILDER_VERSION
 
 
 def _num(bar: dict, *keys: str) -> float | None:
@@ -32,13 +33,53 @@ def _ohlcv(bar: dict) -> dict[str, float] | None:
         return None
     if high < low or min(open_, high, low, close) < 0:
         return None
-    return {
+    row = {
         "open": round(open_, 8),
         "high": round(high, 8),
         "low": round(low, 8),
         "close": round(close, 8),
         "volume": round(volume or 0.0, 4),
     }
+    stamp = bar_time(bar)
+    if stamp is not None:
+        row["time"] = stamp
+    return row
+
+
+def bar_time(bar: dict) -> int | None:
+    for key in ("time", "timestamp", "timestamp_epoch", "date"):
+        raw = bar.get(key)
+        if raw is None or raw == "":
+            continue
+        if isinstance(raw, (int, float)):
+            value = float(raw)
+            if value > 1e12:
+                value = value / 1000.0
+            if value > 0:
+                return int(value)
+        text = str(raw)
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp())
+    return None
+
+
+def assert_no_lookahead(rows: list[dict], as_of: int) -> None:
+    """Nothing strictly after as_of may remain in a past-only state."""
+    for row in rows:
+        stamp = row.get("time")
+        if stamp is not None and int(stamp) > int(as_of):
+            raise ValueError(f"lookahead bar at {stamp} is after as_of {as_of}")
+
+
+def rows_as_of(rows: list[dict], as_of: int) -> list[dict]:
+    kept = [row for row in rows if row.get("time") is None or int(row["time"]) <= int(as_of)]
+    assert_no_lookahead(kept, as_of)
+    return kept
 
 
 def rsi(closes: list[float], period: int = 14) -> float | None:
@@ -168,5 +209,57 @@ def build_market_state(
             "funding_rate": funding_rate,
             "open_interest_usd": open_interest_usd,
             "ohlcv": window,
+            "state_builder_version": STATE_BUILDER_VERSION,
+            **calendar_context(window),
         },
     }
+
+
+def calendar_context(rows: list[dict[str, float]]) -> dict[str, Any]:
+    """UTC month and week buckets using only bars that carry a timestamp.
+
+    Crypto does not have an exchange close. Weeks are ISO weeks and months
+    are calendar months in UTC. Bars without timestamps are omitted rather
+    than assigned a guessed date.
+    """
+    stamped = [row for row in rows if row.get("time") is not None]
+    if len(stamped) < 2:
+        return {}
+    as_of = max(int(row["time"]) for row in stamped)
+    assert_no_lookahead(stamped, as_of)
+    months: dict[str, list[float]] = {}
+    weeks: dict[str, list[float]] = {}
+    for row in stamped:
+        moment = datetime.fromtimestamp(int(row["time"]), tz=timezone.utc)
+        months.setdefault(moment.strftime("%Y-%m"), []).append(float(row["close"]))
+        year, week, _day = moment.isocalendar()
+        weeks.setdefault(f"{year}-W{week:02d}", []).append(float(row["close"]))
+    return {
+        "as_of": as_of,
+        "monthly_context": _bucket_summary(months, limit=12),
+        "weekly_context": _bucket_summary(weeks, limit=14),
+    }
+
+
+def _bucket_summary(groups: dict[str, list[float]], limit: int) -> list[dict[str, Any]]:
+    keys = sorted(groups)[-limit:]
+    summary = []
+    for key in keys:
+        closes = groups[key]
+        first = closes[0]
+        last = closes[-1]
+        change = ((last - first) / first * 100.0) if first else 0.0
+        summary.append({
+            "bucket": key,
+            "sessions": len(closes),
+            "open": round(first, 8),
+            "close": round(last, 8),
+            "change_pct": round(change, 4),
+            "complete": False,
+        })
+    if summary:
+        summary[-1]["partial"] = True
+        for item in summary[:-1]:
+            item["complete"] = True
+            item["partial"] = False
+    return summary
