@@ -6,6 +6,10 @@ import os
 
 DEFAULT_MODEL = "jev-1.13.0"
 DEFAULT_BASE_URL = "https://api.typesafe.ai"
+# OpenRouter model page: https://openrouter.ai/typesafe/jev-1.13
+# Not jev-1.13.0 — that patch id is the direct TypeSafe pin and is not the OpenRouter slug.
+DEFAULT_OPENROUTER_MODEL = "typesafe/jev-1.13"
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_TIMEOUT_SECONDS = 12.0
 DEFAULT_CACHE_SECONDS = 600
 DEFAULT_MIN_PROB_MARGIN = 0.12
@@ -93,8 +97,37 @@ def jev_min_prob_margin() -> float:
 
 
 def jev_provider() -> str:
-    """typesafe (direct), litellm, or mock. Mock never influences the book."""
+    """typesafe, openrouter, litellm, or mock. Mock never influences the book."""
     return os.getenv("JEV_PROVIDER", "typesafe").strip().lower() or "typesafe"
+
+
+def openrouter_api_key() -> str:
+    return os.getenv("OPENROUTER_API_KEY", "").strip()
+
+
+def openrouter_base_url() -> str:
+    return os.getenv("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL).strip().rstrip("/") or DEFAULT_OPENROUTER_BASE_URL
+
+
+def jev_openrouter_model() -> str:
+    """Pinned OpenRouter slug. JEV_MODEL stays the direct TypeSafe id."""
+    explicit = os.getenv("JEV_OPENROUTER_MODEL", "").strip()
+    return explicit or DEFAULT_OPENROUTER_MODEL
+
+
+def openrouter_headers(api_key: str) -> dict[str, str]:
+    """Same header style as the embedding client in backend.utils.embeddings."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    referer = os.getenv("OPENROUTER_HTTP_REFERER", "").strip()
+    if referer:
+        headers["HTTP-Referer"] = referer
+    title = os.getenv("OPENROUTER_APP_TITLE", "ai-trading-platform").strip()
+    if title:
+        headers["X-Title"] = title
+    return headers
 
 
 def jev_fallback_provider() -> str:

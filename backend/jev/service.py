@@ -11,7 +11,8 @@ import time
 from typing import Any
 
 from backend.jev.calibration import calibration_report, display_probability
-from backend.jev.client import JevClient, JevUnavailable, log_unavailable
+from backend.jev.client import JevUnavailable, log_unavailable
+from backend.jev.gateway import build_client
 from backend.jev.config import (
     jev_cache_seconds,
     jev_include_social,
@@ -132,7 +133,7 @@ async def evaluate_symbol(
     bars: list[dict] | None = None,
     metrics: dict | None = None,
     include_social: bool | None = None,
-    client: JevClient | None = None,
+    client: Any | None = None,
     twitter: TwitterIngestor | None = None,
     fetch_bars: bool = True,
     social_sample: int | None = None,
@@ -198,7 +199,7 @@ async def evaluate_symbol(
         payload["cached"] = True
         return payload
 
-    jev = client or JevClient()
+    jev = client or build_client()
     questions = analysis_questions()
     problems = lint_questions(questions)
     if problems:
