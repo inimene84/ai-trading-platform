@@ -247,11 +247,12 @@ async def test_twitter_early_stop_and_no_simulated_posts(tmp_path):
 def test_t_plus_one_harness_scores_next_bar_only():
     bars = [
         {"close": 100},
-        {"close": 101},
-        {"close": 100.01},
+        {"close": 102},
+        {"close": 102.02},
     ]
     scored = score_t_plus_one(bars, ["UP", "DOWN"], flat_bps=8.0)
-    assert realized_direction(100, 101) == "UP"
+    assert realized_direction(100, 102) == "UP"
+    assert realized_direction(102, 102.02) == "FLAT"
     assert scored["samples"] == 2
     assert scored["hits"] == 1
     assert scored["accuracy"] == 0.5
