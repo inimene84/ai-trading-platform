@@ -53,7 +53,7 @@ case "$CMD" in
     SYMBOL="${2:-BTC-USDT}"
     MODEL="${3:-both}"
     CANDLES="${GPU_REMOTE_DIR}/storage/candles/${SYMBOL}_1m.csv.gz"
-    remote "cd ${GPU_REMOTE_DIR} && .venv/bin/python train_gpu.py --symbol ${SYMBOL} --candles ${CANDLES} --model ${MODEL} --pt-mult 5.5 --sl-mult 1.75"
+    remote "cd ${GPU_REMOTE_DIR} && .venv/bin/python train_gpu.py --symbol ${SYMBOL} --candles ${CANDLES} --model ${MODEL} --pt-mult 5.5 --sl-mult 1.75 --holding 48"
     ;;
   download)
     CLASS="${2:-all}"
@@ -62,7 +62,7 @@ case "$CMD" in
   train-universe)
     CLASS="${2:-all}"
     MODEL="${3:-both}"
-    remote "cd ${GPU_REMOTE_DIR} && .venv/bin/python train_gpu.py --asset-class ${CLASS} --candles-dir ${GPU_REMOTE_DIR}/storage/candles --model ${MODEL} --pt-mult 5.5 --sl-mult 1.75"
+    remote "cd ${GPU_REMOTE_DIR} && .venv/bin/python train_gpu.py --asset-class ${CLASS} --candles-dir ${GPU_REMOTE_DIR}/storage/candles --model ${MODEL} --pt-mult 5.5 --sl-mult 1.75 --holding 48"
     ;;
   *)
     echo "Usage: GPU_SSH_HOST=... GPU_SSH_PASSWORD=... $0 [inventory|bootstrap|train [SYMBOL] [both|lightgbm|lstm]|download [CLASS]|train-universe [CLASS] [both|lightgbm|lstm]]"

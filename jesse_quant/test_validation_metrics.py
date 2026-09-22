@@ -5,6 +5,7 @@ Unit Tests for Validation Metrics (DSR, PBO, PurgedKFold)
 
 import unittest
 import numpy as np
+import pandas as pd
 
 from validation_metrics import (
     deflated_sharpe_ratio,
@@ -126,6 +127,20 @@ class TestValidationMetrics(unittest.TestCase):
             embargo_range = set(range(test_max + 1, min(n_samples, test_max + 1 + embargo_samples)))
             embargo_leak = set(train_idx).intersection(embargo_range)
             self.assertEqual(len(embargo_leak), 0)
+
+    def test_datetime_embargo_uses_bars_not_event_count(self):
+        idx = pd.date_range("2024-01-01", periods=20, freq="6h")
+        frame = pd.DataFrame({"x": np.arange(20)}, index=idx)
+        pkf = PurgedKFold(n_splits=2, embargo_bars=48, bar_timedelta=pd.Timedelta(hours=1))
+        train_idx, test_idx = next(pkf.split(frame))
+        test_end_ts = idx[int(max(test_idx))]
+        cutoff = test_end_ts + pd.Timedelta(hours=48)
+        embargoed = {i for i, ts in enumerate(idx) if test_end_ts < ts <= cutoff}
+        self.assertLess(len(embargoed), 48)
+        self.assertEqual(len(set(train_idx).intersection(embargoed)), 0)
+        later = {i for i, ts in enumerate(idx) if ts > cutoff}
+        self.assertTrue(later)
+        self.assertTrue(later.issubset(set(train_idx)))
 
 
 if __name__ == "__main__":

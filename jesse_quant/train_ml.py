@@ -38,7 +38,7 @@ from embargo_audit import (
 from fracdiff import kernel_width, select_fracdiff_d
 from ml_features import FEATURE_NAMES, LONGEST_FEATURE_LOOKBACK_BARS, compute_features_df
 from validation_metrics import PurgedKFold, calculate_sharpe_ratio, deflated_sharpe_ratio, probability_of_backtest_overfitting
-from triple_barrier import apply_triple_barrier, compute_sample_uniqueness
+from triple_barrier import apply_triple_barrier, compute_sample_uniqueness, realized_payoff_stats
 from feature_schema import FEATURE_HASH
 from gpu_device import detect_training_device, lightgbm_device_kwargs
 from promotion_contract import (
@@ -56,7 +56,9 @@ from promotion_gates import (
     PBO_GATE,
     STRATEGY_PT_ATR,
     STRATEGY_SL_ATR,
+    empirical_payoff_ratio,
     evaluate_promotion,
+    net_theoretical_payoff_ratio,
     payoff_ratio_from_geometry,
 )
 
@@ -192,11 +194,14 @@ def prepare_dataset(
     fallback_every_bar: bool = True,
     min_events: int = 50,
     fracdiff_d: Optional[float] = None,
-) -> Tuple[pd.DataFrame, pd.Series, Optional[pd.Series], Optional[pd.Series]]:
+) -> Tuple[pd.DataFrame, pd.Series, Optional[pd.Series], Optional[pd.Series], Dict[str, Any]]:
     """
     Computes features and labels outcomes using either:
     1. Triple-Barrier Method (path-dependent PT, SL, timeout with sample uniqueness weights)
     2. Fixed Horizon returns (return[t+H] vs fixed threshold)
+
+    Extra dict carries net-of-cost barrier returns used for Kelly b̂ and
+    uniqueness × |net| sample weights.
     """
     print("[*] Computing quantitative technical indicators & FracDiff features...")
     t0 = time.time()
@@ -221,6 +226,11 @@ def prepare_dataset(
             max_holding_bars=max_holding,
         )
         sample_weights = compute_sample_uniqueness(tb_df, df.index)
+        cost_pct = round_trip_cost_pct(int(max_holding))
+        gross_returns = tb_df["ret"].astype(float)
+        net_returns = gross_returns - float(cost_pct)
+        uniqueness_net = sample_weights * net_returns.abs().clip(lower=1e-6)
+        sample_weights = uniqueness_net / uniqueness_net.mean()
 
         # Meta-label relative to the long primary: TP-before-SL is class 1,
         # everything else (SL or timeout) is class 0. Served as a 2-class
@@ -238,6 +248,11 @@ def prepare_dataset(
         y_clean = y.loc[final_idx]
         w_clean = sample_weights.loc[final_idx]
         info_sets_clean = samples_info_sets.loc[final_idx]
+        extra = {
+            "gross_returns": gross_returns.loc[final_idx],
+            "net_returns": net_returns.loc[final_idx],
+            "round_trip_cost_pct": float(cost_pct),
+        }
     else:
         # Fixed forward horizon
         forward_return = (df["close"].shift(-forward_horizon) / df["close"] - 1.0) * 100.0
@@ -250,11 +265,16 @@ def prepare_dataset(
         y_clean = y[valid_mask]
         w_clean = None
         info_sets_clean = None
+        extra = {
+            "gross_returns": forward_return.loc[X_clean.index],
+            "net_returns": forward_return.loc[X_clean.index] - round_trip_cost_pct(int(forward_horizon)),
+            "round_trip_cost_pct": float(round_trip_cost_pct(int(forward_horizon))),
+        }
 
     class_counts = y_clean.value_counts().to_dict()
     print(f"    Dataset prepared in {time.time()-t0:.2f}s: {len(X_clean):,} valid rows")
     print(f"    Class Distribution: Fail/Timeout(0)={class_counts.get(0, 0):,}, TP-hit(1)={class_counts.get(1, 0):,}, Bearish(2)={class_counts.get(2, 0):,}")
-    return X_clean, y_clean, w_clean, info_sets_clean
+    return X_clean, y_clean, w_clean, info_sets_clean, extra
 
 
 
@@ -322,6 +342,50 @@ def _make_clf(model_type: str, params: Optional[Dict[str, Any]] = None, device_k
     )
 
 
+def _purged_cv_sharpe(
+    model_type: str,
+    params: Optional[Dict[str, Any]],
+    device_kwargs: Dict[str, Any],
+    X: pd.DataFrame,
+    y: pd.Series,
+    sample_weights: Optional[pd.Series],
+    samples_info_sets: Optional[pd.Series],
+    embargo_bars: int,
+    event_returns: Optional[pd.Series],
+    n_splits: int = 5,
+) -> Optional[float]:
+    """Mean Sharpe across purged/embargoed folds. None if the split is too thin."""
+    if len(X) < 80:
+        return None
+    n_splits = int(min(n_splits, max(2, len(X) // 40)))
+    info = samples_info_sets.loc[X.index] if samples_info_sets is not None else None
+    pkf = PurgedKFold(n_splits=n_splits, samples_info_sets=info, embargo_bars=embargo_bars)
+    sharpes = []
+    for train_idx, test_idx in pkf.split(X):
+        if len(train_idx) < 30 or len(test_idx) < 8:
+            continue
+        scaler = RobustScaler()
+        x_tr = scaler.fit_transform(X.iloc[train_idx])
+        x_te = scaler.transform(X.iloc[test_idx])
+        clf = _make_clf(model_type, params, device_kwargs)
+        w_tr = sample_weights.iloc[train_idx].to_numpy() if sample_weights is not None else None
+        if w_tr is not None and model_type in ("lightgbm", "random_forest"):
+            clf.fit(x_tr, y.iloc[train_idx], sample_weight=w_tr)
+        else:
+            clf.fit(x_tr, y.iloc[train_idx])
+        preds = clf.predict(x_te)
+        if event_returns is not None:
+            rets = np.where(preds == 1, event_returns.iloc[test_idx].to_numpy(), 0.0)
+        else:
+            pred_signal = np.where(preds == 1, 1.0, -1.0)
+            actual_signal = np.where(y.iloc[test_idx].to_numpy() == 1, 1.0, -1.0)
+            rets = pred_signal * actual_signal * 0.01
+        sharpes.append(calculate_sharpe_ratio(rets))
+    if not sharpes:
+        return None
+    return float(np.mean(sharpes))
+
+
 def train_model(
     X: pd.DataFrame,
     y: pd.Series,
@@ -336,6 +400,7 @@ def train_model(
     max_holding: int = MAX_HOLDING_BARS,
     fracdiff_d: Optional[float] = None,
     fracdiff_meta: Optional[Dict[str, Any]] = None,
+    event_returns: Optional[pd.Series] = None,
 ) -> Tuple[Pipeline, Dict[str, Any]]:
     """Train with a hyperparameter grid so DSR/PBO see the true trial count."""
     device = detect_training_device()
@@ -378,11 +443,27 @@ def train_model(
 
     holdout_columns = []
     trial_sharpes = []
+    cv_sharpes: list[Optional[float]] = []
     fitted = []
     used_device_kwargs = dict(device_kwargs)
+    w_train_s = sample_weights.iloc[:split_idx] if sample_weights is not None else None
+    info_train = samples_info_sets.iloc[:split_idx] if samples_info_sets is not None else None
+    net_train = event_returns.iloc[:split_idx] if event_returns is not None else None
+    net_test = event_returns.iloc[split_idx:] if event_returns is not None else None
 
-    print(f"[*] Evaluating {len(grid)} candidate configurations for CPCV/PBO matrix...")
+    print(f"[*] Evaluating {len(grid)} candidates via purged CV (embargo={embargo_bars} bars)...")
     for i, params in enumerate(grid, 1):
+        cv_sr = _purged_cv_sharpe(
+            model_type,
+            params,
+            used_device_kwargs,
+            X_train,
+            y_train,
+            w_train_s,
+            info_train,
+            embargo_bars,
+            net_train,
+        )
         try:
             clf = _make_clf(model_type, params, used_device_kwargs)
             if w_train is not None and model_type in ("lightgbm", "random_forest"):
@@ -393,6 +474,17 @@ def train_model(
             if used_device_kwargs:
                 print(f"[!] GPU LightGBM failed ({exc}); falling back to CPU for remaining trials")
                 used_device_kwargs = {}
+                cv_sr = _purged_cv_sharpe(
+                    model_type,
+                    params,
+                    used_device_kwargs,
+                    X_train,
+                    y_train,
+                    w_train_s,
+                    info_train,
+                    embargo_bars,
+                    net_train,
+                )
                 clf = _make_clf(model_type, params, used_device_kwargs)
                 if w_train is not None and model_type in ("lightgbm", "random_forest"):
                     clf.fit(X_train_s, y_train, sample_weight=w_train)
@@ -401,14 +493,19 @@ def train_model(
             else:
                 raise
         preds = clf.predict(X_test_s)
-        pred_signal = np.where(preds == 1, 1.0, -1.0)
-        actual_signal = np.where(y_test.to_numpy() == 1, 1.0, -1.0)
-        rets = pred_signal * actual_signal * 0.01
+        if net_test is not None:
+            rets = np.where(preds == 1, net_test.to_numpy(), 0.0)
+        else:
+            pred_signal = np.where(preds == 1, 1.0, -1.0)
+            actual_signal = np.where(y_test.to_numpy() == 1, 1.0, -1.0)
+            rets = pred_signal * actual_signal * 0.01
         holdout_columns.append(rets)
         sr = calculate_sharpe_ratio(rets)
         trial_sharpes.append(sr)
+        cv_sharpes.append(cv_sr)
         fitted.append((params, clf, sr, preds))
-        print(f"    trial {i}/{len(grid)} Sharpe={sr:.3f} params={params}")
+        cv_txt = f"{cv_sr:.3f}" if cv_sr is not None else "n/a"
+        print(f"    trial {i}/{len(grid)} purgedCV={cv_txt} holdout={sr:.3f} params={params}")
 
     trial_matrix = np.column_stack(holdout_columns)
     pbo_cv, med_rank, pbo_ranks = probability_of_backtest_overfitting(
@@ -426,23 +523,30 @@ def train_model(
     _save_trial_ledger(n_trials)
 
     var_sharpe = float(np.var(trial_sharpes, ddof=1)) if len(trial_sharpes) > 1 else None
-    best_idx = int(np.argmax(trial_sharpes))
+    if any(score is not None for score in cv_sharpes):
+        ranked = [(-1e18 if score is None else float(score)) for score in cv_sharpes]
+        best_idx = int(np.argmax(ranked))
+        selection = "purged_cv"
+    else:
+        best_idx = int(np.argmax(trial_sharpes))
+        selection = "holdout_fallback"
     best_params, _, best_sr, best_preds = fitted[best_idx]
     holdout_returns = holdout_columns[best_idx]
     holdout_sr = calculate_sharpe_ratio(holdout_returns)
     dsr_holdout = deflated_sharpe_ratio(holdout_returns, n_trials=n_trials, variance_of_trials=var_sharpe)
 
-    print(f"[*] Best trial #{best_idx + 1} holdout Sharpe={holdout_sr:.3f}; n_trials={n_trials} (ledger+grid)")
+    print(
+        f"[*] Best trial #{best_idx + 1} via {selection}; "
+        f"holdout Sharpe={holdout_sr:.3f}; n_trials={n_trials} (ledger+grid)"
+    )
 
     base_clf = _make_clf(model_type, best_params, used_device_kwargs)
-    info_train = None
-    if samples_info_sets is not None:
-        info_train = samples_info_sets.iloc[:split_idx]
     purged_cv = PurgedKFold(
         n_splits=3,
         samples_info_sets=info_train,
         embargo_bars=embargo_bars,
     )
+    X_train_s_df = pd.DataFrame(X_train_s, index=X_train.index, columns=list(X_train.columns))
     calibrated_clf = None
     calibration_method = "isotonic"
     print(f"[*] Fitting final {model_type} pipeline with CalibratedClassifierCV + PurgedKFold...")
@@ -450,9 +554,9 @@ def train_model(
         try:
             candidate = CalibratedClassifierCV(estimator=base_clf, method=method, cv=purged_cv)
             if w_train is not None and model_type in ("lightgbm", "random_forest"):
-                candidate.fit(X_train_s, y_train, sample_weight=w_train)
+                candidate.fit(X_train_s_df, y_train, sample_weight=w_train)
             else:
-                candidate.fit(X_train_s, y_train)
+                candidate.fit(X_train_s_df, y_train)
             calibrated_clf = candidate
             calibration_method = method
             break
@@ -516,10 +620,40 @@ def train_model(
         "embargo_audit": embargo_audit.to_dict(),
         "calibration": calibration_ctl,
         "calibration_method": calibration_method,
+        "grid_selection": selection,
         "payoff_ratio_kind": "theoretical_geometry_gross",
         "costs": cost_model_dict(),
         "round_trip_cost_pct": round_trip_cost_pct(int(max_holding)),
     }
+
+    net_fallback = float(net_theoretical_payoff_ratio(pt_mult, sl_mult, holding_bars=int(max_holding)))
+    taken_net = None
+    if event_returns is not None:
+        taken_net = event_returns.iloc[split_idx:].to_numpy()[np.asarray(test_preds) == 1]
+    if taken_net is not None and len(taken_net) > 0:
+        payoff_stats = realized_payoff_stats(taken_net)
+        realized_b = empirical_payoff_ratio(
+            payoff_stats["avg_win"],
+            payoff_stats["avg_loss_abs"],
+            payoff_stats["n"],
+            fallback=net_fallback,
+        )
+        metrics["payoff"] = {
+            "model_trades_holdout": {
+                **payoff_stats,
+                "n_trades": payoff_stats["n"],
+                "payoff_ratio": float(realized_b),
+            }
+        }
+        if payoff_stats["n_wins"] >= 5 and payoff_stats["n_losses"] >= 5:
+            metrics["payoff_ratio"] = float(realized_b)
+            metrics["payoff_ratio_kind"] = "net_realized_holdout"
+        else:
+            metrics["payoff_ratio"] = net_fallback
+            metrics["payoff_ratio_kind"] = "net_theoretical_geometry"
+    else:
+        metrics["payoff_ratio"] = net_fallback
+        metrics["payoff_ratio_kind"] = "net_theoretical_geometry"
 
     promotion = evaluate_promotion(metrics, pt_mult=pt_mult, sl_mult=sl_mult)
     metrics["promotion_ok"] = promotion.ok
@@ -577,10 +711,14 @@ def main():
         df = load_candles_from_path(args.candles, args.symbol, args.timeframe)
     else:
         df = load_candles_from_db(args.symbol, args.timeframe)
-    fracdiff_meta = select_fracdiff_d(df["close"])
+    cut = max(200, int(len(df) * 0.85))
+    fracdiff_meta = select_fracdiff_d(df["close"].iloc[:cut])
     fracdiff_d = float(fracdiff_meta["d"])
-    print(f"[*] FracDiff d={fracdiff_d} adf_p={fracdiff_meta['adf_pvalue']:.4f} source={fracdiff_meta['source']}")
-    X, y, sample_weights, samples_info_sets = prepare_dataset(
+    print(
+        f"[*] FracDiff d={fracdiff_d} adf_p={fracdiff_meta['adf_pvalue']:.4f} "
+        f"source={fracdiff_meta['source']} (selected on first {cut} bars)"
+    )
+    X, y, sample_weights, samples_info_sets, dataset_extra = prepare_dataset(
         df,
         labeling_mode=args.labeling,
         pt_mult=args.pt_mult,
@@ -603,6 +741,7 @@ def main():
         max_holding=args.holding,
         fracdiff_d=fracdiff_d,
         fracdiff_meta=fracdiff_meta,
+        event_returns=dataset_extra.get("net_returns"),
     )
 
     # Save model artifact with MLOps metadata

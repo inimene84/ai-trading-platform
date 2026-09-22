@@ -369,6 +369,7 @@ class PurgedKFold:
         samples_info_sets: Optional[pd.Series] = None,
         embargo_pct: float = 0.01,
         embargo_bars: Optional[int] = None,
+        bar_timedelta: Optional[pd.Timedelta] = None,
     ):
         """
         Parameters:
@@ -378,11 +379,16 @@ class PurgedKFold:
           embargo_pct: Fraction of total observations to embargo immediately after test set.
           embargo_bars: Absolute embargo length. When set, wins over embargo_pct.
                         Must be >= max(max_holding_bars, longest feature lookback).
+                        On a DatetimeIndex this is a *time* buffer (bars × bar_timedelta),
+                        not an event-count buffer.
+          bar_timedelta: Candle duration used to convert embargo_bars to time.
+                         Defaults to 1 hour when X has a DatetimeIndex.
         """
         self.n_splits = n_splits
         self.samples_info_sets = samples_info_sets
         self.embargo_pct = embargo_pct
         self.embargo_bars = embargo_bars
+        self.bar_timedelta = bar_timedelta
 
     def get_n_splits(self, X=None, y=None, groups=None) -> int:
         return int(self.n_splits)
@@ -422,9 +428,25 @@ class PurgedKFold:
                     if t1 >= test_start_bound:
                         train_mask[t] = False
 
-            # 2. Embargo samples immediately following the test set
-            embargo_end = min(n_samples, test_end + embargo)
-            train_mask[test_end:embargo_end] = False
+            # 2. Embargo samples immediately following the test set.
+            # Event-sampled rows use a time buffer (embargo_bars × bar length)
+            # so 48/200 means hours, not 48/200 QuantumAI events.
+            idx = getattr(X, "index", None)
+            if (
+                self.embargo_bars is not None
+                and idx is not None
+                and isinstance(idx, pd.DatetimeIndex)
+                and test_end > 0
+                and test_end < n_samples
+            ):
+                delta = self.bar_timedelta or pd.Timedelta(hours=1)
+                test_end_ts = idx[test_end - 1]
+                cutoff = test_end_ts + int(self.embargo_bars) * delta
+                embargo_mask = (idx > test_end_ts) & (idx <= cutoff)
+                train_mask[np.asarray(embargo_mask)] = False
+            else:
+                embargo_end = min(n_samples, test_end + embargo)
+                train_mask[test_end:embargo_end] = False
 
             train_indices = indices[train_mask]
             yield train_indices, test_indices

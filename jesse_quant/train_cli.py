@@ -10,6 +10,7 @@ import os
 from typing import Optional
 
 from asset_universe import candle_filename, lookup_symbol, normalize_symbol
+from barrier_config import MAX_HOLDING_BARS
 from promotion_gates import STRATEGY_PT_ATR, STRATEGY_SL_ATR
 
 # Train on event samples this small, but never every-bar fallback on the GPU path.
@@ -54,7 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="lightgbm", choices=["lightgbm", "lstm", "both"])
     parser.add_argument("--pt-mult", type=float, default=STRATEGY_PT_ATR)
     parser.add_argument("--sl-mult", type=float, default=STRATEGY_SL_ATR)
-    parser.add_argument("--holding", type=int, default=24)
+    parser.add_argument(
+        "--holding",
+        type=int,
+        default=MAX_HOLDING_BARS,
+        help="Triple-barrier vertical timeout in bars (live 1h geometry = 48)",
+    )
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser.add_argument(
         "--events",
@@ -68,4 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated symbols to skip in a batch (e.g. BTC-USDT,ETH-USDT,SOL-USDT)",
     )
     parser.add_argument("--list-universe", action="store_true")
+    parser.add_argument(
+        "--fracdiff",
+        action="store_true",
+        help="Grid-search FFD d on the search window and store it on the artifact",
+    )
     return parser
