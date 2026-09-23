@@ -173,6 +173,21 @@ def _stand_aside(symbol: str, reason: str, source: str) -> dict[str, Any]:
     }
 
 
+def _headline_lines(titles: list[str]) -> list[str]:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for title in titles:
+        text = " ".join(str(title).split())[:180]
+        key = text.lower()
+        if len(text) < 8 or key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"Headline: {text}")
+        if len(lines) >= 4:
+            break
+    return lines
+
+
 def _compose(
     symbol: str,
     state: dict[str, Any],
@@ -180,6 +195,7 @@ def _compose(
     *,
     loss_frac: float,
     gross_frac: float,
+    headlines: list[str] | None = None,
 ) -> dict[str, Any]:
     market = state.get("market") or {}
     last = float(market.get("last_close") or 0.0)
@@ -219,7 +235,8 @@ def _compose(
     if target is not None and target <= 0:
         target = None
 
-    evidence = [
+    titles = [str(title) for title in (headlines or []) if str(title).strip()][:6]
+    evidence = _headline_lines(titles) + [
         (
             f"Last close {last:.6g}. RSI {market.get('rsi_14')}. "
             f"ATR {market.get('atr_14')}."
@@ -235,6 +252,7 @@ def _compose(
         "Social feed skipped. This pass is the fast revaluator.",
         "Advisory only. This card does not send a live order.",
     ]
+    evidence_raw = len(titles) + 5
     higher = float(validated["higher"])
     conviction = float(validated["conviction"])
     side_confidence = float(validated["side_confidence"])
@@ -283,9 +301,9 @@ def _compose(
         "target": None if target is None else round(float(target), 8),
         "evidence": evidence,
         "evidenceKept": len(evidence),
-        "evidenceDeduped": len(evidence),
+        "evidenceDeduped": evidence_raw,
         "questions": questions,
-        "pattern": "Jev fast revaluator",
+        "pattern": "Jev fast revaluator · headline evidence · no order",
         "model": validated.get("model"),
         "advisory": True,
         "sizing_allowed": False,
@@ -294,11 +312,18 @@ def _compose(
     }
 
 
-def _cache_key(symbol: str, state: dict[str, Any], loss_frac: float, gross_frac: float) -> str:
+def _cache_key(
+    symbol: str,
+    state: dict[str, Any],
+    loss_frac: float,
+    gross_frac: float,
+    headlines: list[str],
+) -> str:
     market = state.get("market") or {}
     loss_flag = int(loss_frac <= LOSS_VETO)
     gross_flag = int(gross_frac >= GROSS_VETO)
-    return f"{symbol}:{market.get('last_close')}:{loss_flag}:{gross_flag}"
+    hint = "|".join(headlines[:3])
+    return f"{symbol}:{market.get('last_close')}:{loss_flag}:{gross_flag}:{hint}"
 
 
 async def _bars_for(symbol: str, bars: list[dict] | None) -> list[dict]:
@@ -319,6 +344,7 @@ async def revalue_symbol(
     gross_frac: float = 0.0,
     client: Any | None = None,
     fetch_bars: bool = True,
+    headlines: list[str] | None = None,
 ) -> dict[str, Any]:
     """Revalue one symbol. A missing or invalid Jev answer is stand-aside."""
     requested = (symbol or "").strip().upper()
@@ -339,7 +365,8 @@ async def revalue_symbol(
     if state is None:
         return _stand_aside(requested, "insufficient past-only history", "unavailable")
 
-    key = _cache_key(requested, state, loss_frac, gross_frac)
+    titles = [" ".join(str(title).split())[:180] for title in (headlines or []) if str(title).strip()][:6]
+    key = _cache_key(requested, state, loss_frac, gross_frac, titles)
     cached = _cache.get(key)
     now = time.time()
     if cached and cached[0] > now:
@@ -364,6 +391,7 @@ async def revalue_symbol(
             "sentiment_label": "Neutral / Mixed",
         },
         "representative_posts": [],
+        "headlines": titles,
         "book": {
             "loss_frac": loss_frac,
             "gross_frac": gross_frac,
@@ -379,7 +407,14 @@ async def revalue_symbol(
         log_unavailable(requested, exc)
         return _stand_aside(requested, "Jev revalue failed", "unavailable")
 
-    card = _compose(requested, state, validated, loss_frac=loss_frac, gross_frac=gross_frac)
+    card = _compose(
+        requested,
+        state,
+        validated,
+        loss_frac=loss_frac,
+        gross_frac=gross_frac,
+        headlines=titles,
+    )
     card["cached"] = False
     _cache[key] = (now + CACHE_SECONDS, card)
     return card
@@ -392,6 +427,7 @@ async def revalue_tape(
     gross_frac: float = 0.0,
     client: Any | None = None,
     bars_by_symbol: dict[str, list[dict]] | None = None,
+    headlines_by_symbol: dict[str, list[str]] | None = None,
     fetch_bars: bool = True,
 ) -> dict[str, Any]:
     """Revalue up to eight symbols concurrently. One failure does not blank the tape."""
@@ -418,6 +454,7 @@ async def revalue_tape(
     started = time.perf_counter()
     semaphore = asyncio.Semaphore(4)
     supplied = bars_by_symbol or {}
+    supplied_headlines = headlines_by_symbol or {}
 
     async def one(name: str) -> dict[str, Any]:
         async with semaphore:
@@ -429,6 +466,7 @@ async def revalue_tape(
                 gross_frac=gross_frac,
                 client=client,
                 fetch_bars=fetch_bars and preset is None,
+                headlines=supplied_headlines.get(name) or [],
             )
 
     cards = list(await asyncio.gather(*(one(name) for name in ordered)))

@@ -92,6 +92,22 @@ def test_validate_revalue_rejects_a_bad_side():
 
 
 @pytest.mark.asyncio
+async def test_revalue_keeps_a_headline_and_still_does_not_size():
+    clear_revalue_cache()
+    card = await revalue_symbol(
+        "BTC",
+        bars=_bars(),
+        client=Live(),
+        fetch_bars=False,
+        headlines=["Bitcoin funding turns positive after the flush"],
+    )
+    assert card["sizing_allowed"] is False
+    assert card["influence_book"] is False
+    assert any("Bitcoin funding turns positive" in line for line in card["evidence"])
+    assert card["pattern"].endswith("no order")
+
+
+@pytest.mark.asyncio
 async def test_revalue_symbol_returns_an_advisory_card():
     clear_revalue_cache()
     client = Live()

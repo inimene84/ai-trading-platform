@@ -8,6 +8,7 @@ import {
   formatPx,
   formatQty,
   grossNotional,
+  holdSide,
   marketById,
   MARKETS,
   planWork,
@@ -23,7 +24,7 @@ import {
   type TaskState,
   type WorkPlan,
 } from "../../lib/desk/engine";
-import { anchorToTape, revalueTape } from "../../lib/desk/revalue";
+import { anchorToTape, headlinesFor, revalueTape } from "../../lib/desk/revalue";
 import { useDesk } from "../../lib/desk/store";
 import { clock, cn, kicker, mono } from "./ui";
 
@@ -205,7 +206,9 @@ export function Desk() {
       const scanning = nextPlan.kind === "scan";
       const cap = nextPlan.cap;
       const show = (cards: DecisionCard[], note: string) => {
-        const ranked = scanning ? [...cards].sort((a, b) => rank(b) - rank(a)) : cards;
+        const cacheNow = useDesk.getState().cache;
+        const held = cards.map((card) => holdSide(cacheNow[card.symbol] ?? null, card));
+        const ranked = scanning ? [...held].sort((a, b) => rank(b) - rank(a)) : held;
         for (const item of ranked) remember(item);
         if (scanning) {
           setScan(ranked);
@@ -223,7 +226,8 @@ export function Desk() {
       );
       const ticket = revalueTicket.current + 1;
       revalueTicket.current = ticket;
-      void revalueTape(ids, book)
+      void headlinesFor(ids)
+        .then((headlines) => revalueTape(ids, book, headlines))
         .then((result) => {
           if (ticket !== revalueTicket.current) return;
           const stamped = Date.now();
@@ -443,9 +447,9 @@ export function Desk() {
 
       <div className="mx-auto max-w-6xl px-4 py-4">
         <p className="mb-4 max-w-3xl text-sm text-muted">
-          The usage router runs before any research. When the action allows a card, the Jev
-          model revalues the name: a 30-day Noul, a long/flat/short Choice, and a conviction
-          Score. Hard rules can still veto. Fills are paper, and only after you confirm.
+          When the action allows a card, Jev revalues the name and keeps matching headlines on it.
+          A new side has to clear 0.62 confidence to replace the last one. Hard rules can still veto.
+          Fills are paper, and only after you confirm.
         </p>
 
         <div className="mb-4 grid grid-cols-3 gap-2 lg:hidden">
@@ -1209,6 +1213,18 @@ function Wiring() {
       body: "Only if the action allows work. That is the awesome-jev tape: 30-day Noul, round Choice, conviction Score, entry/stop/target card.",
     },
     {
+      title: "Hold the last side",
+      body: "A different side replaces the card only above 0.62 confidence, or at 0.42 and below. The band in between escalates and keeps the prior side.",
+    },
+    {
+      title: "Evidence budget",
+      body: "Duplicate lines drop, weak lines drop under 0.50, and the router cap still limits how many lines the card may show.",
+    },
+    {
+      title: "Headlines, not orders",
+      body: "Matching news titles ride along on the revalue. They are evidence on the card. They do not place a trade.",
+    },
+    {
       title: "Rules, then a human",
       body: "jev-guard shape: the model proposes a risk level, hard rules can veto, and a paper fill still waits for confirm. Nothing here is live.",
     },
@@ -1226,9 +1242,8 @@ function Wiring() {
         ))}
       </div>
       <p className="mt-3 text-sm text-muted">
-        Answers on this desk are an offline mirror of those questions so the preview runs without a TypeSafe key.
-        The action order matches the Python router. Swap the mirror for{" "}
-        <code className={mono}>system_one</code> when you have <code className={mono}>TYPESAFE_API_KEY</code>.
+        The card calls the fast revaluator when that route is up, and keeps the local tape when it is not.
+        Side changes inside the confidence band stay on the previous card.
       </p>
       <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm">
         <li>

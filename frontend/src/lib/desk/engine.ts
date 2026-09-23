@@ -9,6 +9,9 @@
  * The finance loop follows the public patterns in yibie/awesome-jev
  * (finance & trading): 30-day Noul, long/flat/short Choice, conviction Score,
  * a decision card that does not send, and a hard-rule veto beside the model.
+ * Three more patterns from that list sit beside the card: a confidence band
+ * that holds the last side (jev-oncall), an evidence budget (jselect), and
+ * headlines kept on the card without an order (Jev X Sentiment).
  */
 
 export const STARTING_CASH = 100_000;
@@ -57,6 +60,11 @@ export type RouterConfig = {
     max_retries_same_error: number;
   };
 };
+
+/** New side must clear this to replace a different prior side. */
+export const ENTER_CONFIDENCE = 0.62;
+/** At or below this, a weak new call may replace the prior side. */
+export const EXIT_CONFIDENCE = 0.42;
 
 export const DEFAULT_CONFIG: RouterConfig = {
   enabled: true,
@@ -434,6 +442,40 @@ export function planWork(route: RouteResult, state: TaskState, cfg: RouterConfig
   }
 }
 
+export function selectEvidence(lines: string[], cap: number, floor = 0.5): { kept: string[]; dropped: number } {
+  const seen = new Set<string>();
+  const scored: { line: string; score: number }[] = [];
+  lines.forEach((line, index) => {
+    const text = line.trim();
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) return;
+    seen.add(key);
+    const headline = key.startsWith("headline:");
+    const score = headline ? 0.84 : Math.max(0.2, 0.92 - index * 0.08);
+    scored.push({ line: text, score });
+  });
+  const above = scored.filter((item) => item.score >= floor);
+  const pool = above.length > 0 ? above : scored;
+  const kept = pool.slice(0, Math.max(0, cap)).map((item) => item.line);
+  return { kept, dropped: Math.max(0, lines.length - kept.length) };
+}
+
+export function holdSide(previous: DecisionCard | null, next: DecisionCard): DecisionCard {
+  if (!previous || previous.symbol !== next.symbol || previous.verdict === "VETO") return next;
+  if (previous.side === next.side || previous.side === "flat") return next;
+  if (next.sideConfidence >= ENTER_CONFIDENCE || next.sideConfidence <= EXIT_CONFIDENCE) return next;
+  const note = `Held ${previous.side}. New confidence ${next.sideConfidence.toFixed(2)} is inside the 0.42–0.62 band.`;
+  return {
+    ...next,
+    side: previous.side,
+    verdict: next.verdict === "VETO" ? "VETO" : "ESCALATE",
+    vetoes: next.vetoes.includes(note) ? next.vetoes : [...next.vetoes, note],
+    entry: previous.entry,
+    stop: previous.stop,
+    target: previous.target,
+  };
+}
+
 function evidenceLines(spec: MarketSpec, snap: Snapshot): string[] {
   const day = (snap.ret1 * 100).toFixed(2);
   const week = (snap.ret5 * 100).toFixed(2);
@@ -489,7 +531,8 @@ export function financeDecision(
   const stop = entry == null ? null : side === "long" ? entry - atr : entry + atr;
   const target = entry == null ? null : side === "long" ? entry + atr * 1.8 : entry - atr * 1.8;
 
-  const kept = evidenceLines(spec, snap).slice(0, Math.max(0, cap));
+  const rawEvidence = evidenceLines(spec, snap);
+  const picked = selectEvidence(rawEvidence, cap);
 
   const questions: TypedAnswer[] = [
     {
@@ -533,9 +576,9 @@ export function financeDecision(
     entry,
     stop: stop != null && stop > 0 ? stop : stop != null ? snap.price * 0.5 : null,
     target: target != null && target > 0 ? target : null,
-    evidence: kept,
-    evidenceKept: kept.length,
-    evidenceDeduped: snap.deduped,
+    evidence: picked.kept,
+    evidenceKept: picked.kept.length,
+    evidenceDeduped: rawEvidence.length,
     questions,
     pattern: "Jevinik Noul · jev-trade Choice · jev_stock state · sentiment card · jev-guard veto",
   };
