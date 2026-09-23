@@ -19,7 +19,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$PROJECT_DIR"
 
 # ── Pre-flight checks ────────────────────────────────────────────────────
-for cmd in node npm python3 poetry; do
+for cmd in node npm python3; do
     command -v "$cmd" >/dev/null 2>&1 || { error "$cmd is not installed"; exit 1; }
 done
 success "Prerequisites OK"
@@ -36,7 +36,8 @@ fi
 
 # ── Dependencies ─────────────────────────────────────────────────────────
 info "Checking backend dependencies..."
-poetry run python3 -c "import uvicorn; import fastapi" >/dev/null 2>&1 || poetry install
+[[ -d ".venv" ]] || python3 -m venv .venv
+.venv/bin/python -c "import uvicorn; import fastapi" >/dev/null 2>&1 || .venv/bin/pip install -r backend/requirements.txt
 success "Backend ready"
 
 info "Checking frontend dependencies..."
@@ -55,7 +56,7 @@ trap cleanup SIGINT SIGTERM
 
 # ── Start services ───────────────────────────────────────────────────────
 info "Starting backend on :8080..."
-PYTHONPATH="." poetry run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8080 &
+PYTHONPATH="." .venv/bin/python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8080 &
 BACKEND_PID=$!
 sleep 3
 

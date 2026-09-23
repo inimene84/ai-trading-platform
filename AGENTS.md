@@ -63,11 +63,12 @@ Note: the checkout on this machine may sit inside a wrapper directory; the git r
 
 ```bash
 # Install (from repo root)
-poetry install                      # dev flow
-# or: pip install -r backend/requirements.txt   # mirrors production/CI
+python3 -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r backend/requirements.txt          # same as production/CI
+# requirements.txt is the single source of truth; there is no poetry/uv lockfile.
 
 # Run (dev)
-poetry run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8080
+PYTHONPATH=. uvicorn backend.main:app --reload --host 127.0.0.1 --port 8080
 # STARTUP.md native flow uses port 8000; run.sh/run.bat use 8080
 ```
 

@@ -21,11 +21,6 @@ if %errorlevel% neq 0 (
     pause & exit /b 1
 )
 
-where poetry >nul 2>&1
-if %errorlevel% neq 0 (
-    echo %ERROR% Poetry is not installed. Please install from https://python-poetry.org/
-    pause & exit /b 1
-)
 
 echo %SUCCESS% Prerequisites OK
 
@@ -45,10 +40,11 @@ if not exist ".env" (
 
 REM ── Install backend dependencies ───────────────────────────────────────────
 echo %INFO% Checking backend dependencies...
-poetry run python -c "import uvicorn; import fastapi" >nul 2>&1
+if not exist ".venv\Scripts\python.exe" python -m venv .venv
+.venv\Scripts\python.exe -c "import uvicorn; import fastapi" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo %INFO% Installing Python dependencies with Poetry...
-    poetry install
+    echo %INFO% Installing Python dependencies from backend\requirements.txt...
+    .venv\Scripts\python.exe -m pip install -r backend\requirements.txt
     if %errorlevel% neq 0 (
         echo %ERROR% Failed to install backend dependencies
         pause & exit /b 1
@@ -78,7 +74,7 @@ echo.
 
 REM Start backend (from project root so Python resolves "backend" package)
 echo %INFO% Launching backend server on :8080 ...
-start /b poetry run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8080
+start /b .venv\Scripts\python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8080
 
 timeout /t 3 /nobreak >nul
 

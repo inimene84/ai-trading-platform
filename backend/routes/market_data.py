@@ -13,6 +13,7 @@ from backend.services.binance_market_data import binance_market_data
 from backend.services.crypto_news_service import crypto_news_service
 from backend.services.influxdb_writer import influx
 from backend.services.multi_asset_bars import fetch_bars
+from backend.utils.safe_errors import internal_error_response
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +128,7 @@ async def get_funding_rates():
         rates = await binance_market_data.get_all_funding_rates()
         return JSONResponse(content={"status": "ok", "data": rates, "count": len(rates)})
     except Exception as e:
-        logger.error(f"Funding rates error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Funding rates error", e, status_code=500)
 
 
 @router.get("/open-interest")
@@ -138,8 +138,7 @@ async def get_open_interest():
         oi = await binance_market_data.get_all_open_interest()
         return JSONResponse(content={"status": "ok", "data": oi, "count": len(oi)})
     except Exception as e:
-        logger.error(f"Open interest error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Open interest error", e, status_code=500)
 
 
 @router.get("/overview")
@@ -149,8 +148,7 @@ async def get_market_overview():
         tickers = await binance_market_data.get_all_tickers_24h()
         return JSONResponse(content={"status": "ok", "data": tickers, "count": len(tickers)})
     except Exception as e:
-        logger.error(f"Market overview error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Market overview error", e, status_code=500)
 
 
 @router.get("/liquidations/{symbol}")
@@ -165,8 +163,7 @@ async def get_liquidations(symbol: str):
             "count": len(liquidations),
         })
     except Exception as e:
-        logger.error(f"Liquidations error for {symbol}: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Liquidations error", e, status_code=500)
 
 
 @router.get("/crypto-news")
@@ -176,8 +173,7 @@ async def get_crypto_news():
         summary = await crypto_news_service.get_market_summary()
         return JSONResponse(content={"status": "ok", "data": summary})
     except Exception as e:
-        logger.error(f"Crypto news error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Crypto news error", e, status_code=500)
 
 
 @router.get("/fear-greed")
@@ -187,8 +183,7 @@ async def get_fear_greed():
         fng = await crypto_news_service.get_fear_greed()
         return JSONResponse(content={"status": "ok", "data": fng})
     except Exception as e:
-        logger.error(f"Fear & Greed error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Fear & Greed error", e, status_code=500)
 
 
 @router.get("/bars")
@@ -205,8 +200,7 @@ async def get_bars(symbol: str, timeframe: str = "1h", limit: int = 100):
             "count": len(payload["data"]),
         })
     except Exception as e:
-        logger.error(f"Bars error for {symbol}: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Bars error", e, status_code=500)
 
 
 @router.get("/trending")
@@ -216,8 +210,7 @@ async def get_trending():
         trending = await crypto_news_service.get_trending_coins()
         return JSONResponse(content={"status": "ok", "data": trending, "count": len(trending)})
     except Exception as e:
-        logger.error(f"Trending error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Trending error", e, status_code=500)
 
 
 def _enrichment_response(kind: str, stored: list[dict[str, Any]]) -> dict[str, Any]:
@@ -256,8 +249,7 @@ async def receive_onchain(payload: Union[OnChainPayload, list[OnChainPayload]] =
         _LAST_WRITES["on-chain"] = stored
         return _enrichment_response("on-chain", stored)
     except Exception as e:
-        logger.error(f"Failed to store on-chain signal: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Failed to store on-chain signal", e, status_code=500)
 
 
 @router.get("/on-chain")
@@ -296,8 +288,7 @@ async def receive_macro(payload: Union[MacroPayload, list[MacroPayload]] = Body(
         _LAST_WRITES["macro"] = stored
         return _enrichment_response("macro", stored)
     except Exception as e:
-        logger.error(f"Failed to store macro signal: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Failed to store macro signal", e, status_code=500)
 
 
 @router.get("/macro")
@@ -340,8 +331,7 @@ async def receive_technical(payload: Union[TechnicalPayload, list[TechnicalPaylo
         _LAST_WRITES["technical"] = stored
         return _enrichment_response("technical", stored)
     except Exception as e:
-        logger.error(f"Failed to store technical signal: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Failed to store technical signal", e, status_code=500)
 
 
 def _technical_output_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -420,8 +410,7 @@ async def receive_divergence(payload: Union[DivergencePayload, list[DivergencePa
         stored = await _store_divergence_items(_as_items(payload))
         return _enrichment_response("divergence", stored)
     except Exception as e:
-        logger.error(f"Failed to store divergence alert: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return internal_error_response(logger, "Failed to store divergence alert", e, status_code=500)
 
 
 @router.get("/divergence")

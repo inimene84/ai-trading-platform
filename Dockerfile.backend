@@ -15,7 +15,6 @@ RUN pip install --no-cache-dir uv
 # Copy dependency manifests
 COPY backend/requirements.txt .
 COPY pyproject.toml .
-COPY poetry.lock .
 
 # Install with uv (uses wheels where possible, faster than pip)
 RUN uv pip install --system --no-cache -r requirements.txt \

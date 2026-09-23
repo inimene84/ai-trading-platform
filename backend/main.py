@@ -61,6 +61,9 @@ structlog.configure(
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+# Strip CR/LF from every log record so user-controlled text can't forge lines.
+from backend.utils.safe_errors import install_log_injection_filter  # noqa: E402
+install_log_injection_filter()
 logger = logging.getLogger(__name__)
 
 

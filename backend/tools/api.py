@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _cache = get_cache()
 
 
-def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: dict = None, max_retries: int = 3) -> requests.Response:
+def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: dict = None, max_retries: int = 3, params: dict | None = None) -> requests.Response:
     """
     Make an API request with rate limiting handling and moderate backoff.
     
@@ -45,9 +45,9 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
     """
     for attempt in range(max_retries + 1):  # +1 for initial attempt
         if method.upper() == "POST":
-            response = requests.post(url, headers=headers, json=json_data)
+            response = requests.post(url, headers=headers, json=json_data, params=params, timeout=30)
         else:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, params=params, timeout=30)
         
         if response.status_code == 429 and attempt < max_retries:
             # Linear backoff: 60s, 90s, 120s, 150s...
@@ -75,8 +75,9 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
     if financial_api_key:
         headers["X-API-KEY"] = financial_api_key
 
-    url = f"https://api.financialdatasets.ai/prices/?ticker={ticker}&interval=day&interval_multiplier=1&start_date={start_date}&end_date={end_date}"
-    response = _make_api_request(url, headers)
+    url = "https://api.financialdatasets.ai/prices/"
+    params = {"ticker": ticker, "interval": "day", "interval_multiplier": 1, "start_date": start_date, "end_date": end_date}
+    response = _make_api_request(url, headers, params=params)
     if response.status_code != 200:
         return []
 
@@ -117,8 +118,9 @@ def get_financial_metrics(
     if financial_api_key:
         headers["X-API-KEY"] = financial_api_key
 
-    url = f"https://api.financialdatasets.ai/financial-metrics/?ticker={ticker}&report_period_lte={end_date}&limit={limit}&period={period}"
-    response = _make_api_request(url, headers)
+    url = "https://api.financialdatasets.ai/financial-metrics/"
+    params = {"ticker": ticker, "report_period_lte": end_date, "limit": limit, "period": period}
+    response = _make_api_request(url, headers, params=params)
     if response.status_code != 200:
         return []
 
@@ -205,12 +207,12 @@ def get_insider_trades(
     current_end_date = end_date
 
     while True:
-        url = f"https://api.financialdatasets.ai/insider-trades/?ticker={ticker}&filing_date_lte={current_end_date}"
+        url = "https://api.financialdatasets.ai/insider-trades/"
+        params = {"ticker": ticker, "filing_date_lte": current_end_date, "limit": limit}
         if start_date:
-            url += f"&filing_date_gte={start_date}"
-        url += f"&limit={limit}"
+            params["filing_date_gte"] = start_date
 
-        response = _make_api_request(url, headers)
+        response = _make_api_request(url, headers, params=params)
         if response.status_code != 200:
             break
 
@@ -271,12 +273,12 @@ def get_company_news(
     current_end_date = end_date
 
     while True:
-        url = f"https://api.financialdatasets.ai/news/?ticker={ticker}&end_date={current_end_date}"
+        url = "https://api.financialdatasets.ai/news/"
+        params = {"ticker": ticker, "end_date": current_end_date, "limit": limit}
         if start_date:
-            url += f"&start_date={start_date}"
-        url += f"&limit={limit}"
+            params["start_date"] = start_date
 
-        response = _make_api_request(url, headers)
+        response = _make_api_request(url, headers, params=params)
         if response.status_code != 200:
             break
 
@@ -326,8 +328,8 @@ def get_market_cap(
         if financial_api_key:
             headers["X-API-KEY"] = financial_api_key
 
-        url = f"https://api.financialdatasets.ai/company/facts/?ticker={ticker}"
-        response = _make_api_request(url, headers)
+        url = "https://api.financialdatasets.ai/company/facts/"
+        response = _make_api_request(url, headers, params={"ticker": ticker})
         if response.status_code != 200:
             print(f"Error fetching company facts: {ticker} - {response.status_code}")
             return None
