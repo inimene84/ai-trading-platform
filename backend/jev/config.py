@@ -147,6 +147,39 @@ def jev_pause_seconds() -> float:
     return max(0.0, env_float("JEV_PAUSE_MS", DEFAULT_PAUSE_MS) / 1000.0)
 
 
+# Phase 2 pipeline: ingest/eval may run in any mode. Execute HTTP is gated.
+JEV_EXECUTION_MODES = ("off", "shadow", "paper", "live")
+DEFAULT_JEV_EXECUTION_MODE = "off"
+JEV_LIVE_CONFIRM_VALUE = "OWNER_CONFIRMED"
+
+
+def jev_execution_mode() -> str:
+    """off|shadow|paper|live. Unknown values fail closed to off."""
+    raw = os.getenv("JEV_EXECUTION_MODE", DEFAULT_JEV_EXECUTION_MODE).strip().lower()
+    if raw not in JEV_EXECUTION_MODES:
+        return DEFAULT_JEV_EXECUTION_MODE
+    return raw
+
+
+def jev_trade_threshold() -> float:
+    return min(1.0, max(0.0, env_float("JEV_TRADE_THRESHOLD", 0.65)))
+
+
+def jev_paper_quantity() -> float:
+    qty = env_float("JEV_PAPER_QUANTITY", 0.001)
+    return qty if qty > 0 else 0.001
+
+
+def jev_live_execution_allowed() -> bool:
+    """Phase 2 never places live orders. A later PR + owner confirm is required."""
+    return False
+
+
+def jev_may_call_execute() -> bool:
+    """True only for the paper/sandbox path. off/shadow/live never call execute."""
+    return jev_execution_mode() == "paper"
+
+
 def estimate_cost_usd(input_tokens: int | None) -> float | None:
     if input_tokens is None:
         return None
