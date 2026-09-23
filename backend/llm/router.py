@@ -69,6 +69,8 @@ _KIE_GEMINI_SLUGS: dict[str, str] = {
     "gemini-3-pro-openai": "gemini-3-pro",
     "gemini-3-flash": "gemini-3-flash",
     "gemini-3-flash-openai": "gemini-3-flash-openai",
+    "gemini-3-6-flash": "gemini-3-6-flash-openai",
+    "gemini-3-6-flash-openai": "gemini-3-6-flash-openai",
 }
 _KIE_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9.-]{0,80}")
 _LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", os.getenv("PERSONA_LLM_BASE_URL", "http://litellm:4000/v1"))
@@ -292,10 +294,38 @@ _KIE_NATIVE_MODELS = {
     "gpt-5-6-sol",
     "gpt-5-5",
     "gpt-5-2",
+    "gpt-6-astra",
     "gemini-3-8-flash",
     "gemini-3-8-flash-openai",
+    "gemini-3-6-flash-openai",
     "claude-haiku-4-5",
+    "claude-sonnet-5",
+    "claude-opus-5",
+    "claude-fable-5",
+    "claude-fable-5-1",
+    "grok-4-6",
 }
+# Display / shorthand ids → documented Kie body `model` values.
+_KIE_MODEL_ALIASES = {
+    "astra": "gpt-6-astra",
+    "gpt-astra": "gpt-6-astra",
+    "gpt6-astra": "gpt-6-astra",
+    "gpt-6.astra": "gpt-6-astra",
+    "claude-fable-5.1": "claude-fable-5-1",
+    "fable-5.1": "claude-fable-5-1",
+    "fable-5-1": "claude-fable-5-1",
+    "fable-5": "claude-fable-5",
+    "claude-fable": "claude-fable-5",
+    "gpt-5.2": "gpt-5-2",
+}
+
+
+def canonical_kie_model(model: str) -> str:
+    """Normalize aliases (GPT Astra, Fable 5.1, …) to documented Kie ids."""
+    mid = (model or "").strip().lower().split("/")[-1]
+    if not mid:
+        return "gpt-5-6-luna"
+    return _KIE_MODEL_ALIASES.get(mid, mid)
 _DEAD_CATALOG_PREFIXES = ("kie/", "litellm/")
 
 # Per-provider read timeouts.
@@ -463,7 +493,8 @@ def _looks_like_kie_native_id(name: str) -> bool:
     lower = (name or "").strip().lower()
     if not lower or lower in _OMNIROUTE_PRESETS:
         return False
-    if lower in _KIE_NATIVE_MODELS:
+    canon = canonical_kie_model(lower)
+    if canon in _KIE_NATIVE_MODELS or lower in _KIE_MODEL_ALIASES:
         return True
     if lower.startswith(("claude", "grok", "gemini", "gpt-5-6", "gpt-5-5", "gpt-5-4", "gpt-6")):
         return True
@@ -526,7 +557,7 @@ def sanitize_provider_config(cfg: ModelConfig, task_type: str = "general") -> Op
 # ── Kie.ai family routing (docs.kie.ai Market / Chat Models) ──────────────────
 # Different model families use different host paths and payloads:
 #   Claude        POST /claude/v1/messages              Anthropic messages, stream:false
-#   GPT 5.6/5.5   POST /codex/v1/responses              Responses API (input_text)
+#   GPT 5.6/5.5/6 POST /codex/v1/responses              Responses API (input_text)
 #   GPT Codex     POST /api/v1/responses                Responses API
 #   Grok          POST /grok/v1/responses               Responses API
 #   Gemini/GPT5.2 POST /{slug}/v1/chat/completions      OpenAI chat, stream:false
@@ -562,7 +593,7 @@ def resolve_kie_route(model: str) -> KieRoute:
     ``model`` is the canonical id sent in the JSON body (matches the URL slug
     for OpenAI-compat families).
     """
-    mid = (model or "").strip().lower()
+    mid = canonical_kie_model(model)
     if not mid:
         return KieRoute("codex_responses", "/codex/v1/responses", "gpt-5-6-luna")
     if mid.startswith("claude"):
