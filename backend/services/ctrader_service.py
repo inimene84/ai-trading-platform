@@ -1984,7 +1984,8 @@ class CTraderService(BrokerService):
                 "broker": "ctrader:live",
             }
         except Exception as e:
-            return {"status": "error", "error": str(e), "position_id": position_id}
+            logger.error("cTrader close_position failed for %s: %s", position_id, e, exc_info=e)
+            return {"status": "error", "error": "cTrader close request failed", "position_id": position_id}
 
     def get_symbol_specification(self, symbol: str) -> Dict[str, Any]:
         """Returns standard specification parameters for a symbol (digits, pip position, lot size, etc.)."""

@@ -414,7 +414,8 @@ class JesseBridgeService:
                 "status": "rejected",
                 "synced": False,
                 "verdict": "REJECT",
-                "reason": f"promotion check failed: {exc}",
+                # Exception text stays in the log above, not in the API reply.
+                "reason": "promotion check failed (see backend logs)",
                 "failed_gate": "RESOLVE_PROMOTION",
                 "http_status": 409,
             }

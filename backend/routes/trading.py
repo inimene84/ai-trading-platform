@@ -38,6 +38,7 @@ from backend.services.trading_mode import (
     live_binance_orders_allowed,
 )
 from backend.services.unified_feed import unified_feed
+from backend.utils.safe_errors import log_exception, new_error_id
 from backend.services.unified_trading import (
     UnifiedTrading, UnifiedOrder, OrderSide, OrderType,
 )
@@ -855,6 +856,8 @@ _BINANCE_PROXY_ALLOWED = {
     "ticker/24hr", "ticker/price", "ticker/bookTicker",
     "klines", "depth", "exchangeInfo", "avgPrice",
 }
+# name -> the same server-owned string; lookups return our constant.
+_BINANCE_PROXY_ENDPOINTS = {name: name for name in _BINANCE_PROXY_ALLOWED}
 
 # Proxy protection state: short-TTL response cache, in-flight coalescing and a
 # global backoff window honoured after any 418/429 from Binance. All dashboard
@@ -1915,7 +1918,10 @@ async def close_ctrader_live_position(
         raise HTTPException(status_code=400, detail="cTrader is not connected")
     res = ctrader_broker.close_position(position_id, symbol=symbol, volume=volume)
     if res.get("status") == "error":
-        raise HTTPException(status_code=502, detail=res.get("error") or "cTrader close failed")
+        # Broker error text can carry raw exception detail; keep it in the logs.
+        error_id = new_error_id()
+        logger.error("cTrader close failed [error_id=%s] position=%s: %s", error_id, position_id, res.get("error"))
+        raise HTTPException(status_code=502, detail=f"cTrader close failed (error_id={error_id})")
     return {
         "success": True,
         "result": res,
@@ -2271,9 +2277,11 @@ async def binance_proxy(endpoint: str, request: Request):
     CORS. The backend reaches Binance reliably, so the frontend falls back to
     this passthrough. Only read-only public market-data endpoints are allowed.
     """
-    endpoint = endpoint.strip("/")
-    if endpoint not in _BINANCE_PROXY_ALLOWED:
-        return JSONResponse({"error": f"endpoint not allowed: {endpoint}"}, status_code=400)
+    # Resolve the path to one of our own constants. The upstream URL is then
+    # built only from server-side strings, never from the caller's input.
+    endpoint = _BINANCE_PROXY_ENDPOINTS.get(endpoint.strip("/"))
+    if endpoint is None:
+        return JSONResponse({"error": "endpoint not allowed"}, status_code=400)
 
     params = dict(request.query_params)
     key = endpoint + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
@@ -2329,7 +2337,8 @@ async def binance_proxy(endpoint: str, request: Request):
                         _binance_proxy_cache.pop(oldest, None)
                 fut.set_result((resp.status_code, body))
         except Exception as exc:
-            fut.set_result((502, {"error": f"binance proxy failed: {exc}"}))
+            error_id = log_exception(logger, "Binance proxy failed", exc)
+            fut.set_result((502, {"error": "binance proxy failed", "error_id": error_id}))
         finally:
             _binance_proxy_inflight.pop(key, None)
 

@@ -108,7 +108,7 @@ manually (or via cron) against the VPS.
 
 ## Other (non-vps) scripts in this directory
 
-`audit_poetry_lock.py`, `check_logs.sh`, `check_qdrant_logs.sh`,
+`check_logs.sh`, `check_qdrant_logs.sh`,
 `cleanup_stale_branches.sh`, `close_all_positions.py`,
 `connect_n8n_network.sh`, `create_qdrant_collection.sh`, `deploy_grafana.sh`,
 `deploy_kie_sonnet.sh`, `e2e_ai_workflow_test.py`, `ensure_influx_buckets.sh`,
