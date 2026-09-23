@@ -120,7 +120,7 @@ flowchart LR
 
 ## Live Dashboard
 
-Real captures from the production deployment: Binance Futures live, OmniRoute auto-select, system status OK (user name and balance blurred).
+Real captures from the production deployment: Binance Futures live, OmniRoute auto-select, system status OK (user name and balance blurred). The Markets and Forecast captures came from a browser session without backend auth, so their status chips read offline.
 
 | Live trading desk | Markets overview |
 |---|---|
