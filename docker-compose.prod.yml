@@ -57,6 +57,7 @@ services:
       JEV_PROVIDER: ${JEV_PROVIDER:-openrouter}
       JEV_OPENROUTER_MODEL: ${JEV_OPENROUTER_MODEL:-typesafe/jev-1.13}
       JEV_RESEARCH_CLASSIFY: ${JEV_RESEARCH_CLASSIFY:-false}
+      JEV_EXECUTION_MODE: ${JEV_EXECUTION_MODE:-off}
       # MiCA/EEA: trade USDC-margined perpetuals (USDT restricted for EU users).
       # 9 USDC pairs (DOT has no USDC perp). Override via TRADING_SYMBOLS in .env.
       TRADING_SYMBOLS: ${TRADING_SYMBOLS:-BTCUSDC,ETHUSDC,SOLUSDC,BNBUSDC,XRPUSDC,AVAXUSDC,LINKUSDC,UNIUSDC}

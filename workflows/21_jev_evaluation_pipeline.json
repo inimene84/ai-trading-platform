@@ -1,0 +1,144 @@
+{
+  "name": "21 - JEV Pipeline DRAFT (inactive, shadow/paper only)",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "draft": true,
+    "notes": "Do not import as a replacement for workflows 11 (Jev Ensemble) or 12 (Outcome Filler). Optional companion: POST stored scans/news into QuantumTrade /api/jev/ingest/* then orchestrate. Never places live orders. Keep active=false until an operator reviews it."
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## DRAFT — do not publish to production n8n without review\n\nThis file is an optional companion to **11 Jev Ensemble v2** and **12 Outcome Filler**.\nIt does **not** replace those flows and does **not** place live orders.\n\nBackend must have `JEV_EXECUTION_MODE=off` (default) or `shadow`.\nPaper execute is a later operator choice (`JEV_EXECUTION_MODE=paper`).\n**Do not set live without owner confirm.** This backend PR blocks live anyway.\n\nAuth: `X-API-Key` = `BACKEND_API_KEY` / `ADMIN_API_KEY` (same as `/api/jev`).\n",
+        "height": 360,
+        "width": 620,
+        "color": 3
+      },
+      "id": "sticky-draft-21",
+      "name": "Sticky: DRAFT inactive",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [240, 200]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "node-schedule-21",
+      "name": "Schedule (disabled until published)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 640]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.BACKEND_URL || 'http://ai-trading-backend:8000') }}/api/jev/pipeline/orchestrate?limit=1",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.BACKEND_API_KEY || $env.ADMIN_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{}",
+        "options": {}
+      },
+      "id": "node-orchestrate-21",
+      "name": "HTTP: Orchestrate JEV pipeline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 640]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "shadow-or-paper",
+              "leftValue": "={{ $json.would_have_executed || $json.executed }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if-21",
+      "name": "If shadow/paper intent",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [800, 640]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "text": "=JEV pipeline ({{ $json.execution_mode }})\nSymbol: {{ $json.symbol }}\nDecision: {{ $json.execution_decision }}\nExecuted: {{ $json.executed }}\nWould have: {{ $json.would_have_executed }}\nConfidence: {{ $json.confidence }}\nEval: {{ $json.eval_id }}"
+      },
+      "id": "node-telegram-21",
+      "name": "Telegram: advisory alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1080, 560]
+    }
+  ],
+  "connections": {
+    "Schedule (disabled until published)": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Orchestrate JEV pipeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: Orchestrate JEV pipeline": {
+      "main": [
+        [
+          {
+            "node": "If shadow/paper intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If shadow/paper intent": {
+      "main": [
+        [
+          {
+            "node": "Telegram: advisory alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  }
+}

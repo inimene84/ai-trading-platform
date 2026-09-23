@@ -401,3 +401,128 @@ class CalendarEvent(Base):
     )
 
 
+# ═══ Phase 2: JEV pipeline ingest / eval / shadow-paper attribution ═══
+# Additive tables only. Existing HedgeFund/Trade/Paper/ApiKey models are unchanged.
+# JSON (not Postgres JSONB) so SQLite hedge_fund.db and optional Postgres both work.
+
+
+class JevMarketScan(Base):
+    """n8n / scanner market snapshot stored for later JEV evaluation."""
+    __tablename__ = "jev_market_scans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    scan_timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    timeframe = Column(String(10), nullable=False, default="M5")
+    signal_direction = Column(String(10), nullable=True)
+    confidence = Column(Float, nullable=True)
+    signal_strength = Column(Float, nullable=True)
+    indicators = Column(JSON, nullable=False, default=dict)
+    price_data = Column(JSON, nullable=True)
+    volume_data = Column(JSON, nullable=True)
+    scan_source = Column(String(50), nullable=False, default="n8n_market_scanner")
+    status = Column(String(20), nullable=False, default="pending")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "timeframe", "scan_timestamp", name="uq_jev_market_scan"),
+        Index("idx_jev_market_scan_symbol_time", "symbol", "scan_timestamp"),
+    )
+
+
+class JevNewsSentimentLog(Base):
+    """n8n / news-macro sentiment row stored as JEV context."""
+    __tablename__ = "jev_news_sentiment_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    log_timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    source = Column(String(50), nullable=False, index=True)
+    headline = Column(Text, nullable=True)
+    url = Column(Text, nullable=True)
+    published_at = Column(DateTime(timezone=True), nullable=True)
+    sentiment_score = Column(Float, nullable=True)
+    sentiment_label = Column(String(20), nullable=True)
+    impact_rating = Column(String(10), nullable=True)
+    categories = Column(JSON, nullable=True)
+    entities = Column(JSON, nullable=True)
+    full_data = Column(JSON, nullable=True)
+    market_scan_id = Column(Integer, ForeignKey("jev_market_scans.id"), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_jev_news_source_time", "source", "log_timestamp"),
+    )
+
+
+class JevPipelineEval(Base):
+    """One JEV evaluation against stored market + news context."""
+    __tablename__ = "jev_pipeline_evals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    log_timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    timeframe = Column(String(10), nullable=False, default="1H")
+    jev_signal = Column(String(20), nullable=True)
+    jev_confidence = Column(Float, nullable=True)
+    jev_strength = Column(Float, nullable=True)
+    probabilities = Column(JSON, nullable=True)
+    checks = Column(JSON, nullable=True)
+    market_context = Column(JSON, nullable=True)
+    news_sentiment_context = Column(JSON, nullable=True)
+    combined_context = Column(JSON, nullable=True)
+    combined_evaluation = Column(JSON, nullable=True)
+    outcome_prediction = Column(String(20), nullable=True)
+    outcome_probability = Column(Float, nullable=True)
+    calibration_status = Column(String(30), nullable=True)
+    execution_mode = Column(String(10), nullable=False, default="off")
+    execution_decision = Column(String(40), nullable=False, default="logged_only")
+    would_have_executed = Column(Boolean, nullable=False, default=False)
+    executed = Column(Boolean, nullable=False, default=False)
+    execution_id = Column(Integer, nullable=True)
+    quantum_trade_id = Column(String(64), nullable=True)
+    source_scan_id = Column(Integer, ForeignKey("jev_market_scans.id"), nullable=True, index=True)
+    evaluated = Column(Boolean, nullable=False, default=False)
+    evaluated_at = Column(DateTime(timezone=True), nullable=True)
+    notes = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_jev_pipeline_eval_symbol_time", "symbol", "log_timestamp"),
+        Index("idx_jev_pipeline_eval_evaluated", "evaluated"),
+        Index("idx_jev_pipeline_eval_executed", "executed"),
+    )
+
+
+class JevPipelineTrade(Base):
+    """Shadow intent or paper fill attributed to a pipeline eval. Never a live venue fill."""
+    __tablename__ = "jev_pipeline_trades"
+
+    id = Column(Integer, primary_key=True, index=True)
+    trade_timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    symbol = Column(String(20), nullable=False, index=True)
+    direction = Column(String(10), nullable=False)
+    quantity = Column(Float, nullable=True)
+    entry_price = Column(Float, nullable=True)
+    exit_price = Column(Float, nullable=True)
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+    pnl = Column(Float, nullable=True)
+    pnl_pct = Column(Float, nullable=True)
+    realized_at = Column(DateTime(timezone=True), nullable=True)
+    source = Column(String(50), nullable=False, default="jev_pipeline")
+    mode = Column(String(20), nullable=False, default="shadow", index=True)
+    source_scan_id = Column(Integer, ForeignKey("jev_market_scans.id"), nullable=True, index=True)
+    jev_eval_id = Column(Integer, ForeignKey("jev_pipeline_evals.id"), nullable=True, index=True)
+    ledger_trade_id = Column(Integer, nullable=True)
+    outcome = Column(String(20), nullable=False, default="open")
+    outcome_reason = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        Index("idx_jev_pipeline_trade_symbol_time", "symbol", "trade_timestamp"),
+        Index("idx_jev_pipeline_trade_outcome", "outcome"),
+    )
+
+

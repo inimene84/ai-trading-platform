@@ -77,6 +77,10 @@ def test_jev_routes_are_sensitive():
     assert is_sensitive_request(_req("GET", "/api/jev/evaluate")) is True
     assert is_sensitive_request(_req("POST", "/jev/revalue")) is True
     assert is_sensitive_request(_req("POST", "/api/jev/revalue")) is True
+    assert is_sensitive_request(_req("POST", "/jev/ingest/market")) is True
+    assert is_sensitive_request(_req("POST", "/api/jev/pipeline/orchestrate")) is True
+    assert is_sensitive_request(_req("POST", "/data/collect-market")) is True
+    assert is_sensitive_request(_req("POST", "/api/data/collect-news")) is True
 
 
 def test_jesse_and_finmem_routes_are_sensitive():
