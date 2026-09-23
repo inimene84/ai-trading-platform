@@ -208,7 +208,12 @@ def test_live_partial_tp_idempotent_second_call():
 
 
 def test_min_edge_uses_trail_capture_not_full_tp():
-    """Large TP but tiny trail lock must fail the fee gate."""
+    """Tiny trail lock fails unless the full TP itself clears the fee multiple.
+
+    Live Binance admission (aa19593) allows the entry when full TP gross
+    covers the fee multiple even if the trail-lock estimate does not.
+    A TP that also misses the multiple is still rejected.
+    """
     cfg = RiskConfig(
         min_edge_fee_mult=2.5,
         taker_fee_rate=0.0004,
@@ -230,18 +235,24 @@ def test_min_edge_uses_trail_capture_not_full_tp():
         b["low"] = 99.0
 
     # expected_move = 0.1 * atr ≈ 0.2; gross on $100 notional qty=1 → $0.20
-    # roundtrip = 0.0012 * 100 = 0.12; required = 2.5 * 0.12 = 0.30 → fail
-    assert engine._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is False
+    # roundtrip = 0.0012 * 100 = 0.12; required = 2.5 * 0.12 = 0.30
+    # tp=120 → full TP gross $20 clears; the live gate allows.
+    assert engine._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is True
+    # tp=100.10 → full TP gross $0.10 also misses $0.30; reject.
+    assert engine._passes_min_edge("ETHUSDT", 100.0, 100.10, 1.0, bars) is False
 
 
 def test_min_edge_blends_partial_tp_capture():
-    """With partial TP on, captured ATR is 50% × 1.0 + 50% × trail lock."""
+    """Partial-TP blend is the stricter capture, and a clearing full TP still allows.
+
+    ATR ≈ 2.0. Blend 1.1 → $2.20; trail-only 1.2 → $2.40.
+    min_edge_fee_mult=19 → required $2.28. Full TP at 120 clears that, so
+    both geometries pass. A TP gross under $2.28 rejects both.
+    """
     bars = _bars(30, base=100.0)
     for b in bars:
         b["high"] = 101.0
         b["low"] = 99.0
-    # ATR ≈ 2.0. Blend 1.1 → $2.20; trail-only 1.2 → $2.40.
-    # min_edge_fee_mult=19 → required $2.28, so blend fails and trail-only would pass.
     blended = RiskConfig(
         min_edge_fee_mult=19.0,
         taker_fee_rate=0.0004,
@@ -262,8 +273,45 @@ def test_min_edge_blends_partial_tp_capture():
         trail_atr_mult=0.8,
         partial_tp_enabled=False,
     )
-    assert DecisionEngine(blended)._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is False
+    assert DecisionEngine(blended)._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is True
     assert DecisionEngine(trail_only)._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, bars) is True
+    assert DecisionEngine(blended)._passes_min_edge("ETHUSDT", 100.0, 102.0, 1.0, bars) is False
+    assert DecisionEngine(trail_only)._passes_min_edge("ETHUSDT", 100.0, 102.0, 1.0, bars) is False
+
+
+def test_min_edge_fail_closed_in_live_on_error(monkeypatch):
+    cfg = RiskConfig(
+        min_edge_fee_mult=2.5,
+        taker_fee_rate=0.0004,
+        slippage_rate=0.0002,
+        trailing_stop_enabled=True,
+        trail_activation_atr=1.0,
+        trail_atr_mult=0.9,
+    )
+    engine = DecisionEngine(cfg)
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("DRY_RUN_ALL", "false")
+    monkeypatch.setenv("PAPER_TRADING", "false")
+
+    with patch.object(engine, "_passes_min_edge", wraps=engine._passes_min_edge):
+        with patch(
+            "backend.services.decision_engine.atr_from_bars",
+            side_effect=RuntimeError("atr boom"),
+        ):
+            assert engine._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, []) is False
+
+
+def test_min_edge_fail_open_in_paper_on_error(monkeypatch):
+    cfg = RiskConfig(min_edge_fee_mult=2.5, trailing_stop_enabled=True)
+    engine = DecisionEngine(cfg)
+    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("PAPER_TRADING", "true")
+
+    with patch(
+        "backend.services.decision_engine.atr_from_bars",
+        side_effect=RuntimeError("atr boom"),
+    ):
+        assert engine._passes_min_edge("ETHUSDT", 100.0, 120.0, 1.0, []) is True
 
 
 def test_min_edge_full_tp_when_trailing_disabled():

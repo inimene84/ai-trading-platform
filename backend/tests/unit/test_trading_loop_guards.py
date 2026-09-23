@@ -189,6 +189,34 @@ def test_filter_symbols_drops_unlisted_futures_for_new_entries():
     assert result == ["AVAXUSDT"]
 
 
+def test_filter_symbols_fails_closed_on_empty_volume_snapshot():
+    """Empty ticker map must drop new-entry candidates; open legs stay."""
+    loop = _loop(_fake_risk_config(min_24h_quote_volume_usdt=10_000_000))
+
+    with patch("backend.services.trading_loop.SessionLocal", return_value=_no_open_positions_db()), \
+         patch("backend.services.trading_loop.binance_market_data.get_all_tickers_24h",
+               return_value=[]):
+        result = _filter_symbols_sync(loop, ["BTCUSDT", "ETHUSDT"])
+
+    assert result == []
+
+
+def test_filter_symbols_empty_snapshot_keeps_open_legs_only():
+    loop = _loop(_fake_risk_config(min_24h_quote_volume_usdt=10_000_000))
+
+    open_db = MagicMock()
+    oq = MagicMock()
+    oq.filter.return_value.distinct.return_value.all.return_value = [("ETHUSDT",)]
+    open_db.query.return_value = oq
+
+    with patch("backend.services.trading_loop.SessionLocal", return_value=open_db), \
+         patch("backend.services.trading_loop.binance_market_data.get_all_tickers_24h",
+               return_value=[]):
+        result = _filter_symbols_sync(loop, ["BTCUSDT", "ETHUSDT"])
+
+    assert result == ["ETHUSDT"]
+
+
 def test_filter_symbols_fails_open_on_volume_error():
     """If the 24h volume snapshot raises, keep ALL candidates (fail-open)
     rather than halting trading."""

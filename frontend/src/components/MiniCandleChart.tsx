@@ -20,9 +20,10 @@ export interface MiniCandleChartProps {
   onQuickTrade?: (symbol: string, side: 'buy' | 'sell') => void;
 }
 
-const CHART_H = 72;
-const CHART_W = 180;
-const CANDLE_COUNT = 30;
+const CHART_H = 96;
+const PRICE_H = 74;
+const CANDLE_COUNT = 48;
+const SLOT = 10;
 
 function cn(...classes: (string | boolean | undefined | null)[]): string {
   return classes.filter(Boolean).join(' ');
@@ -125,44 +126,72 @@ export function MiniCandleChart({
     const minP = Math.min(...prices);
     const maxP = Math.max(...prices);
     const range = maxP - minP || 1;
-    const candleW = Math.max(2, Math.floor(CHART_W / candles.length) - 1);
-    const toY = (p: number) => CHART_H - ((p - minP) / range) * CHART_H;
+    const pad = 4;
+    const toY = (p: number) => pad + (PRICE_H - pad * 2) * (1 - (p - minP) / range);
+    const maxVolume = Math.max(...candles.map((c) => c.volume), 1);
+    const volumeTop = PRICE_H + 4;
+    const volumeHeight = CHART_H - volumeTop - 2;
+    const last = candles[candles.length - 1];
+    const lastY = last ? toY(last.close) : null;
 
-    return candles.map((c, i) => {
-      const x = i * (CHART_W / candles.length);
-      const cx = x + candleW / 2;
-      const isGreen = c.close >= c.open;
-      const color = isGreen ? '#10b981' : '#f43f5e';
-      const bodyTop = toY(Math.max(c.open, c.close));
-      const bodyBot = toY(Math.min(c.open, c.close));
-      const bodyH = Math.max(1, bodyBot - bodyTop);
-      const wickTop = toY(c.high);
-      const wickBot = toY(c.low);
-
-      return (
-        <g key={i}>
-          {/* Wick */}
+    return (
+      <g>
+        {lastY !== null && (
           <line
-            x1={cx}
-            y1={wickTop}
-            x2={cx}
-            y2={wickBot}
-            stroke={color}
+            x1={0}
+            y1={lastY}
+            x2={candles.length * SLOT}
+            y2={lastY}
+            stroke="#334155"
             strokeWidth={1}
-            opacity={0.7}
+            strokeDasharray="2 2"
+            vectorEffect="non-scaling-stroke"
           />
-          {/* Body */}
-          <rect
-            x={x}
-            y={bodyTop}
-            width={candleW}
-            height={bodyH}
-            fill={color}
-            opacity={0.9}
-          />
-        </g>
-      );
-    });
+        )}
+        {candles.map((c, i) => {
+          const x = i * SLOT;
+          const bodyW = 6;
+          const cx = x + SLOT / 2;
+          const side = c.close > c.open ? 'up' : c.close < c.open ? 'down' : 'flat';
+          const color = side === 'up' ? '#089981' : side === 'down' ? '#f23645' : '#94a3b8';
+          const bodyTop = toY(Math.max(c.open, c.close));
+          const bodyBot = toY(Math.min(c.open, c.close));
+          const bodyH = Math.max(1.2, bodyBot - bodyTop);
+          const volH = Math.max(1, (c.volume / maxVolume) * volumeHeight);
+          return (
+            <g key={`${c.time}-${i}`}>
+              <line
+                x1={cx}
+                y1={toY(c.high)}
+                x2={cx}
+                y2={toY(c.low)}
+                stroke={color}
+                strokeWidth={1}
+                vectorEffect="non-scaling-stroke"
+              />
+              <rect
+                x={x + (SLOT - bodyW) / 2}
+                y={bodyTop}
+                width={bodyW}
+                height={bodyH}
+                fill={color}
+                stroke={color}
+                strokeWidth={1}
+                vectorEffect="non-scaling-stroke"
+              />
+              <rect
+                x={x + 2}
+                y={volumeTop + (volumeHeight - volH)}
+                width={6}
+                height={volH}
+                fill={color}
+                opacity={0.45}
+              />
+            </g>
+          );
+        })}
+      </g>
+    );
   }
 
   // ── Signal badge colors ───────────────────────────────────────────────────
@@ -240,11 +269,12 @@ export function MiniCandleChart({
           </div>
         ) : (
           <svg
-            width={CHART_W}
-            height={CHART_H}
             className="w-full"
-            viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+            height={CHART_H}
+            viewBox={`0 0 ${Math.max(candles.length, 1) * SLOT} ${CHART_H}`}
             preserveAspectRatio="none"
+            role="img"
+            aria-label={`${displayName} candlestick chart`}
           >
             {renderCandles()}
           </svg>

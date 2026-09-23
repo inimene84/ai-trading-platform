@@ -20,6 +20,7 @@ from backend.services.ledger import (
     binance_position_key,
     has_live_venue_id,
     is_binance_paper_fill,
+    is_binance_position_key,
 )
 from backend.services.decision_engine import atr_from_bars
 from backend.services.multi_asset_bars import classify_symbol
@@ -266,38 +267,76 @@ class BrokerPositionSyncService:
                 .all()
             )
             # An empty exchange snapshot after raise_on_error succeeded means
-            # the book is flat. Live rows with venue IDs stay open so a
+            # the book is flat. Rows with numeric venue IDs stay open so a
             # permissions/testnet glitch cannot cancel protective orders.
-            # Paper fills and rows with no venue ID are ghosts — quarantine
-            # them so risk/portfolio never manage phantom size.
+            # Synthetic hedge-mode keys (BTCUSDT:LONG) and paper rows are
+            # closed/quarantined so phantom size never blocks new entries.
             if db_trades and not broker_raw:
                 logger.error(
                     "Broker returned an empty positions snapshot while DB has "
-                    f"{len(db_trades)} open trade row(s); refusing live bulk close/"
-                    "order cancellation, quarantining unverified/paper rows"
+                    f"{len(db_trades)} open trade row(s); closing synthetic-key "
+                    "ghosts, quarantining paper/unverified rows, refusing bulk "
+                    "close for numeric venue IDs"
                 )
                 quarantined = 0
+                closed = 0
                 now = datetime.now(timezone.utc)
+                exit_price_cache: dict = {}
                 for t in db_trades:
-                    if has_live_venue_id(t) and not is_binance_paper_fill(t):
+                    pid = getattr(t, "broker_position_id", None)
+                    if is_binance_paper_fill(t) or (
+                        not is_binance_position_key(pid) and not has_live_venue_id(t)
+                    ):
+                        t.status = ORPHAN_STATUS
+                        t.closed_at = now
+                        t.exit_price = None
+                        t.pnl = None
+                        t.notes = (t.notes or "") + (
+                            " | Quarantined: absent from live Binance book "
+                            "(paper/unverified ledger row)"
+                        )
+                        remove_closed_pyramid_layer(pyramid_layers, t)
+                        sl_cooldown[t.symbol] = now
+                        quarantined += 1
+                        updated += 1
                         continue
-                    t.status = ORPHAN_STATUS
-                    t.closed_at = now
-                    t.exit_price = None
-                    t.pnl = None
-                    t.notes = (t.notes or "") + (
-                        " | Quarantined: absent from live Binance book "
-                        "(paper/unverified ledger row)"
+                    if has_live_venue_id(t) and not is_binance_position_key(pid):
+                        continue
+                    if not is_binance_position_key(pid):
+                        continue
+                    logger.info(
+                        f"  [ {t.symbol} ] Synthetic-key ghost absent from flat "
+                        "exchange book — marking closed in DB"
                     )
+                    if t.symbol not in exit_price_cache:
+                        exit_price_cache[t.symbol] = await asyncio.get_event_loop().run_in_executor(
+                            None, broker.get_exit_price, t.symbol
+                        )
+                    exit_px = exit_price_cache[t.symbol]
+                    t.status = "closed"
+                    t.closed_at = now
+                    if exit_px and t.entry_price and t.quantity and is_plausible_exit_price(t.entry_price, exit_px):
+                        t.exit_price = exit_px
+                        if str(t.direction).upper() == "BUY":
+                            t.pnl = round((exit_px - t.entry_price) * t.quantity, 4)
+                        else:
+                            t.pnl = round((t.entry_price - exit_px) * t.quantity, 4)
+                        t.notes = (t.notes or "") + " | Closed externally (flat book sync)"
+                    else:
+                        t.exit_price = None
+                        t.pnl = None
+                        t.notes = (t.notes or "") + (
+                            f" | Closed externally (flat book sync; exit unavailable raw={exit_px})"
+                        )
                     remove_closed_pyramid_layer(pyramid_layers, t)
                     sl_cooldown[t.symbol] = now
-                    quarantined += 1
+                    closed += 1
                     updated += 1
-                if quarantined:
+                if updated:
                     db.commit()
                     logger.warning(
-                        f"Broker sync: quarantined {quarantined} ghost Binance row(s) "
-                        "on empty exchange snapshot"
+                        f"Broker sync on empty snapshot: closed={closed}, "
+                        f"quarantined={quarantined} ghost Binance row(s)"
                     )
                 return updated
 

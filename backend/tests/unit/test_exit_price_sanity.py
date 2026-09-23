@@ -123,6 +123,28 @@ async def test_sync_refuses_bulk_close_on_empty_exchange_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_empty_snapshot_closes_synthetic_binance_key_ghosts():
+    """Flat exchange book closes rows keyed as BTCUSDT:LONG (our fill path)."""
+    trade = _trade(
+        broker_position_id="BTCUSDC:SHORT",
+        broker="binance_futures",
+        mode="live",
+        binance_order_id=None,
+    )
+    db = _db_with([trade])
+    broker = _broker(exit_price=76500.0)
+    broker.get_positions.return_value = []
+
+    updated = await BrokerPositionSyncService.sync_positions(db, broker, {}, {})
+
+    assert updated == 1
+    assert trade.status == "closed"
+    assert "flat book sync" in trade.notes
+    broker.cancel_all_orders.assert_not_called()
+    db.commit.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_empty_snapshot_quarantines_paper_ghost_rows():
     trade = _trade(
         binance_order_id="paper_000007",

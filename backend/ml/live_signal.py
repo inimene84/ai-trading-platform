@@ -9,7 +9,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from backend.ml.geometry import DEFAULT_GATES, DEFAULT_LIVE_SIGNAL
+from backend.ml.geometry import (
+    DEFAULT_GATES,
+    DEFAULT_LIVE_SIGNAL,
+    DEFAULT_SLIPPAGE_RATE,
+    DEFAULT_TAKER_FEE_RATE,
+    HOUSE_SL_ATR_MULT,
+)
+
+# Jesse /predict does not ship ATR; use a conservative notional proxy for EV→bps.
+_DEFAULT_ATR_NOTIONAL_FRAC = 0.015
 
 
 @dataclass
@@ -30,6 +39,90 @@ def _float_or_none(value: Any) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def expected_value_r_to_costed_edge_bps(
+    ev_r: float,
+    *,
+    sl_atr_mult: float = HOUSE_SL_ATR_MULT,
+    atr_notional_frac: float = _DEFAULT_ATR_NOTIONAL_FRAC,
+) -> float:
+    """Convert Jesse decision EV (R-multiples) to basis points after round-trip costs."""
+    round_trip_bps = 2.0 * (DEFAULT_TAKER_FEE_RATE + DEFAULT_SLIPPAGE_RATE) * 10_000.0
+    gross_bps = float(ev_r) * float(sl_atr_mult) * float(atr_notional_frac) * 10_000.0
+    return gross_bps - round_trip_bps
+
+
+def _jesse_is_gated_or_neutral(payload: Mapping[str, Any]) -> bool:
+    """True when Jesse refused a directional trade or the final signal is NEUTRAL."""
+    if payload.get("gated"):
+        return True
+    return str(payload.get("signal") or "").upper() == "NEUTRAL"
+
+
+def map_jesse_prediction_to_live_telemetry(
+    payload: Mapping[str, Any],
+) -> dict[str, Optional[float]]:
+    """Map Jesse /predict fields to QTP four-number contract names.
+
+    Jesse serves ``conformal_margin`` and ``decision.expected_value_r``; the
+    promotion contract expects ``conformal_width`` and ``costed_edge_bps``.
+
+    Heuristics (when the final signal is BUY/SELL and not gated):
+      - ``p_win``: directional probability for the signaled side
+      - ``conformal_width``: max(0, entropy - conformal_margin)
+      - ``costed_edge_bps``: expected_value_r converted to bps minus round-trip costs
+
+    Gated or NEUTRAL payloads omit all three so the four-number check fails closed.
+    """
+    if _jesse_is_gated_or_neutral(payload):
+        return {"p_win": None, "conformal_width": None, "costed_edge_bps": None}
+
+    side = str(payload.get("signal") or "").upper()
+    probs = payload.get("probabilities") if isinstance(payload.get("probabilities"), Mapping) else {}
+
+    p_win: Optional[float] = None
+    if side == "BUY":
+        p_win = _float_or_none(probs.get("bullish")) or _float_or_none(payload.get("confidence"))
+    elif side == "SELL":
+        p_win = _float_or_none(probs.get("bearish")) or _float_or_none(payload.get("confidence"))
+
+    margin = _float_or_none(payload.get("conformal_margin"))
+    entropy = _float_or_none(payload.get("entropy"))
+    conformal_width: Optional[float] = None
+    if margin is not None and entropy is not None:
+        conformal_width = max(0.0, entropy - margin)
+    elif margin is not None:
+        conformal_width = max(0.0, 1.0 - margin)
+    elif entropy is not None:
+        conformal_width = float(entropy)
+
+    decision = payload.get("decision") if isinstance(payload.get("decision"), Mapping) else {}
+    kelly = payload.get("kelly") if isinstance(payload.get("kelly"), Mapping) else {}
+    ev_r = _float_or_none(decision.get("expected_value_r"))
+    if ev_r is None:
+        ev_r = _float_or_none(kelly.get("expected_value_r"))
+
+    costed_edge_bps: Optional[float] = None
+    if ev_r is not None:
+        barrier = payload.get("barrier_geometry") if isinstance(payload.get("barrier_geometry"), Mapping) else {}
+        sl_mult = _float_or_none(barrier.get("sl_atr_mult")) or HOUSE_SL_ATR_MULT
+        costed_edge_bps = expected_value_r_to_costed_edge_bps(ev_r, sl_atr_mult=sl_mult)
+
+    return {
+        "p_win": p_win,
+        "conformal_width": conformal_width,
+        "costed_edge_bps": costed_edge_bps,
+    }
+
+
+def attach_jesse_live_telemetry(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fill QTP four-number fields on a Jesse /predict payload when absent."""
+    mapped = map_jesse_prediction_to_live_telemetry(payload)
+    for key, value in mapped.items():
+        if payload.get(key) is None and value is not None:
+            payload[key] = value
+    return payload
 
 
 def evaluate_live_four_numbers(

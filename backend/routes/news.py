@@ -7,6 +7,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional, List
 
+from backend.services.influxdb_sentiment_reader import sentiment_reader
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/news", tags=["news"])
@@ -410,6 +412,43 @@ async def get_market_sentiment():
     }
     _set_cache("market_sentiment", response)
     return response
+
+
+
+# ─── GET /api/news/sentiment — n8n WF4 reads latest Influx scores ─────────────
+@router.get("/sentiment")
+async def get_news_sentiment(lookback_minutes: int = 180):
+    """Latest per-symbol sentiment for n8n enrichment (WF4) and dashboards."""
+    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    output = []
+    data = []
+    for symbol in symbols:
+        try:
+            row = sentiment_reader.get_sentiment(symbol, lookback_minutes=lookback_minutes) or {}
+        except Exception as exc:
+            logger.warning(f"Sentiment read failed for {symbol}: {exc}")
+            row = {}
+        direction = str(row.get("direction") or "NEUTRAL").upper()
+        if direction == "BUY":
+            direction = "BULLISH"
+        elif direction == "SELL":
+            direction = "BEARISH"
+        item = {
+            "symbol": symbol,
+            "sentiment_score": float(row.get("sentiment_score") or 0.0),
+            "direction": direction,
+            "confidence": float(row.get("confidence") or 0.0),
+            "price_change_pct": 0.0,
+        }
+        data.append(item)
+        output.append({"json": item})
+    return {
+        "status": "ok",
+        "count": len(data),
+        "data": data,
+        "output": output,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ─── POST /api/news/sentiment - n8n pushes here ───────────────────────────────

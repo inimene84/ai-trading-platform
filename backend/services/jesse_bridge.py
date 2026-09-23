@@ -16,6 +16,7 @@ import httpx
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional
 
+from backend.ml.live_signal import attach_jesse_live_telemetry
 from backend.ml.promotion_service import resolve_promotion
 from backend.services.jesse_ml_gates import (
     STRATEGY_PT_ATR,
@@ -76,6 +77,33 @@ def live_sync_contract(risk_config: Any = None) -> Dict[str, Any]:
 # an outage.
 _JESSE_ML_NO_ARTIFACT = "no model artifact found"
 _JESSE_ML_PROMOTION_FAILED = "promotion gate failed"
+_DEFAULT_ML_PREDICT_TIMEOUT = 20.0
+_MAX_ML_PREDICT_TIMEOUT = 30.0
+
+
+def configured_ml_fallback_model_type() -> Optional[str]:
+    """Secondary Jesse ML type when the primary artifact is missing.
+
+    Defaults to lstm so ETH/SOL 1h can use promoted B200 models after
+    LightGBM was quarantined for wrong barrier geometry. Set
+    JESSE_ML_FALLBACK_MODEL_TYPE=none to disable.
+    """
+    raw = (os.getenv("JESSE_ML_FALLBACK_MODEL_TYPE", "lstm") or "").strip().lower()
+    if raw in {"", "none", "false", "off", "0"}:
+        return None
+    return raw
+
+
+def ml_predict_timeout_seconds() -> float:
+    """HTTP timeout for Jesse /predict (CPU LSTM cold-start needs >5s)."""
+    raw = os.getenv("JESSE_ML_PREDICT_TIMEOUT", str(_DEFAULT_ML_PREDICT_TIMEOUT))
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_ML_PREDICT_TIMEOUT
+    if timeout != timeout:  # NaN
+        return _DEFAULT_ML_PREDICT_TIMEOUT
+    return min(_MAX_ML_PREDICT_TIMEOUT, max(1.0, timeout))
 
 
 def is_jesse_ml_model_gap(error: Optional[str]) -> bool:
@@ -419,17 +447,16 @@ class JesseBridgeService:
             "trail_atr_mult": cfg.trail_atr_mult,
         }
 
-    async def get_ml_prediction(
+    async def _predict_once(
         self,
-        symbol: str = "BTC-USDT",
-        timeframe: str = "1h",
-        model_type: str = "lightgbm",
-        threshold: float = 0.45,
+        symbol: str,
+        timeframe: str,
+        model_type: str,
+        threshold: float,
     ) -> Dict[str, Any]:
-        """Fetch ultra-low-latency real-time ML direction prediction and probabilities."""
         base_ml = await self._resolve_ml_url()
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=ml_predict_timeout_seconds()) as client:
                 res = await client.post(
                     f"{base_ml}/predict",
                     json={
@@ -443,6 +470,8 @@ class JesseBridgeService:
                     payload = res.json()
                     if isinstance(payload, dict):
                         payload = annotate_ml_prediction(payload)
+                        if payload.get("status") == "success":
+                            attach_jesse_live_telemetry(payload)
                         if payload.get("status") != "success":
                             err = str(payload.get("error") or "")
                             if is_jesse_ml_model_gap(err):
@@ -457,6 +486,38 @@ class JesseBridgeService:
         except Exception as e:
             logger.error(f"Failed to query ML prediction endpoint: {e}")
             return {"status": "error", "error": str(e)}
+
+    async def get_ml_prediction(
+        self,
+        symbol: str = "BTC-USDT",
+        timeframe: str = "1h",
+        model_type: str = "lightgbm",
+        threshold: float = 0.45,
+    ) -> Dict[str, Any]:
+        """Fetch ML direction; retry a promoted LSTM when LightGBM is absent."""
+        payload = await self._predict_once(symbol, timeframe, model_type, threshold)
+        fallback = configured_ml_fallback_model_type()
+        if (
+            payload.get("status") == "no_model"
+            and fallback
+            and model_type != fallback
+        ):
+            logger.info(
+                "Jesse ML %s %s has no %s artifact; retrying %s",
+                symbol,
+                timeframe,
+                model_type,
+                fallback,
+            )
+            fallback_payload = await self._predict_once(symbol, timeframe, fallback, threshold)
+            if fallback_payload.get("status") == "success":
+                fallback_payload["resolved_via"] = "fallback"
+                fallback_payload["primary_model_type"] = model_type
+                fallback_payload["primary_error"] = payload.get("error")
+                return fallback_payload
+            payload["fallback_model_type"] = fallback
+            payload["fallback_error"] = fallback_payload.get("error")
+        return payload
 
     async def get_meta_prediction(
         self,

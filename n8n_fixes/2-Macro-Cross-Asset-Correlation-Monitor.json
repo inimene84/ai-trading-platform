@@ -1,0 +1,558 @@
+[
+  {
+    "updatedAt": "2026-09-16T23:54:54.212Z",
+    "createdAt": "2026-09-16T23:07:02.897Z",
+    "id": "cmuz2YLmkgeXrLuc",
+    "name": "2. Macro Cross-Asset Correlation Monitor",
+    "description": null,
+    "active": false,
+    "isArchived": false,
+    "nodes": [
+      {
+        "parameters": {
+          "content": "## Agent Zero enrichment (research-only)\n\n- No order / trade-execution nodes\n- Workflow **03** (`2Wo50hT9z1xqjBXT`) left untouched\n- Backend writes use `X-API-Key: {{ $env.BACKEND_API_KEY }}`\n- Keep **inactive** until backend `/api/market-data/*` routes are deployed\n- Manual webhook paths: `qt-agentzero-*-manual` for smoke only",
+          "height": 320,
+          "width": 380,
+          "color": 5
+        },
+        "id": "e986c8e7-c6f3-4fa9-a71c-2cb958bb42bd",
+        "name": "Agent Zero Note",
+        "type": "n8n-nodes-base.stickyNote",
+        "typeVersion": 1,
+        "position": [
+          16,
+          -64
+        ]
+      },
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "qt-agentzero-macro-manual",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "id": "e20e3a4a-2890-439e-809f-0571954c462d",
+        "name": "Manual Test Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          160,
+          96
+        ],
+        "webhookId": "6854e22d-d975-4801-abce-e935f8d5f8aa"
+      },
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "hours"
+              }
+            ]
+          }
+        },
+        "id": "71500df8-d0b2-4a9b-9a61-87a0a3bb61ba",
+        "name": "Schedule Every Hour",
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.2,
+        "position": [
+          160,
+          768
+        ]
+      },
+      {
+        "parameters": {
+          "url": "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "interval",
+                "value": "1d"
+              },
+              {
+                "name": "range",
+                "value": "5d"
+              }
+            ]
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "User-Agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+              },
+              {
+                "name": "Accept",
+                "value": "application/json,text/plain,*/*"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "id": "6013d267-6e65-46ef-81eb-3ca2b27a1ba5",
+        "name": "Fetch BTC Price",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          384,
+          48
+        ],
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "url": "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "interval",
+                "value": "1d"
+              },
+              {
+                "name": "range",
+                "value": "5d"
+              }
+            ]
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "User-Agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+              },
+              {
+                "name": "Accept",
+                "value": "application/json,text/plain,*/*"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "id": "22a5735c-997d-45c6-acc7-86f9ddc3d45e",
+        "name": "Fetch S&P500 Price",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          384,
+          240
+        ],
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "url": "https://query1.finance.yahoo.com/v8/finance/chart/GC%3DF",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "interval",
+                "value": "1d"
+              },
+              {
+                "name": "range",
+                "value": "5d"
+              }
+            ]
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "User-Agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+              },
+              {
+                "name": "Accept",
+                "value": "application/json,text/plain,*/*"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "id": "2e37993e-8dcd-405f-bb5c-9cb9e60a8148",
+        "name": "Fetch Gold Price",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          384,
+          432
+        ],
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "url": "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "interval",
+                "value": "1d"
+              },
+              {
+                "name": "range",
+                "value": "5d"
+              }
+            ]
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "User-Agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+              },
+              {
+                "name": "Accept",
+                "value": "application/json,text/plain,*/*"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "id": "acc3b40b-5b77-4918-93b6-d40e66e9f94a",
+        "name": "Fetch DXY (Dollar Index)",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          384,
+          624
+        ],
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "url": "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "interval",
+                "value": "1d"
+              },
+              {
+                "name": "range",
+                "value": "5d"
+              }
+            ]
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "User-Agent",
+                "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+              },
+              {
+                "name": "Accept",
+                "value": "application/json,text/plain,*/*"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "id": "e78ffe8a-ee25-4990-ae21-af1650334977",
+        "name": "Fetch VIX",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          384,
+          816
+        ],
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "jsCode": "// Calculate correlations and macro regime (Yahoo Finance fan-in)\nfunction priceFrom(nodeName) {\n  try {\n    const j = $(nodeName).first()?.json;\n    return j?.chart?.result?.[0]?.meta?.regularMarketPrice || 0;\n  } catch (e) {\n    return 0;\n  }\n}\n\nconst assets = {\n  BTC: priceFrom('Fetch BTC Price'),\n  SP500: priceFrom('Fetch S&P500 Price'),\n  GOLD: priceFrom('Fetch Gold Price'),\n  DXY: priceFrom('Fetch DXY (Dollar Index)'),\n  VIX: priceFrom('Fetch VIX'),\n};\n\nlet riskRegime = 'NEUTRAL';\nif (assets.VIX > 25) {\n  riskRegime = 'RISK_OFF';\n} else if (assets.VIX > 0 && assets.VIX < 15) {\n  riskRegime = 'RISK_ON';\n}\n\nlet dollarImpact = 'NEUTRAL';\nif (assets.DXY > 105) {\n  dollarImpact = 'STRONG_DOLLAR_BEARISH_FOR_BTC';\n} else if (assets.DXY > 0 && assets.DXY < 95) {\n  dollarImpact = 'WEAK_DOLLAR_BULLISH_FOR_BTC';\n}\n\nconst goldBtcRatio = assets.GOLD > 0 && assets.BTC > 0 ? assets.GOLD / assets.BTC : 0;\n\nreturn [{\n  json: {\n    id: `macro_${Date.now()}`,\n    source: 'macro-correlation',\n    btc_price: Number(assets.BTC.toFixed(2)),\n    sp500_price: Number(assets.SP500.toFixed(2)),\n    gold_price: Number(assets.GOLD.toFixed(2)),\n    dxy: Number(assets.DXY.toFixed(2)),\n    vix: Number(assets.VIX.toFixed(2)),\n    risk_regime: riskRegime,\n    dollar_impact: dollarImpact,\n    gold_btc_ratio: Number(goldBtcRatio.toFixed(6)),\n    correlation_btc_sp500: 0,\n    correlation_btc_gold: 0,\n    correlation_btc_dxy: 0,\n    published_at: Math.floor(Date.now() / 1000),\n    time_horizon: 'short',\n    topics: 'macro,correlation,risk-regime',\n  },\n}];\n"
+        },
+        "id": "a62ba70c-d3cf-497f-a866-44d1bc6f1b3a",
+        "name": "Process Macro Data",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          832,
+          432
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://ai-trading-backend:8000/api/market-data/macro",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-API-Key",
+                "value": "={{ $env.BACKEND_API_KEY }}"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "Accept",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify($json) }}",
+          "options": {
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            },
+            "timeout": 30000
+          }
+        },
+        "id": "3a593f79-7994-4ea6-9bd9-1ceeb362f94a",
+        "name": "Save Macro Data to Backend",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          1056,
+          432
+        ],
+        "continueOnFail": true
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { ok: true, workflow: $workflow.name, items: $('Process Macro Data').all().map(i => i.json), backend: $input.all().map(i => i.json) } }}",
+          "options": {}
+        },
+        "id": "049a6d66-2ad0-491f-bce9-b7a4dd914997",
+        "name": "Respond to Webhook",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          1280,
+          432
+        ]
+      },
+      {
+        "parameters": {
+          "numberInputs": 5
+        },
+        "id": "7206bfc2-fbf6-4aba-9364-a3b5f7d29aab",
+        "name": "Wait All Yahoo",
+        "type": "n8n-nodes-base.merge",
+        "typeVersion": 3.2,
+        "position": [
+          608,
+          384
+        ]
+      }
+    ],
+    "connections": {
+      "Manual Test Webhook": {
+        "main": [
+          [
+            {
+              "node": "Fetch BTC Price",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch S&P500 Price",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch Gold Price",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch DXY (Dollar Index)",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch VIX",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Schedule Every Hour": {
+        "main": [
+          [
+            {
+              "node": "Fetch BTC Price",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch S&P500 Price",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch Gold Price",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch DXY (Dollar Index)",
+              "type": "main",
+              "index": 0
+            },
+            {
+              "node": "Fetch VIX",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch BTC Price": {
+        "main": [
+          [
+            {
+              "node": "Wait All Yahoo",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Fetch S&P500 Price": {
+        "main": [
+          [
+            {
+              "node": "Wait All Yahoo",
+              "type": "main",
+              "index": 1
+            }
+          ]
+        ]
+      },
+      "Fetch Gold Price": {
+        "main": [
+          [
+            {
+              "node": "Wait All Yahoo",
+              "type": "main",
+              "index": 2
+            }
+          ]
+        ]
+      },
+      "Fetch DXY (Dollar Index)": {
+        "main": [
+          [
+            {
+              "node": "Wait All Yahoo",
+              "type": "main",
+              "index": 3
+            }
+          ]
+        ]
+      },
+      "Fetch VIX": {
+        "main": [
+          [
+            {
+              "node": "Wait All Yahoo",
+              "type": "main",
+              "index": 4
+            }
+          ]
+        ]
+      },
+      "Wait All Yahoo": {
+        "main": [
+          [
+            {
+              "node": "Process Macro Data",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Process Macro Data": {
+        "main": [
+          [
+            {
+              "node": "Save Macro Data to Backend",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save Macro Data to Backend": {
+        "main": [
+          [
+            {
+              "node": "Respond to Webhook",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "availableInMCP": true,
+      "binaryMode": "separate",
+      "timeSavedMode": "fixed",
+      "errorWorkflow": "p8vhXj53RK8MUxb7",
+      "callerPolicy": "workflowsFromSameOwner"
+    },
+    "meta": {},
+    "nodeGroups": [],
+    "pinData": {},
+    "versionId": "e89885bc-125d-4b6d-ba9d-646d6dcb4efc",
+    "activeVersionId": "e89885bc-125d-4b6d-ba9d-646d6dcb4efc",
+    "versionCounter": 10,
+    "triggerCount": 2,
+    "sourceWorkflowId": null,
+    "tags": []
+  }
+]
