@@ -19,7 +19,7 @@
     },
     {
       "parameters": {
-        "content": "## Setup\n\nEnv vars (docker-compose/.env, restart n8n):\nTYPESAFE_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,\nSUPABASE_URL (https://xxx.supabase.co), SUPABASE_ANON_KEY\n\n1. Create/extend the jev_signals table (see Schema note)\n2. Click Execute Workflow once manually; inspect HTTP: TypeSafe Jev output.\n   Answers arrive under .answers (direction.choice/probabilities/confidence, trend_strength.score, *.noul).\n   If the key differs, fix the first line of Code: Combine to Signal.\n3. Swap RSS: Crypto News for CryptoPanic if you want filtered market-moving headlines.\n4. Pin MODEL in Config (\"typesafe/jev-1.13\"). Do not ship jev-latest.\n5. OpenRouter alternative: use the OpenRouter Decisions endpoint with model\n   \"typesafe/jev-1.13\" (https://openrouter.ai/typesafe/jev-1.13) instead of api.typesafe.ai;\n   envelope stays {state, questions, model}.\n6. This workflow does not place orders. LONG/SHORT is a proposal logged to jev_signals\n   and optionally sent to Telegram. Execution stays in QuantumTrade Pro, behind the\n   risk guard and the live four-number check. Do not add an order node here.\n",
+        "content": "## Setup\n\nCredentials (attach in n8n after import; no $env access needed):\n- OpenRouter: on \"HTTP: TypeSafe Jev1\"\n- Telegram API (bot token): on \"Telegram: Alert\" and \"Telegram: Digest\"\n- Supabase API (host + service role key): on \"HTTP: Log Batch to Supabase\"\n\nConfig node (not secret): SUPABASE_URL, TELEGRAM_CHAT_ID, watchlist, gates.\n\n1. Create/extend the jev_signals table (see Schema note)\n2. Execute Workflow once manually; inspect HTTP: TypeSafe Jev1 output.\n   Answers arrive under .answers (direction.choice/probabilities/confidence, trend_strength.score, *.noul).\n   If the key differs, fix the first line of Code: Combine to Signal.\n3. Swap RSS: Crypto News for CryptoPanic if you want filtered market-moving headlines.\n4. Pin MODEL in Config (\"typesafe/jev-1.13\"). Do not ship jev-latest.\n5. Failures: Binance/Jev/Telegram/Supabase calls retry, then the scan continues.\n   Missing data logs NO_TRADE_DATA_ERROR, a failed Jev call logs NO_TRADE_JEV_ERROR.\n6. This workflow does not place orders. LONG/SHORT is a proposal logged to jev_signals\n   and optionally sent to Telegram. Execution stays in QuantumTrade Pro, behind the\n   risk guard and the live four-number check. Do not add an order node here.\n",
         "height": 440,
         "width": 740,
         "color": 3
@@ -35,7 +35,7 @@
     },
     {
       "parameters": {
-        "content": "## Schema (run once in Supabase SQL editor)\n\n-- original table kept compatible; add columns:\nalter table jev_signals\n  add column if not exists timeframe_scanned text,\n  add column if not exists allowed_side text,\n  add column if not exists blocked_reason text,\n  add column if not exists regime_1h text,\n  add column if not exists regime_4h text,\n  add column if not exists confluence text,\n  add column if not exists squeeze boolean,\n  add column if not exists funding_annualized double precision,\n  add column if not exists oi_change_pct_1h double precision,\n  add column if not exists taker_buy_approx double precision,\n  add column if not exists cooldown_skipped boolean,\n  add column if not exists alert_sent boolean,\n  add column if not exists next_candle_return double precision,\n  add column if not exists outcome text,\n  add column if not exists calibrated_at timestamptz;\n\n-- daily backfill: match each logged row to the next realised candles and record\n-- direction accuracy & average next-candle return. Tune N and window as needed.\ncreate or replace function fill_outcomes_jev_signals() returns void language plpgsql as $$\nbegin\n  -- placeholder: implement against your candle store (e.g. a candles table).\n  -- update jev_signals set next_candle_return=..., outcome=..., calibrated_at=now()\n  -- where outcome is null and created_at < now() - interval '1 day';\nend;\n$$;\n",
+        "content": "## Schema (run once in Supabase SQL editor)\n\n-- original table kept compatible; add columns:\nalter table jev_signals\n  add column if not exists timeframe_scanned text,\n  add column if not exists allowed_side text,\n  add column if not exists blocked_reason text,\n  add column if not exists regime_1h text,\n  add column if not exists regime_4h text,\n  add column if not exists confluence text,\n  add column if not exists squeeze boolean,\n  add column if not exists funding_annualized double precision,\n  add column if not exists oi_change_pct_1h double precision,\n  add column if not exists taker_buy_approx double precision,\n  add column if not exists cooldown_skipped boolean,\n  add column if not exists alert_sent boolean,\n  add column if not exists next_candle_return double precision,\n  add column if not exists outcome text,\n  add column if not exists calibrated_at timestamptz;\n\n-- Access: this workflow writes with the Supabase credential (service role key,\n-- bypasses RLS). Once nothing else inserts with the anon key, remove the open\n-- anon insert policy so the public key cannot write fake signals:\n--   drop policy if exists jev_signals_insert_anon on jev_signals;\n\n-- daily backfill: match each logged row to the next realised candles and record\n-- direction accuracy & average next-candle return. Tune N and window as needed.\ncreate or replace function fill_outcomes_jev_signals() returns void language plpgsql as $$\nbegin\n  -- placeholder: implement against your candle store (e.g. a candles table).\n  -- update jev_signals set next_candle_return=..., outcome=..., calibrated_at=now()\n  -- where outcome is null and created_at < now() - interval '1 day';\nend;\n$$;\n",
         "height": 520,
         "width": 620,
         "color": 3
@@ -86,7 +86,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ---------------- Code: Config ----------------\nconst cfg = {\n  WATCHLIST: [\n    {\"symbol\":\"BTCUSDT\",\"enabled\":true,\"note\":\"King\"},\n    {\"symbol\":\"ETHUSDT\",\"enabled\":true,\"note\":\"Large cap\"},\n    {\"symbol\":\"SOLUSDT\",\"enabled\":true,\"note\":\"Large cap\"},\n    {\"symbol\":\"BNBUSDT\",\"enabled\":true,\"note\":\"Exchange token\"},\n    {\"symbol\":\"XRPUSDT\",\"enabled\":true,\"note\":\"Large cap\"},\n    {\"symbol\":\"DOGEUSDT\",\"enabled\":true,\"note\":\"Meme/large cap\"},\n    {\"symbol\":\"ADAUSDT\",\"enabled\":true,\"note\":\"Large cap\"},\n    {\"symbol\":\"AVAXUSDT\",\"enabled\":true,\"note\":\"L1\"},\n    {\"symbol\":\"DOTUSDT\",\"enabled\":true,\"note\":\"L1\"},\n    {\"symbol\":\"LINKUSDT\",\"enabled\":true,\"note\":\"Oracle\"},\n    {\"symbol\":\"UNIUSDT\",\"enabled\":true,\"note\":\"DeFi\"},\n    {\"symbol\":\"NEARUSDT\",\"enabled\":true,\"note\":\"L1\"}\n  ],\n  MODE: \"embedded\",                       // \"embedded\" | \"top_by_volume\"\n  MAX_SYMBOLS_PER_RUN: 12,                // cap symbols scanned per hourly run\n  BATCH_SIZE: 1,                          // serial: bundle nodes use .first()\n  CONFIDENCE_GATE: 0.60,                  // below -> NO_TRADE_LOW_CONFIDENCE\n  STRENGTH_FLOOR: 1.5,                    // below -> NO_TRADE_WEAK_TREND (0..3 scale)\n  SIGNAL_LONG: 0.25,                      // LONG  if signal_strength >  this\n  SIGNAL_SHORT: -0.25,                    // SHORT if signal_strength <  this\n  WEIGHT_NET: 0.40,\n  WEIGHT_TREND: 0.15,\n  WEIGHT_BREAKOUT: 0.15,\n  WEIGHT_NEWS: 0.15,\n  WEIGHT_RISKOFF: -0.10,\n  WEIGHT_VOL: -0.10,\n  FUNDING_BLOCK_LONG_ANNUAL: 0.30,        // annualized funding above this + OI spike -> block LONGs\n  FUNDING_BLOCK_SHORT_ANNUAL: -0.10,      // annualized funding below this + OI drop -> block SHORTs\n  OI_BLOCK_PCT: 3.0,                      // 1h OI move threshold for crowding block\n  BB_SQUEEZE_WIDTH: 0.03,                 // Bollinger width < this -> squeeze regime\n  COOLDOWN_HOURS: 4,                      // one Telegram alert per symbol per N hours\n  SEND_DIGEST: false,                     // send end-of-run summary to TELEGRAM_CHAT_ID\n  MODEL: \"typesafe/jev-1.13\",             // pin the model; do NOT leave jev-latest in prod\n  SUPABASE_TABLE: \"jev_signals\"\n};\nconst ws = $getWorkflowStaticData(\"global\");\nws.config = cfg;\nws.runId = Date.now();\nws.results = []; // reset per run: Flush + Digest read only this run's scans\nif (!ws.symbolAlert) ws.symbolAlert = {};\nreturn [{json:{config:cfg}}];\n"
+        "jsCode": "// ---------------- Code: Config ----------------\nconst cfg = {\n  WATCHLIST: [\n    {\"symbol\":\"BTCUSDT\",\"enabled\":true,\"note\":\"King\"},\n    {\"symbol\":\"ETHUSDT\",\"enabled\":true,\"note\":\"Large cap\"},\n    {\"symbol\":\"SOLUSDT\",\"enabled\":true,\"note\":\"Large cap\"},\n    {\"symbol\":\"BNBUSDT\",\"enabled\":true,\"note\":\"Exchange token\"},\n    {\"symbol\":\"XRPUSDT\",\"enabled\":true,\"note\":\"Large cap\"},\n    {\"symbol\":\"DOGEUSDT\",\"enabled\":true,\"note\":\"Meme/large cap\"},\n    {\"symbol\":\"ADAUSDT\",\"enabled\":true,\"note\":\"Large cap\"},\n    {\"symbol\":\"AVAXUSDT\",\"enabled\":true,\"note\":\"L1\"},\n    {\"symbol\":\"DOTUSDT\",\"enabled\":true,\"note\":\"L1\"},\n    {\"symbol\":\"LINKUSDT\",\"enabled\":true,\"note\":\"Oracle\"},\n    {\"symbol\":\"UNIUSDT\",\"enabled\":true,\"note\":\"DeFi\"},\n    {\"symbol\":\"NEARUSDT\",\"enabled\":true,\"note\":\"L1\"}\n  ],\n  MODE: \"embedded\",                       // \"embedded\" | \"top_by_volume\"\n  MAX_SYMBOLS_PER_RUN: 12,                // cap symbols scanned per hourly run\n  BATCH_SIZE: 1,                          // serial: bundle nodes use .first()\n  CONFIDENCE_GATE: 0.60,                  // below -> NO_TRADE_LOW_CONFIDENCE\n  STRENGTH_FLOOR: 1.5,                    // below -> NO_TRADE_WEAK_TREND (0..3 scale)\n  SIGNAL_LONG: 0.25,                      // LONG  if signal_strength >  this\n  SIGNAL_SHORT: -0.25,                    // SHORT if signal_strength <  this\n  WEIGHT_NET: 0.40,\n  WEIGHT_TREND: 0.15,\n  WEIGHT_BREAKOUT: 0.15,\n  WEIGHT_NEWS: 0.15,\n  WEIGHT_RISKOFF: -0.10,\n  WEIGHT_VOL: -0.10,\n  FUNDING_BLOCK_LONG_ANNUAL: 0.30,        // annualized funding above this + OI spike -> block LONGs\n  FUNDING_BLOCK_SHORT_ANNUAL: -0.10,      // annualized funding below this + OI drop -> block SHORTs\n  OI_BLOCK_PCT: 3.0,                      // 1h OI move threshold for crowding block\n  BB_SQUEEZE_WIDTH: 0.03,                 // Bollinger width < this -> squeeze regime\n  COOLDOWN_HOURS: 4,                      // one Telegram alert per symbol per N hours\n  SEND_DIGEST: false,                     // send end-of-run summary to TELEGRAM_CHAT_ID\n  MODEL: \"typesafe/jev-1.13\",             // pin the model; do NOT leave jev-latest in prod\n  SUPABASE_TABLE: \"jev_signals\",\n  SUPABASE_URL: \"https://YOUR-PROJECT.supabase.co\", // not secret; key lives in the Supabase credential\n  TELEGRAM_CHAT_ID: \"\"                    // not secret; bot token lives in the Telegram credential\n};\nconst ws = $getWorkflowStaticData(\"global\");\nws.config = cfg;\nws.runId = Date.now();\nws.results = []; // reset per run: Flush + Digest read only this run's scans\nif (!ws.symbolAlert) ws.symbolAlert = {};\nreturn [{json:{config:cfg}}];\n"
       },
       "id": "3c45f94a-e463-468f-8334-0d82f65bf8fe",
       "name": "Code: Config",
@@ -109,7 +109,11 @@
       "position": [
         3344,
         1232
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -127,7 +131,9 @@
     {
       "parameters": {
         "url": "https://fapi.binance.com/fapi/v1/ticker/24hr",
-        "options": {}
+        "options": {
+          "timeout": 15000
+        }
       },
       "id": "81636dd9-1739-4bc5-ac5e-178811b0c17d",
       "name": "HTTP: Binance 24h Tickers",
@@ -136,11 +142,14 @@
       "position": [
         3344,
         1424
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
-        "jsCode": "// ---------------- Code: Build Universe ----------------\nconst ws = $getWorkflowStaticData(\"global\");\nconst cfg = ws.config || {};\nconst _tickersRaw = $(\"HTTP: Binance 24h Tickers\").all().map(i => i.json);\nconst tickers = (_tickersRaw.length === 1 && Array.isArray(_tickersRaw[0])) ? _tickersRaw[0] : _tickersRaw;\nconst stableBases = new Set([\"USDC\",\"BUSD\",\"TUSD\",\"DAI\",\"USDP\",\"USDD\",\"FDUSD\",\"EUR\",\"GBP\",\"AUD\",\"RUB\",\"TRY\",\"BVND\",\"UAH\"]);\nconst ranked = tickers\n  .filter(t => t.symbol && t.symbol.endsWith(\"USDT\"))\n  .map(t => ({symbol:t.symbol, quoteVolume:parseFloat(t.quoteVolume)||0, lastPrice:parseFloat(t.lastPrice)||0, priceChangePercent:parseFloat(t.priceChangePercent)||0}))\n  .filter(t => !stableBases.has(t.symbol.slice(0,-4)))\n  .sort((a,b) => b.quoteVolume - a.quoteVolume);\nconst cap = cfg.MAX_SYMBOLS_PER_RUN || 12;\nconst wl = Array.isArray(cfg.WATCHLIST) ? cfg.WATCHLIST.filter(w => w.enabled).map(w => w.symbol) : [];\nconst mode = cfg.MODE || \"embedded\";\nlet uni;\nif (mode === \"embedded\" && wl.length) {\n  const bySym = new Map(ranked.map(u => [u.symbol, u]));\n  uni = wl.slice(0, cap).map(symbol => bySym.get(symbol) || {symbol, quoteVolume:0, lastPrice:0, priceChangePercent:0});\n} else {\n  uni = ranked.slice(0, cap);\n}\nreturn uni.map((u,i) => ({json:{...u, idx:i, runId:ws.runId}}));\n"
+        "jsCode": "// ---------------- Code: Build Universe ----------------\nconst ws = $getWorkflowStaticData(\"global\");\nconst cfg = ws.config || {};\nconst _tickersRaw = $(\"HTTP: Binance 24h Tickers\").all().map(i => i.json);\nconst tickers = (_tickersRaw.length === 1 && Array.isArray(_tickersRaw[0])) ? _tickersRaw[0] : _tickersRaw;\nconst stableBases = new Set([\"USDC\",\"BUSD\",\"TUSD\",\"DAI\",\"USDP\",\"USDD\",\"FDUSD\",\"EUR\",\"GBP\",\"AUD\",\"RUB\",\"TRY\",\"BVND\",\"UAH\"]);\nconst ranked = tickers\n  .filter(t => t.symbol && t.symbol.endsWith(\"USDT\"))\n  .map(t => ({symbol:t.symbol, quoteVolume:parseFloat(t.quoteVolume)||0, lastPrice:parseFloat(t.lastPrice)||0, priceChangePercent:parseFloat(t.priceChangePercent)||0}))\n  .filter(t => !stableBases.has(t.symbol.slice(0,-4)))\n  .sort((a,b) => b.quoteVolume - a.quoteVolume);\nconst cap = cfg.MAX_SYMBOLS_PER_RUN ?? 12;\nconst wl = Array.isArray(cfg.WATCHLIST) ? cfg.WATCHLIST.filter(w => w.enabled).map(w => w.symbol) : [];\nconst mode = cfg.MODE ?? \"embedded\";\nlet uni;\nif (mode === \"embedded\" && wl.length) {\n  const bySym = new Map(ranked.map(u => [u.symbol, u]));\n  uni = wl.slice(0, cap).map(symbol => bySym.get(symbol) || {symbol, quoteVolume:0, lastPrice:0, priceChangePercent:0});\n} else {\n  uni = ranked.slice(0, cap);\n}\nreturn uni.map((u,i) => ({json:{...u, idx:i, runId:ws.runId}}));\n"
       },
       "id": "9825049d-420a-417c-bb9c-767d0d8e1885",
       "name": "Code: Build Universe",
@@ -153,7 +162,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ---------------- Code: Flush Log Items ----------------\nconst ws = $getWorkflowStaticData(\"global\");\nconst res = ws.results || [];\nconst rows = res.map(r => {\n  const rr = {...r};\n  rr.created_at = new Date(r.ts).toISOString();\n  return rr;\n});\nws.lastRun = {count:rows.length, ts:Date.now()};\nreturn [{json:{rows:rows, count:rows.length}}];\n"
+        "jsCode": "// ---------------- Code: Flush Log Items ----------------\n// Map in-memory results to the jev_signals columns explicitly. PostgREST rejects\n// the whole batch if any key is not a column, so never send extra fields.\nconst ws = $getWorkflowStaticData(\"global\");\nconst res = ws.results || [];\nconst num = v => (typeof v === \"number\" && isFinite(v)) ? v : null;\nconst rows = res.map(r => ({\n  created_at: new Date(r.ts).toISOString(),\n  symbol: r.symbol, timeframe: \"1h\", timeframe_scanned: \"1h\",\n  run_id: r.runId ?? null, idx: r.idx ?? null,\n  decision: r.decision || \"UNKNOWN\", allowed_side: r.allowed_side ?? null, blocked_reason: r.blocked_reason || \"\",\n  confidence: num(r.confidence), signal_strength: num(r.signal_strength), trend_strength: num(r.trend_strength),\n  probabilities: r.probabilities || {},\n  breakout_confirmed: num(r.breakout_confirmed), news_supports: num(r.news_supports),\n  risk_off: num(r.risk_off), volatility_dangerous: num(r.volatility_dangerous),\n  regime_1h: r.regime1h ?? null, regime_4h: r.regime4h ?? null, confluence: r.confluence ?? null,\n  squeeze: !!r.squeeze,\n  funding_annualized: num(r.fundingAnnual), oi_change_pct_1h: num(r.oiChangePct), taker_buy_approx: num(r.takerBuyApprox),\n  cooldown_skipped: !!r.cooldown_skipped, alert_sent: !!r.alert_sent,\n  raw_answers: r.raw_answers ?? null\n}));\nws.lastRun = {count:rows.length, ts:Date.now()};\nreturn [{json:{rows:rows, count:rows.length}}];\n"
       },
       "id": "76fc59ed-18a0-445b-8669-86adb57feab2",
       "name": "Code: Flush Log Items",
@@ -167,18 +176,12 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.SUPABASE_URL }}/rest/v1/jev_signals",
+        "url": "={{ $('Code: Config').first().json.config.SUPABASE_URL }}/rest/v1/{{ $('Code: Config').first().json.config.SUPABASE_TABLE }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "apikey",
-              "value": "={{ $env.SUPABASE_ANON_KEY }}"
-            },
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{$env.SUPABASE_ANON_KEY}}"
-            },
             {
               "name": "Content-Type",
               "value": "application/json"
@@ -191,8 +194,10 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ $json.rows }}",
-        "options": {}
+        "jsonBody": "={{ JSON.stringify($json.rows) }}",
+        "options": {
+          "timeout": 20000
+        }
       },
       "id": "0b627487-4de4-4c9b-a6d1-4b648485b249",
       "name": "HTTP: Log Batch to Supabase",
@@ -201,7 +206,11 @@
       "position": [
         4240,
         1424
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -251,26 +260,33 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "=https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ { chat_id: $env.TELEGRAM_CHAT_ID, text: $json.digestText, parse_mode: \"HTML\", disable_web_page_preview: true } }}",
-        "options": {}
+        "chatId": "={{ $('Code: Config').first().json.config.TELEGRAM_CHAT_ID }}",
+        "text": "={{ $json.digestText }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML",
+          "disable_web_page_preview": true
+        }
       },
       "id": "77f6b99e-ee78-42da-b2f1-fdbeb34044a3",
-      "name": "HTTP: Telegram Digest",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
+      "name": "Telegram: Digest",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
       "position": [
         4992,
         1376
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
         "url": "=https://fapi.binance.com/fapi/v1/klines?symbol={{ $json.symbol }}&interval=1h&limit=200",
-        "options": {}
+        "options": {
+          "timeout": 15000
+        }
       },
       "id": "5fb4ce8c-58fa-4757-9aa3-57a793d22f0d",
       "name": "HTTP: Klines 1h",
@@ -279,7 +295,11 @@
       "position": [
         4016,
         1232
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -297,7 +317,9 @@
     {
       "parameters": {
         "url": "=https://fapi.binance.com/fapi/v1/klines?symbol={{ $json.symbol }}&interval=4h&limit=100",
-        "options": {}
+        "options": {
+          "timeout": 15000
+        }
       },
       "id": "7c8fe0bd-97f7-4510-9b9a-4b38e4229318",
       "name": "HTTP: Klines 4h",
@@ -306,7 +328,11 @@
       "position": [
         4464,
         1232
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -324,7 +350,9 @@
     {
       "parameters": {
         "url": "=https://fapi.binance.com/fapi/v1/premiumIndex?symbol={{ $json.symbol }}",
-        "options": {}
+        "options": {
+          "timeout": 15000
+        }
       },
       "id": "bcc65725-abc6-4e54-b00b-b9e88351a6d7",
       "name": "HTTP: Premium Index",
@@ -333,12 +361,18 @@
       "position": [
         4912,
         1232
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
         "url": "=https://fapi.binance.com/futures/data/openInterestHist?symbol={{ $json.symbol }}&period=1h&limit=2",
-        "options": {}
+        "options": {
+          "timeout": 15000
+        }
       },
       "id": "bf3e4fe6-f8bf-477e-b091-6090e84907f1",
       "name": "HTTP: OI History 1h",
@@ -347,11 +381,15 @@
       "position": [
         5136,
         1232
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "jsCode": "// ---------------- Code: Fetch Symbol Bundle ----------------\nconst item = $(\"Split In Batches: Symbols\").item.json;\nconst k1 = $(\"Code: Collapse 1h\").first().json.klines;\nconst k4 = $(\"Code: Collapse 4h\").first().json.klines;\nconst pi = $(\"HTTP: Premium Index\").first().json;\nconst oi = $(\"HTTP: OI History 1h\").all().map(i => i.json);\nreturn [{json:{\n  symbol:item.symbol, quoteVolume:item.quoteVolume, lastPrice:item.lastPrice,\n  priceChangePercent:item.priceChangePercent, idx:item.idx, runId:item.runId,\n  klines1h:k1, klines4h:k4,\n  fundingRate: pi.lastFundingRate ? parseFloat(pi.lastFundingRate) : null,\n  nextFundingTime: pi.nextFundingTime || null,\n  markPrice: pi.markPrice ? parseFloat(pi.markPrice) : null,\n  oi: oi\n}}];\n"
+        "jsCode": "// ---------------- Code: Fetch Symbol Bundle ----------------\nconst item = $(\"Split In Batches: Symbols\").item.json;\nconst k1 = $(\"Code: Collapse 1h\").first().json.klines;\nconst k4 = $(\"Code: Collapse 4h\").first().json.klines;\nconst pi = $(\"HTTP: Premium Index\").first().json;\nconst oi = $(\"HTTP: OI History 1h\").all().map(i => i.json);\n// A failed Binance call (after retries) arrives as {error:...}; flag it so the\n// scan logs a NO_TRADE_DATA_ERROR row instead of feeding garbage to the TA engine.\nconst okK = (k, n) => Array.isArray(k) && k.length >= n && Array.isArray(k[0]);\nconst dataErrors = [];\nif (!okK(k1, 50)) dataErrors.push(\"klines_1h\");\nif (!okK(k4, 30)) dataErrors.push(\"klines_4h\");\nif (!pi || pi.error || pi.lastFundingRate === undefined) dataErrors.push(\"premium_index\");\nreturn [{json:{\n  dataOk: dataErrors.length === 0, dataErrors: dataErrors,\n  symbol:item.symbol, quoteVolume:item.quoteVolume, lastPrice:item.lastPrice,\n  priceChangePercent:item.priceChangePercent, idx:item.idx, runId:item.runId,\n  klines1h:k1, klines4h:k4,\n  fundingRate: pi.lastFundingRate ? parseFloat(pi.lastFundingRate) : null,\n  nextFundingTime: pi.nextFundingTime || null,\n  markPrice: pi.markPrice ? parseFloat(pi.markPrice) : null,\n  oi: oi\n}}];\n"
       },
       "id": "f0af2c71-b5fa-402e-ab69-d5b1d89649be",
       "name": "Code: Fetch Symbol Bundle",
@@ -364,7 +402,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ---------------- Code: TA Engine + Crowding ----------------\nconst src = $input.first().json;\nconst H = src.klines1h, D = src.klines4h;\nfunction closes(k){ return k.map(x=>Number(x[4])); }\nfunction highs(k){ return k.map(x=>Number(x[2])); }\nfunction lows(k){ return k.map(x=>Number(x[3])); }\nfunction vols(k){ return k.map(x=>Number(x[5])); }\nfunction ema(v,p){ const k=2/(p+1); let e=v.slice(0,p).reduce((a,b)=>a+b,0)/p; const o=new Array(p-1).fill(null); o.push(e); for(let i=p;i<v.length;i++){e=v[i]*k+e*(1-k);o.push(e);} return o; }\nfunction rsi(c,p=14){ let g=0,l=0; for(let i=1;i<=p;i++){const d=c[i]-c[i-1]; if(d>0)g+=d; else l-=d;} let ag=g/p, al=l/p; for(let i=p+1;i<c.length;i++){const d=c[i]-c[i-1]; ag=(ag*(p-1)+Math.max(d,0))/p; al=(al*(p-1)+Math.max(-d,0))/p;} return al===0?100:100-100/(1+ag/al); }\nfunction tr(h,l,c,i){ return Math.max(h[i]-l[i], Math.abs(h[i]-c[i-1]), Math.abs(l[i]-c[i-1])); }\nfunction atrPct(h,l,c,p=14){ let a=0; for(let i=1;i<=p;i++) a+=tr(h,l,c,i); a/=p; for(let i=p+1;i<h.length;i++) a=(a*(p-1)+tr(h,l,c,i))/p; return (a/c[c.length-1])*100; }\nfunction bb(c,p=20){ const w=c.slice(-p); const m=w.reduce((a,b)=>a+b,0)/p; const v=w.reduce((a,b)=>a+(b-m)**2,0)/p; const sd=Math.sqrt(v||1e-12); const pos=(c[c.length-1]-m)/(2*sd); return {pos:pos, width:(2*sd)/m}; }\nconst last=a=>a[a.length-1];\nfunction macdHist(c,f=12,s=26,sp=9){ const e12=ema(c,f), e26=ema(c,s); const ml=c.map((_,i)=>(e12[i]!=null&&e26[i]!=null)?e12[i]-e26[i]:null).filter(v=>v!=null); const sg=ema(ml,sp); return (ml.length&&sg.length)?ml[ml.length-1]-sg[sg.length-1]:0; }\nfunction volAvg(c,v,p=20){ const w=v.slice(-p); const avg=w.reduce((a,b)=>a+b,0)/p; return avg?v[c.length-1]/avg:1; }\nfunction regime(c,h,l,p=14){ const r=rsi(c,p); const e=ema(c,12); const s=ema(c,26); const el=last(e), sl=last(s); return (el>sl && r>55)?\"trending_up\":(el<sl && r<45)?\"trending_down\":\"ranging\"; }\nfunction takerApprox(c,o,v,p=20){ let b=0,t=0; for(let i=c.length-p;i<c.length;i++){t+=v[i]; if(c[i]>=o[i])b+=v[i];} return t?(b/t):0.5; }\nconst c1=closes(H), o1=H.map(x=>Number(x[1])), v1=vols(H), h1=highs(H), l1=lows(H);\nconst c4=closes(D), o4=D.map(x=>Number(x[1])), v4=vols(D), h4=highs(D), l4=lows(D);\nconst b1=bb(c1), b4=bb(c4);\nconst m1={\n  rsi_14:+rsi(c1).toFixed(2), ema12:+last(ema(c1,12)).toFixed(2), ema26:+last(ema(c1,26)).toFixed(2),\n  macd_hist:+macdHist(c1).toFixed(2), atr_pct:+atrPct(h1,l1,c1).toFixed(2),\n  bb_pos:+b1.pos.toFixed(3), bb_width:+b1.width.toFixed(4),\n  vol_vs_avg:+volAvg(c1,v1).toFixed(2), taker_buy_approx:+takerApprox(c1,o1,v1).toFixed(3), regime:regime(c1,h1,l1)\n};\nconst m4={\n  rsi_14:+rsi(c4).toFixed(2), ema12:+last(ema(c4,12)).toFixed(2), ema26:+last(ema(c4,26)).toFixed(2),\n  macd_hist:+macdHist(c4).toFixed(2), atr_pct:+atrPct(h4,l4,c4).toFixed(2),\n  bb_pos:+b4.pos.toFixed(3), bb_width:+b4.width.toFixed(4),\n  vol_vs_avg:+volAvg(c4,v4).toFixed(2), taker_buy_approx:+takerApprox(c4,o4,v4).toFixed(3), regime:regime(c4,h4,l4)\n};\nconst conf = (m1.regime===m4.regime && m1.regime!==\"ranging\")?(m1.regime===\"trending_up\"?\"aligned_bullish\":\"aligned_bearish\"):\"mixed\";\nconst cfg = ($getWorkflowStaticData(\"global\")).config||{};\nconst squeeze = m1.bb_width < (cfg.BB_SQUEEZE_WIDTH||0.03);\n// --- crowding gate: fade the crowded side ---------------------------------\nconst fr = src.fundingRate;\nconst fundingAnnual = (fr!=null)?fr*3*365:null;\nlet oiChangePct=null;\ntry{\n  const oi = src.oi.map(r=>({ts:Number(r.timestamp||r.openInterestTimestamp||0), oi:parseFloat(r.sumOpenInterest ?? r.openInterest)})).filter(r=>!isNaN(r.oi)&&r.oi>0);\n  if (oi.length>=2){ oi.sort((a,b)=>a.ts-b.ts); const pv=oi[oi.length-2].oi, cu=oi[oi.length-1].oi; oiChangePct=(cu-pv)/pv*100; }\n}catch(e){ oiChangePct=null; }\nlet blockedReason=\"\", allowedSide=\"both\";\nif (fundingAnnual!=null && oiChangePct!=null){\n  if (fundingAnnual > (cfg.FUNDING_BLOCK_LONG_ANNUAL||0.30) && oiChangePct > (cfg.OI_BLOCK_PCT||3.0)){ blockedReason=\"crowding_long_blocked\"; allowedSide=\"short\"; }\n  else if (fundingAnnual < (cfg.FUNDING_BLOCK_SHORT_ANNUAL||-0.10) && oiChangePct < -(cfg.OI_BLOCK_PCT||3.0)){ blockedReason=\"crowding_short_blocked\"; allowedSide=\"long\"; }\n}\nreturn [{json:{...src, metrics1h:m1, metrics4h:m4, regime1h:m1.regime, regime4h:m4.regime, confluence:conf, squeeze:squeeze, fundingAnnual:fundingAnnual, oiChangePct:oiChangePct, takerBuyApprox:m1.taker_buy_approx, blockedReason:blockedReason, allowedSide:allowedSide}}];\n"
+        "jsCode": "// ---------------- Code: TA Engine + Crowding ----------------\nconst src = $input.first().json;\nconst H = src.klines1h, D = src.klines4h;\nfunction closes(k){ return k.map(x=>Number(x[4])); }\nfunction highs(k){ return k.map(x=>Number(x[2])); }\nfunction lows(k){ return k.map(x=>Number(x[3])); }\nfunction vols(k){ return k.map(x=>Number(x[5])); }\nfunction ema(v,p){ const k=2/(p+1); let e=v.slice(0,p).reduce((a,b)=>a+b,0)/p; const o=new Array(p-1).fill(null); o.push(e); for(let i=p;i<v.length;i++){e=v[i]*k+e*(1-k);o.push(e);} return o; }\nfunction rsi(c,p=14){ let g=0,l=0; for(let i=1;i<=p;i++){const d=c[i]-c[i-1]; if(d>0)g+=d; else l-=d;} let ag=g/p, al=l/p; for(let i=p+1;i<c.length;i++){const d=c[i]-c[i-1]; ag=(ag*(p-1)+Math.max(d,0))/p; al=(al*(p-1)+Math.max(-d,0))/p;} return al===0?100:100-100/(1+ag/al); }\nfunction tr(h,l,c,i){ return Math.max(h[i]-l[i], Math.abs(h[i]-c[i-1]), Math.abs(l[i]-c[i-1])); }\nfunction atrPct(h,l,c,p=14){ let a=0; for(let i=1;i<=p;i++) a+=tr(h,l,c,i); a/=p; for(let i=p+1;i<h.length;i++) a=(a*(p-1)+tr(h,l,c,i))/p; return (a/c[c.length-1])*100; }\nfunction bb(c,p=20){ const w=c.slice(-p); const m=w.reduce((a,b)=>a+b,0)/p; const v=w.reduce((a,b)=>a+(b-m)**2,0)/p; const sd=Math.sqrt(v||1e-12); const pos=(c[c.length-1]-m)/(2*sd); return {pos:pos, width:(2*sd)/m}; }\nconst last=a=>a[a.length-1];\nfunction macdHist(c,f=12,s=26,sp=9){ const e12=ema(c,f), e26=ema(c,s); const ml=c.map((_,i)=>(e12[i]!=null&&e26[i]!=null)?e12[i]-e26[i]:null).filter(v=>v!=null); const sg=ema(ml,sp); return (ml.length&&sg.length)?ml[ml.length-1]-sg[sg.length-1]:0; }\nfunction volAvg(c,v,p=20){ const w=v.slice(-p); const avg=w.reduce((a,b)=>a+b,0)/p; return avg?v[c.length-1]/avg:1; }\nfunction regime(c,h,l,p=14){ const r=rsi(c,p); const e=ema(c,12); const s=ema(c,26); const el=last(e), sl=last(s); return (el>sl && r>55)?\"trending_up\":(el<sl && r<45)?\"trending_down\":\"ranging\"; }\nfunction takerApprox(c,o,v,p=20){ let b=0,t=0; for(let i=c.length-p;i<c.length;i++){t+=v[i]; if(c[i]>=o[i])b+=v[i];} return t?(b/t):0.5; }\nconst c1=closes(H), o1=H.map(x=>Number(x[1])), v1=vols(H), h1=highs(H), l1=lows(H);\nconst c4=closes(D), o4=D.map(x=>Number(x[1])), v4=vols(D), h4=highs(D), l4=lows(D);\nconst b1=bb(c1), b4=bb(c4);\nconst m1={\n  rsi_14:+rsi(c1).toFixed(2), ema12:+last(ema(c1,12)).toFixed(2), ema26:+last(ema(c1,26)).toFixed(2),\n  macd_hist:+macdHist(c1).toFixed(2), atr_pct:+atrPct(h1,l1,c1).toFixed(2),\n  bb_pos:+b1.pos.toFixed(3), bb_width:+b1.width.toFixed(4),\n  vol_vs_avg:+volAvg(c1,v1).toFixed(2), taker_buy_approx:+takerApprox(c1,o1,v1).toFixed(3), regime:regime(c1,h1,l1)\n};\nconst m4={\n  rsi_14:+rsi(c4).toFixed(2), ema12:+last(ema(c4,12)).toFixed(2), ema26:+last(ema(c4,26)).toFixed(2),\n  macd_hist:+macdHist(c4).toFixed(2), atr_pct:+atrPct(h4,l4,c4).toFixed(2),\n  bb_pos:+b4.pos.toFixed(3), bb_width:+b4.width.toFixed(4),\n  vol_vs_avg:+volAvg(c4,v4).toFixed(2), taker_buy_approx:+takerApprox(c4,o4,v4).toFixed(3), regime:regime(c4,h4,l4)\n};\nconst conf = (m1.regime===m4.regime && m1.regime!==\"ranging\")?(m1.regime===\"trending_up\"?\"aligned_bullish\":\"aligned_bearish\"):\"mixed\";\nconst cfg = ($getWorkflowStaticData(\"global\")).config||{};\nconst squeeze = m1.bb_width < (cfg.BB_SQUEEZE_WIDTH ?? 0.03);\n// --- crowding gate: fade the crowded side ---------------------------------\nconst fr = src.fundingRate;\nconst fundingAnnual = (fr!=null)?fr*3*365:null;\nlet oiChangePct=null;\ntry{\n  const oi = src.oi.map(r=>({ts:Number(r.timestamp||r.openInterestTimestamp||0), oi:parseFloat(r.sumOpenInterest ?? r.openInterest)})).filter(r=>!isNaN(r.oi)&&r.oi>0);\n  if (oi.length>=2){ oi.sort((a,b)=>a.ts-b.ts); const pv=oi[oi.length-2].oi, cu=oi[oi.length-1].oi; oiChangePct=(cu-pv)/pv*100; }\n}catch(e){ oiChangePct=null; }\nlet blockedReason=\"\", allowedSide=\"both\";\nif (fundingAnnual!=null && oiChangePct!=null){\n  if (fundingAnnual > (cfg.FUNDING_BLOCK_LONG_ANNUAL ?? 0.30) && oiChangePct > (cfg.OI_BLOCK_PCT ?? 3.0)){ blockedReason=\"crowding_long_blocked\"; allowedSide=\"short\"; }\n  else if (fundingAnnual < (cfg.FUNDING_BLOCK_SHORT_ANNUAL ?? -0.10) && oiChangePct < -(cfg.OI_BLOCK_PCT ?? 3.0)){ blockedReason=\"crowding_short_blocked\"; allowedSide=\"long\"; }\n}\nreturn [{json:{...src, metrics1h:m1, metrics4h:m4, regime1h:m1.regime, regime4h:m4.regime, confluence:conf, squeeze:squeeze, fundingAnnual:fundingAnnual, oiChangePct:oiChangePct, takerBuyApprox:m1.taker_buy_approx, blockedReason:blockedReason, allowedSide:allowedSide}}];\n"
       },
       "id": "c65f904a-bd0c-4ccc-b221-21c6803f37d3",
       "name": "Code: TA Engine + Crowding",
@@ -377,7 +415,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ---------------- Code: Build Jev Payload ----------------\nconst src = $input.first().json;\nconst ws = $getWorkflowStaticData(\"global\");\nconst cfg = ws.config||{};\nconst headlines = $(\"Code: Extract Headlines\").first().json.headlines||[];\nconst m1=src.metrics1h, m4=src.metrics4h;\nconst candles1h = src.klines1h.slice(-20).map(k=>({t:k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4],v:+k[5]}));\nconst candles4h = src.klines4h.slice(-20).map(k=>({t:k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4],v:+k[5]}));\nconst state = {\n  market:{\n    symbol:src.symbol, timeframe:\"1h\",\n    candles_recent:candles1h, candles_4h_recent:candles4h,\n    indicators:{\n      rsi_14:m1.rsi_14, ema_fast:m1.ema12, ema_slow:m1.ema26, macd_hist:m1.macd_hist,\n      atr_pct:m1.atr_pct, bb_pos:m1.bb_pos, bb_width:m1.bb_width, vol_vs_avg:m1.vol_vs_avg,\n      rsi_4h:m4.rsi_14, ema12_4h:m4.ema12, ema26_4h:m4.ema26, macd_hist_4h:m4.macd_hist,\n      confluence_4h:src.confluence, regime_1h:src.regime1h, regime_4h:src.regime4h, squeeze:src.squeeze\n    },\n    order_flow:{\n      funding_rate_8h:src.fundingRate, funding_annualized:src.fundingAnnual,\n      taker_buy_ratio_approx:src.takerBuyApprox, oi_change_pct_1h:src.oiChangePct\n    },\n    regime:src.regime1h, allowed_side:src.allowedSide\n  },\n  news:{headlines_last_24h:headlines.slice(-25)}\n};\nconst questions = {\n  direction:{\n    type:\"choice\",\n    instructions:{\n      question:\"Based on `market.indicators` across BOTH timeframes (1h and 4h), the recent closes in `market.candles_recent`, `market.order_flow` (funding, OI change, approximate taker ratio), and `market.news`, what is the likely direction of `market.symbol` over the next few `market.timeframe` candles?\",\n      focus:\"Weigh technical indicators and price action most heavily; order flow is secondary confirmation; news is tertiary. If `market.indicators.confluence_4h` disagrees with the 1h picture, lean toward neutral.\"\n    },\n    criteria:{\n      bullish:{what:\"Evidence supports upward price movement\",signals:[\"Fast EMA above slow EMA on 1h and ideally 4h\",\"RSI 50-70 with rising closes\",\"Positive MACD histogram\"]},\n      bearish:{what:\"Evidence supports downward price movement\",signals:[\"Fast EMA below slow EMA on 1h and ideally 4h\",\"RSI 30-50 with falling closes\",\"Negative MACD histogram\"]},\n      neutral:{what:\"Mixed or conflicting evidence, likely range-bound\",not_for:\"A weak trend still counts as directional if indicators agree\",signals:[\"Indicators contradict each other across timeframes\",\"Price compressed inside Bollinger bands\"]}\n    }\n  },\n  trend_strength:{\n    type:\"score\",\n    instructions:{question:\"How strong is the current directional momentum in `market`?\",focus:\"Confluence of indicators and volume, not direction.\"},\n    criteria:[\n      {what:\"No momentum\",signals:[\"Flat indicators\",\"Low volume\",\"Range-bound\"]},\n      {what:\"Weak momentum\",signals:[\"Some indicators agree\",\"Volume below average\"]},\n      {what:\"Moderate momentum\",signals:[\"Most indicators agree\",\"Average volume\"]},\n      {what:\"Strong momentum\",signals:[\"All indicators agree\",\"Volume expanding\",\"Clean trend structure\"]}\n    ]\n  },\n  breakout_confirmed:{type:\"noul\",instructions:\"Do the closes in `market.candles_recent` and `market.indicators` confirm a breakout from the prior range?\"},\n  news_supports_direction:{type:\"noul\",instructions:\"Do the headlines in `news.headlines_last_24h` support the direction implied by `market.indicators`?\",criteria:{true:\"Headlines are directionally consistent with the technical picture\",false:\"Headlines are contradictory, irrelevant, or missing\"}},\n  risk_off_environment:{type:\"noul\",instructions:\"Do `news.headlines_last_24h` or `market.regime` indicate a risk-off environment (panic, liquidations, macro fear) that could invalidate technical signals?\"},\n  volatility_dangerous:{type:\"noul\",instructions:\"Is `market.indicators.atr_pct` high enough to threaten stop-loss-based positions?\"}\n};\nreturn [{json:{symbol:src.symbol, timeframe:\"1h\", idx:src.idx, runId:src.runId, allowedSide:src.allowedSide, regime1h:src.regime1h, regime4h:src.regime4h, confluence:src.confluence, squeeze:src.squeeze, metrics1h:m1, metrics4h:m4, fundingAnnual:src.fundingAnnual, oiChangePct:src.oiChangePct, blockedReason:src.blockedReason, nextFunding:src.nextFundingTime, payload:{state:state, questions:questions, model:cfg.MODEL||\"typesafe/jev-1.13\"}}}];\n"
+        "jsCode": "// ---------------- Code: Build Jev Payload ----------------\nconst src = $input.first().json;\nconst ws = $getWorkflowStaticData(\"global\");\nconst cfg = ws.config||{};\nconst headlines = $(\"Code: Extract Headlines\").first().json.headlines||[];\nconst m1=src.metrics1h, m4=src.metrics4h;\nconst candles1h = src.klines1h.slice(-20).map(k=>({t:k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4],v:+k[5]}));\nconst candles4h = src.klines4h.slice(-20).map(k=>({t:k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4],v:+k[5]}));\nconst state = {\n  market:{\n    symbol:src.symbol, timeframe:\"1h\",\n    candles_recent:candles1h, candles_4h_recent:candles4h,\n    indicators:{\n      rsi_14:m1.rsi_14, ema_fast:m1.ema12, ema_slow:m1.ema26, macd_hist:m1.macd_hist,\n      atr_pct:m1.atr_pct, bb_pos:m1.bb_pos, bb_width:m1.bb_width, vol_vs_avg:m1.vol_vs_avg,\n      rsi_4h:m4.rsi_14, ema12_4h:m4.ema12, ema26_4h:m4.ema26, macd_hist_4h:m4.macd_hist,\n      confluence_4h:src.confluence, regime_1h:src.regime1h, regime_4h:src.regime4h, squeeze:src.squeeze\n    },\n    order_flow:{\n      funding_rate_8h:src.fundingRate, funding_annualized:src.fundingAnnual,\n      taker_buy_ratio_approx:src.takerBuyApprox, oi_change_pct_1h:src.oiChangePct\n    },\n    regime:src.regime1h, allowed_side:src.allowedSide\n  },\n  news:{headlines_last_24h:headlines.slice(-25)}\n};\nconst questions = {\n  direction:{\n    type:\"choice\",\n    instructions:{\n      question:\"Based on `market.indicators` across BOTH timeframes (1h and 4h), the recent closes in `market.candles_recent`, `market.order_flow` (funding, OI change, approximate taker ratio), and `market.news`, what is the likely direction of `market.symbol` over the next few `market.timeframe` candles?\",\n      focus:\"Weigh technical indicators and price action most heavily; order flow is secondary confirmation; news is tertiary. If `market.indicators.confluence_4h` disagrees with the 1h picture, lean toward neutral.\"\n    },\n    criteria:{\n      bullish:{what:\"Evidence supports upward price movement\",signals:[\"Fast EMA above slow EMA on 1h and ideally 4h\",\"RSI 50-70 with rising closes\",\"Positive MACD histogram\"]},\n      bearish:{what:\"Evidence supports downward price movement\",signals:[\"Fast EMA below slow EMA on 1h and ideally 4h\",\"RSI 30-50 with falling closes\",\"Negative MACD histogram\"]},\n      neutral:{what:\"Mixed or conflicting evidence, likely range-bound\",not_for:\"A weak trend still counts as directional if indicators agree\",signals:[\"Indicators contradict each other across timeframes\",\"Price compressed inside Bollinger bands\"]}\n    }\n  },\n  trend_strength:{\n    type:\"score\",\n    instructions:{question:\"How strong is the current directional momentum in `market`?\",focus:\"Confluence of indicators and volume, not direction.\"},\n    criteria:[\n      {what:\"No momentum\",signals:[\"Flat indicators\",\"Low volume\",\"Range-bound\"]},\n      {what:\"Weak momentum\",signals:[\"Some indicators agree\",\"Volume below average\"]},\n      {what:\"Moderate momentum\",signals:[\"Most indicators agree\",\"Average volume\"]},\n      {what:\"Strong momentum\",signals:[\"All indicators agree\",\"Volume expanding\",\"Clean trend structure\"]}\n    ]\n  },\n  breakout_confirmed:{type:\"noul\",instructions:\"Do the closes in `market.candles_recent` and `market.indicators` confirm a breakout from the prior range?\"},\n  news_supports_direction:{type:\"noul\",instructions:\"Do the headlines in `news.headlines_last_24h` support the direction implied by `market.indicators`?\",criteria:{true:\"Headlines are directionally consistent with the technical picture\",false:\"Headlines are contradictory, irrelevant, or missing\"}},\n  risk_off_environment:{type:\"noul\",instructions:\"Do `news.headlines_last_24h` or `market.regime` indicate a risk-off environment (panic, liquidations, macro fear) that could invalidate technical signals?\"},\n  volatility_dangerous:{type:\"noul\",instructions:\"Is `market.indicators.atr_pct` high enough to threaten stop-loss-based positions?\"}\n};\nreturn [{json:{symbol:src.symbol, timeframe:\"1h\", idx:src.idx, runId:src.runId, allowedSide:src.allowedSide, regime1h:src.regime1h, regime4h:src.regime4h, confluence:src.confluence, squeeze:src.squeeze, metrics1h:m1, metrics4h:m4, fundingAnnual:src.fundingAnnual, oiChangePct:src.oiChangePct, blockedReason:src.blockedReason, nextFunding:src.nextFundingTime, payload:{state:state, questions:questions, model:cfg.MODEL ?? \"typesafe/jev-1.13\"}}}];\n"
       },
       "id": "ef04fd46-c949-45f1-b4c3-62afda59dfb0",
       "name": "Code: Build Jev Payload",
@@ -450,11 +488,15 @@
       "position": [
         6256,
         1136
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "jsCode": "// ---------------- Code: Combine to Signal ----------------\nconst resp = $input.first().json;\nconst meta = $(\"Code: Build Jev Payload\").item.json;\nconst inp = {...meta, ...resp};\nconst answers = resp.answers;\nif (!answers || Object.keys(answers).length===0) { return [{json:inp}]; }\nconst d = answers.direction||{}; const probs = d.probabilities||{};\nconst bull = probs.bullish||0, bear = probs.bearish||0, neu = probs.neutral||0;\nconst conf = d.confidence||0; const net = bull-bear;\nconst ts = (answers.trend_strength && answers.trend_strength.score!==undefined)?answers.trend_strength.score:0;\nconst noul = k => ((answers[k] && answers[k].noul!==undefined)?answers[k].noul:0);\nconst ws = $getWorkflowStaticData(\"global\"); const cfg = ws.config||{};\nlet s = (cfg.WEIGHT_NET||0.40)*net\n      + (cfg.WEIGHT_TREND||0.15)*(ts/3)*(net>0?1:-1)\n      + (cfg.WEIGHT_BREAKOUT||0.15)*(noul(\"breakout_confirmed\")-0.5)*2\n      + (cfg.WEIGHT_NEWS||0.15)*(noul(\"news_supports_direction\")-0.5)*2\n      + (cfg.WEIGHT_RISKOFF||-0.10)*noul(\"risk_off_environment\")\n      + (cfg.WEIGHT_VOL||-0.10)*noul(\"volatility_dangerous\");\ns = Math.max(-1, Math.min(1, s));\nlet decision;\nconst CG = cfg.CONFIDENCE_GATE||0.60, SF = cfg.STRENGTH_FLOOR||1.5, SL = cfg.SIGNAL_LONG||0.25, SS = cfg.SIGNAL_SHORT||-0.25;\nif (conf < CG) decision = \"NO_TRADE_LOW_CONFIDENCE\";\nelse if (ts < SF) decision = \"NO_TRADE_WEAK_TREND\";\nelse if (s > SL) decision = \"LONG\";\nelse if (s < SS) decision = \"SHORT\";\nelse decision = \"FLAT\";\n// respect crowding gate: never take the blocked side\nif (inp.allowedSide===\"long\" && decision===\"SHORT\") decision=\"FLAT\";\nif (inp.allowedSide===\"short\" && decision===\"LONG\") decision=\"FLAT\";\nif (inp.allowedSide===\"none\") decision = \"NO_TRADE_CROWDING\";\nconst msg = \"Jev: \"+decision+\" \"+inp.symbol+\" (1h, 4h \"+inp.confluence+\") | Conf \"+conf.toFixed(2)+\" | Str \"+s.toFixed(2)+\" | Trend \"+ts+\" | P(bull)\"+bull.toFixed(2)+\" P(bear)\"+bear.toFixed(2)+\" P(neu)\"+neu.toFixed(2)+\" | Fund \"+((inp.fundingAnnual||0)*100).toFixed(1)+\"%/yr OI \"+((inp.oiChangePct||0)>=0?\"+\":\"\")+(inp.oiChangePct||0).toFixed(2)+\"%\";\nreturn [{json:{\n  symbol:inp.symbol, timeframe:inp.timeframe||\"1h\", runId:inp.runId||null, idx:inp.idx,\n  decision:decision, direction_choice:d.choice||null, probabilities:probs, confidence:+conf.toFixed(4),\n  signal_strength:+s.toFixed(4), trend_strength:ts,\n  breakout_confirmed:+noul(\"breakout_confirmed\").toFixed(4), news_supports:+noul(\"news_supports_direction\").toFixed(4),\n  risk_off:+noul(\"risk_off_environment\").toFixed(4), volatility_dangerous:+noul(\"volatility_dangerous\").toFixed(4),\n  allowedSide:inp.allowedSide, blockedReason:inp.blockedReason||\"\", regime1h:inp.regime1h, regime4h:inp.regime4h,\n  confluence:inp.confluence, squeeze:inp.squeeze, fundingAnnual:inp.fundingAnnual, oiChangePct:inp.oiChangePct,\n  takerBuyApprox:inp.takerBuyApprox, nextFunding:inp.nextFunding, message:msg, raw_answers:answers\n}}];\n"
+        "jsCode": "// ---------------- Code: Combine to Signal ----------------\nconst resp = $input.first().json;\nconst meta = $(\"Code: Build Jev Payload\").item.json;\nconst inp = {...meta, ...resp};\nconst answers = resp.answers;\nif (!answers || Object.keys(answers).length===0) {\n  // Crowd-skip records already carry a decision. Anything else means the Jev\n  // call failed after retries: record it as a no-trade, never as a signal.\n  if (!inp.decision) {\n    inp.decision = \"NO_TRADE_JEV_ERROR\";\n    inp.blockedReason = \"jev_error:\" + String((resp.error && (resp.error.message || resp.error)) || \"no answers\").slice(0, 120);\n  }\n  return [{json:inp}];\n}\nconst d = answers.direction||{}; const probs = d.probabilities||{};\nconst bull = probs.bullish||0, bear = probs.bearish||0, neu = probs.neutral||0;\nconst conf = d.confidence||0; const net = bull-bear;\nconst ts = (answers.trend_strength && answers.trend_strength.score!==undefined)?answers.trend_strength.score:0;\nconst noul = k => ((answers[k] && answers[k].noul!==undefined)?answers[k].noul:0);\nconst ws = $getWorkflowStaticData(\"global\"); const cfg = ws.config||{};\nlet s = (cfg.WEIGHT_NET ?? 0.40)*net\n      + (cfg.WEIGHT_TREND ?? 0.15)*(ts/3)*(net>0?1:-1)\n      + (cfg.WEIGHT_BREAKOUT ?? 0.15)*(noul(\"breakout_confirmed\")-0.5)*2\n      + (cfg.WEIGHT_NEWS ?? 0.15)*(noul(\"news_supports_direction\")-0.5)*2\n      + (cfg.WEIGHT_RISKOFF ?? -0.10)*noul(\"risk_off_environment\")\n      + (cfg.WEIGHT_VOL ?? -0.10)*noul(\"volatility_dangerous\");\ns = Math.max(-1, Math.min(1, s));\nlet decision;\nconst CG = cfg.CONFIDENCE_GATE ?? 0.60, SF = cfg.STRENGTH_FLOOR ?? 1.5, SL = cfg.SIGNAL_LONG ?? 0.25, SS = cfg.SIGNAL_SHORT ?? -0.25;\nif (conf < CG) decision = \"NO_TRADE_LOW_CONFIDENCE\";\nelse if (ts < SF) decision = \"NO_TRADE_WEAK_TREND\";\nelse if (s > SL) decision = \"LONG\";\nelse if (s < SS) decision = \"SHORT\";\nelse decision = \"FLAT\";\n// respect crowding gate: never take the blocked side\nif (inp.allowedSide===\"long\" && decision===\"SHORT\") decision=\"FLAT\";\nif (inp.allowedSide===\"short\" && decision===\"LONG\") decision=\"FLAT\";\nif (inp.allowedSide===\"none\") decision = \"NO_TRADE_CROWDING\";\nconst msg = \"Jev: \"+decision+\" \"+inp.symbol+\" (1h, 4h \"+inp.confluence+\") | Conf \"+conf.toFixed(2)+\" | Str \"+s.toFixed(2)+\" | Trend \"+ts+\" | P(bull)\"+bull.toFixed(2)+\" P(bear)\"+bear.toFixed(2)+\" P(neu)\"+neu.toFixed(2)+\" | Fund \"+((inp.fundingAnnual||0)*100).toFixed(1)+\"%/yr OI \"+((inp.oiChangePct||0)>=0?\"+\":\"\")+(inp.oiChangePct||0).toFixed(2)+\"%\";\nreturn [{json:{\n  symbol:inp.symbol, timeframe:inp.timeframe||\"1h\", runId:inp.runId||null, idx:inp.idx,\n  decision:decision, direction_choice:d.choice||null, probabilities:probs, confidence:+conf.toFixed(4),\n  signal_strength:+s.toFixed(4), trend_strength:ts,\n  breakout_confirmed:+noul(\"breakout_confirmed\").toFixed(4), news_supports:+noul(\"news_supports_direction\").toFixed(4),\n  risk_off:+noul(\"risk_off_environment\").toFixed(4), volatility_dangerous:+noul(\"volatility_dangerous\").toFixed(4),\n  allowedSide:inp.allowedSide, blockedReason:inp.blockedReason||\"\", regime1h:inp.regime1h, regime4h:inp.regime4h,\n  confluence:inp.confluence, squeeze:inp.squeeze, fundingAnnual:inp.fundingAnnual, oiChangePct:inp.oiChangePct,\n  takerBuyApprox:inp.takerBuyApprox, nextFunding:inp.nextFunding, message:msg, raw_answers:answers\n}}];\n"
       },
       "id": "1cad2838-19e7-4367-ba9f-7bce9cc8bf42",
       "name": "Code: Combine to Signal",
@@ -467,7 +509,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ---------------- Code: Cooldown Check ----------------\nconst ws = $getWorkflowStaticData(\"global\");\nif (!ws.symbolAlert) ws.symbolAlert = {};\nconst cfg = ws.config||{};\nconst sym = $input.first().json.symbol;\nconst last = ws.symbolAlert[sym] || 0;\nconst hours = cfg.COOLDOWN_HOURS||4;\nconst now = Date.now();\nconst allowed = (now-last) > hours*3600*1000;\nreturn [{json:{...$input.first().json, alert_allowed:allowed, last_alert_ago_hours:+((now-last)/3600000).toFixed(2)}}];\n"
+        "jsCode": "// ---------------- Code: Cooldown Check ----------------\nconst ws = $getWorkflowStaticData(\"global\");\nif (!ws.symbolAlert) ws.symbolAlert = {};\nconst cfg = ws.config||{};\nconst sym = $input.first().json.symbol;\nconst last = ws.symbolAlert[sym] || 0;\nconst hours = cfg.COOLDOWN_HOURS ?? 4;\nconst now = Date.now();\nconst allowed = (now-last) > hours*3600*1000;\nreturn [{json:{...$input.first().json, alert_allowed:allowed, last_alert_ago_hours:+((now-last)/3600000).toFixed(2)}}];\n"
       },
       "id": "044c0c9d-91e3-49a7-b85a-ab7d7198ffee",
       "name": "Code: Cooldown Check",
@@ -568,25 +610,30 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "=https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ { chat_id: $env.TELEGRAM_CHAT_ID, text: $json.telegramText, parse_mode: \"HTML\", disable_web_page_preview: true } }}",
-        "options": {}
+        "chatId": "={{ $('Code: Config').first().json.config.TELEGRAM_CHAT_ID }}",
+        "text": "={{ $json.telegramText }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML",
+          "disable_web_page_preview": true
+        }
       },
       "id": "cbcf695a-bc29-403e-8e52-f6678533d464",
-      "name": "HTTP: Telegram Alert",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4,
+      "name": "Telegram: Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
       "position": [
         7600,
         1088
-      ]
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "jsCode": "// ---------------- Code: Mark Cooled ----------------\nconst ws = $getWorkflowStaticData(\"global\");\nif (!ws.symbolAlert) ws.symbolAlert = {};\nws.symbolAlert[$input.first().json.symbol] = Date.now();\nreturn $input.all();\n"
+        "jsCode": "// ---------------- Code: Mark Cooled ----------------\n// The Telegram node replaces the item with the API reply, so take the signal\n// from Code: Telegram Message. Only start the cooldown if the alert went out.\nconst ws = $getWorkflowStaticData(\"global\");\nif (!ws.symbolAlert) ws.symbolAlert = {};\nconst src = $(\"Code: Telegram Message\").first().json;\nconst tg = $input.first().json || {};\nconst sent = !tg.error && tg.ok !== false;\nif (sent) ws.symbolAlert[src.symbol] = Date.now();\nreturn [{json:{...src, alert_sent: sent,\n  telegram_error: sent ? null : String((tg.error && (tg.error.message || tg.error)) || \"unknown\").slice(0, 200)}}];\n"
       },
       "id": "f5e4c0f7-bf63-4577-9663-bc632684e290",
       "name": "Code: Mark Cooled",
@@ -599,7 +646,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// ---------------- Code: Accumulate Result ----------------\nconst ws = $getWorkflowStaticData(\"global\");\nif (!Array.isArray(ws.results)) ws.results = [];\nconst r = $input.first().json;\nws.results.push({\n  symbol:r.symbol, ts:Date.now(), runId:r.runId||ws.runId, idx:r.idx,\n  decision:r.decision, allowed_side:r.allowedSide, blocked_reason:r.blockedReason||\"\",\n  confidence:r.confidence||0, signal_strength:r.signal_strength||0, trend_strength:r.trend_strength||0,\n  probabilities:r.probabilities||{}, breakout_confirmed:r.breakout_confirmed||0,\n  news_supports:r.news_supports||0, risk_off:r.risk_off||0, volatility_dangerous:r.volatility_dangerous||0,\n  regime1h:r.regime1h, regime4h:r.regime4h, confluence:r.confluence, squeeze:!!r.squeeze,\n  fundingAnnual:r.fundingAnnual, oiChangePct:r.oiChangePct, takerBuyApprox:r.takerBuyApprox,\n  cooldown_skipped:!(r.alert_allowed!==false), alert_sent:!!r.telegramText, raw_answers:r.raw_answers||null\n});\nreturn [{json:{ok:true, symbol:r.symbol, decision:r.decision}}];\n"
+        "jsCode": "// ---------------- Code: Accumulate Result ----------------\nconst ws = $getWorkflowStaticData(\"global\");\nif (!Array.isArray(ws.results)) ws.results = [];\nconst r = $input.first().json;\nws.results.push({\n  symbol:r.symbol, ts:Date.now(), runId:r.runId||ws.runId, idx:r.idx,\n  decision:r.decision, allowed_side:r.allowedSide, blocked_reason:r.blockedReason||\"\",\n  confidence:r.confidence||0, signal_strength:r.signal_strength||0, trend_strength:r.trend_strength||0,\n  probabilities:r.probabilities||{}, breakout_confirmed:r.breakout_confirmed||0,\n  news_supports:r.news_supports||0, risk_off:r.risk_off||0, volatility_dangerous:r.volatility_dangerous||0,\n  regime1h:r.regime1h, regime4h:r.regime4h, confluence:r.confluence, squeeze:!!r.squeeze,\n  fundingAnnual:r.fundingAnnual, oiChangePct:r.oiChangePct, takerBuyApprox:r.takerBuyApprox,\n  cooldown_skipped:!(r.alert_allowed!==false), alert_sent:r.alert_sent===true, raw_answers:r.raw_answers||null\n});\nreturn [{json:{ok:true, symbol:r.symbol, decision:r.decision}}];\n"
       },
       "id": "7c1c03f1-6fed-415a-bcca-b4b3355d7009",
       "name": "Code: Accumulate Result",
@@ -651,6 +698,52 @@
       ],
       "webhookId": "e0f6cffa-1666-41e8-827e-fdb4b0c8c347",
       "disabled": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.dataOk }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a7d0c1e2-0001-4b6e-9f10-data0k000001",
+      "name": "IF: Data OK",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5472,
+        1056
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------- Code: Data-Error Record ----------------\n// Binance data for this symbol was missing after retries: log a skip, keep looping.\nconst src = $input.first().json;\nconst runId = ($getWorkflowStaticData(\"global\")).runId || null;\nreturn [{json:{\n  symbol:src.symbol, timeframe:\"1h\", runId:src.runId||runId, idx:src.idx,\n  decision:\"NO_TRADE_DATA_ERROR\", allowedSide:\"none\", blockedReason:\"data_error:\"+(src.dataErrors||[]).join(\",\"),\n  probabilities:{}, confidence:0, signal_strength:0, trend_strength:0, alert_allowed:true\n}}];\n"
+      },
+      "id": "a7d0c1e2-0002-4b6e-9f10-dataerr00002",
+      "name": "Code: Data-Error Record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5696,
+        880
+      ]
     }
   ],
   "connections": {
@@ -751,7 +844,7 @@
       "main": [
         [
           {
-            "node": "HTTP: Telegram Digest",
+            "node": "Telegram: Digest",
             "type": "main",
             "index": 0
           }
@@ -828,7 +921,7 @@
       "main": [
         [
           {
-            "node": "Code: TA Engine + Crowding",
+            "node": "IF: Data OK",
             "type": "main",
             "index": 0
           }
@@ -948,18 +1041,7 @@
       "main": [
         [
           {
-            "node": "HTTP: Telegram Alert",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "HTTP: Telegram Alert": {
-      "main": [
-        [
-          {
-            "node": "Code: Mark Cooled",
+            "node": "Telegram: Alert",
             "type": "main",
             "index": 0
           }
@@ -1011,6 +1093,46 @@
         [
           {
             "node": "Code: Combine to Signal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Data OK": {
+      "main": [
+        [
+          {
+            "node": "Code: TA Engine + Crowding",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code: Data-Error Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Data-Error Record": {
+      "main": [
+        [
+          {
+            "node": "Code: Accumulate Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram: Alert": {
+      "main": [
+        [
+          {
+            "node": "Code: Mark Cooled",
             "type": "main",
             "index": 0
           }
