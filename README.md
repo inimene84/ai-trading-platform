@@ -2,19 +2,19 @@
 
 <div align="center">
 
-![QuantumTrade Pro Butterfly Architecture](docs/assets/butterfly_architecture_map.svg)
+![QuantumTrade Pro live trading desk](docs/assets/screenshots/dashboard.png)
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
 [![Docker Compose](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?logo=fastapi)](https://fastapi.tiangolo.com)
 [![Qdrant Vector DB](https://img.shields.io/badge/Qdrant-v1.14.1-red.svg)](https://qdrant.tech/)
-[![Tests Passing](https://img.shields.io/badge/tests-82%20passed-success)](backend/tests/)
+[![Tests Passing](https://img.shields.io/badge/tests-927%20passed-success)](backend/tests/)
 [![Security: Hardened](https://img.shields.io/badge/security-hardened%20%7C%20fail--closed-emerald)](backend/security.py)
 
 **Autonomous Multi-Broker Quantitative Execution Engine with Conformal ML Gating, FINMEM Stratified Memory, and Fail-Closed Risk Enforcers.**
 
-[Architecture](#butterfly-architecture-map) • [Quant Stack](#institutional-quant-stack) • [Risk & Safety](#fail-closed-safety-stack) • [Deployment](#quickstart--production-deployment) • [API & Telemetry](#api-telemetry--monitoring)
+[Dashboard](#live-dashboard) • [Architecture](#system-architecture) • [Signal Gate](#jev-ensemble-signal-gate) • [Quant Stack](#institutional-quant-stack) • [Risk & Safety](#fail-closed-safety-stack) • [Deployment](#quickstart--production-deployment) • [API & Telemetry](#api-telemetry--monitoring)
 
 </div>
 
@@ -32,12 +32,12 @@ Evolving beyond simple rule-based bots or conversational agent experiments, the 
 
 ---
 
-## Butterfly Architecture Map
+## System Architecture
 
-The system is organized into a balanced, symmetric **Butterfly Architecture**:
-- **Left Wing (Intelligent Signal & Ingestion)**: Alternative news feeds, sentiment analysis, Qdrant vector retrieval, FINMEM stratified memory, Kronos time-series forecasting, and Jesse ML meta-models.
-- **Central Core (Fail-Closed Risk & Execution Hub)**: Dual-mode session routing, rolling-peak drawdown gates, directional exposure caps, min-edge fee filters, and affirmative live guards.
-- **Right Wing (Multi-Broker Execution & Active Management)**: GTX maker routing on Binance, FIX/OpenAPI dispatch on cTrader, dynamic ATR trailing stops, and startup exchange SL/TP restoration.
+The platform is split into three layers, with GitHub rendering the diagram below directly from the source:
+- **Signals & Ingestion**: alternative news feeds, sentiment analysis, Qdrant vector retrieval, FINMEM stratified memory, Kronos time-series forecasting, Jesse ML meta-models, and the n8n Jev Ensemble workflow.
+- **Fail-Closed Risk Core**: dual-mode session routing, rolling-peak drawdown gates, directional exposure caps, min-edge fee filters, and affirmative live guards.
+- **Execution & Venue Management**: GTX maker routing on Binance, FIX/OpenAPI dispatch on cTrader, dynamic ATR trailing stops, and startup exchange SL/TP restoration.
 
 ```mermaid
 flowchart LR
@@ -46,7 +46,7 @@ flowchart LR
     classDef rightWing fill:#0f172a,stroke:#a855f7,stroke-width:2px,color:#f8fafc;
     classDef storage fill:#022c22,stroke:#059669,stroke-width:1px,color:#f8fafc;
 
-    subgraph LeftWing["LEFT WING — Signals & Ingestion"]
+    subgraph LeftWing["SIGNALS & INGESTION"]
         direction TB
         NEWS["Alternative Feeds<br/>(NewsAPI, Fred, CryptoCompare)"]:::leftWing
         QD_NEWS[("Qdrant Vector DB<br/>crypto-news (1536-dim)")]:::storage
@@ -55,12 +55,16 @@ flowchart LR
         KRONOS["Kronos Sidecar<br/>(Time-Series Foundation Model)"]:::leftWing
         JESSE_ML["Jesse ML Meta-Labeling<br/>(LightGBM + Conformal Gating)"]:::leftWing
 
+        JEV["n8n Jev Ensemble v2<br/>(hourly scans, OpenRouter ensemble)"]:::leftWing
+        LLM["Backend LLM Routing<br/>(OmniRoute / LiteLLM / OpenRouter)"]:::leftWing
+
         NEWS --> QD_NEWS
         QD_NEWS --> FINMEM
         REGIME --> FINMEM
+        LLM --> FINMEM
     end
 
-    subgraph CenterCore["CORE HUB — Hardened Fail-Closed Risk"]
+    subgraph CenterCore["FAIL-CLOSED RISK CORE"]
         direction TB
         LIVE_GATE{"Double-Lock Guard<br/>CONFIRM_LIVE_DEPLOY + Auth"}:::centerCore
         RISK_GUARD["Risk Guard Enforcer<br/>(Rolling Peak Drawdown & Daily Loss)"]:::centerCore
@@ -76,7 +80,7 @@ flowchart LR
         MIN_EDGE --> EXEC_LOCK
     end
 
-    subgraph RightWing["RIGHT WING — Execution & Venue Management"]
+    subgraph RightWing["EXECUTION & VENUES"]
         direction TB
         ROUTER["Unified Order Router<br/>(Live / Paper Parallel)"]:::rightWing
         BINANCE["Binance Futures Service<br/>(Maker GTX Post-Only)"]:::rightWing
@@ -101,7 +105,11 @@ flowchart LR
     subgraph Persistence["State & Metrics"]
         SQL[(SQLite / PostgreSQL<br/>Trades & Partitioned Snapshots)]:::storage
         INFLUX[(InfluxDB v2<br/>Telemetry & Equity Curves)]:::storage
+        SUPA[(Supabase<br/>jev_signals log)]:::storage
     end
+
+    JEV -.-> SUPA
+    JEV -.-> TG["Telegram alerts"]:::rightWing
 
     BOOK_PART -.-> SQL
     ROUTER -.-> SQL
@@ -110,15 +118,42 @@ flowchart LR
 
 ---
 
-## Trading Cockpit & Risk Center
+## Live Dashboard
+
+Real captures from the production deployment: Binance Futures live, OmniRoute auto-select, system status OK (user name and balance blurred). The Markets and Forecast captures came from a browser session without backend auth, so their status chips read offline.
+
+| Live trading desk | Markets overview |
+|---|---|
+| ![Live trading desk](docs/assets/screenshots/dashboard.png) | ![Markets overview](docs/assets/screenshots/markets.png) |
 
 <div align="center">
 
-![Trading Cockpit Interface](docs/assets/quantumtrade_cockpit_dashboard.svg)
+![Kronos forecasts](docs/assets/screenshots/forecast.png)
 
-*Paper-mode HUD: multi-asset telemetry, FINMEM tiers, conformal gate, and fail-closed risk limits. Not a live P&amp;L screenshot.*
+Kronos foundation-model forecasts with batch runs across the unified feed.
 
 </div>
+
+**Price feed check.** Desk prices at capture time vs [CoinMarketCap](https://coinmarketcap.com/) quotes (2026-09-23 01:52 UTC):
+
+| Pair | Dashboard | CoinMarketCap | Diff |
+|---|---:|---:|---:|
+| BTC/USDT | 86,295.75 | 86,230.99 | +0.08% |
+| ETH/USDT | 2,753.41 | 2,749.16 | +0.15% |
+| SOL/USDT | 118.28 | 118.12 | +0.14% |
+| BNB/USDT | 789.30 | 788.64 | +0.08% |
+| XRP/USDT | 1.5807 | 1.5823 | -0.10% |
+| ADA/USDT | 0.2535 | 0.2529 | +0.25% |
+
+Differences are expected: the desk reads Binance Futures perpetuals, CoinMarketCap is a volume-weighted spot aggregate.
+
+---
+
+## Jev Ensemble Signal Gate
+
+The n8n Jev Ensemble v2 workflow scans the Binance Futures watchlist every hour, runs an OpenRouter ensemble decision per symbol, sends Telegram alerts, and logs every decision to Supabase (`jev_signals`). Most scans end without a directional call, which is the gate doing its job. Chart built from real rows; outcomes are not calibrated yet, so this shows selectivity, not profitability.
+
+![Jev Ensemble signal gate](docs/assets/screenshots/jev_signal_gate.png)
 
 ---
 
