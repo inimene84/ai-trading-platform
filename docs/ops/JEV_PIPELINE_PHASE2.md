@@ -43,7 +43,7 @@ change plus explicit human confirm is required before any live venue call.
 | POST | `/api/data/collect-market` | Alias (zip-shaped scanner payload) |
 | POST | `/api/data/collect-news` | Alias |
 | POST | `/api/jev/pipeline/evaluate` | Run existing `evaluate_symbol` + log |
-| POST | `/api/jev/pipeline/orchestrate` | Oldest-pending scan → eval → mode gate |
+| POST | `/api/jev/pipeline/orchestrate` | Oldest pending scans (up to `limit`) → eval → mode gate |
 | GET | `/api/jev/pipeline/calibration` | SQLite-friendly calibration snapshot |
 | GET | `/api/jev/pipeline/news/{symbol}` | Recent ingested headlines |
 | GET | `/api/jev/pipeline/status` | Current mode / live-blocked flag |

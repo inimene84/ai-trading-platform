@@ -32,8 +32,12 @@ from backend.security import is_sensitive_request, validate_admin_request
 from backend.services.jev_pipeline import (
     calibration_snapshot,
     decide_execution,
+    evaluate_and_log,
+    execute_paper_order,
     ingest_market_scan,
     ingest_news_sentiment,
+    last_price_from_context,
+    map_pipeline_side,
 )
 
 
@@ -148,6 +152,35 @@ def test_off_and_shadow_never_call_execute(monkeypatch):
     assert called == []
 
 
+def test_scanner_fallback_cannot_invent_a_side():
+    hold = {"status": "ok", "action": None, "signal": "neutral", "confidence": 0.0, "vetoed": False, "conflict": False}
+    assert map_pipeline_side(hold, "LONG") is None
+    clash = {"status": "ok", "action": "BUY", "signal": "bearish", "confidence": 0.9, "vetoed": False, "conflict": True}
+    assert map_pipeline_side(clash, "LONG") is None
+    buy = {"status": "ok", "action": "BUY", "signal": "bullish", "confidence": 0.8, "vetoed": False, "conflict": False}
+    assert map_pipeline_side(buy, "SHORT") == "BUY"
+
+
+def test_conflict_and_zero_confidence_are_ineligible(monkeypatch):
+    monkeypatch.setenv("JEV_EXECUTION_MODE", "paper")
+    monkeypatch.setattr("backend.services.jev_pipeline.is_trading_allowed", lambda: True)
+    called: list[str] = []
+
+    def boom(**_kwargs):
+        called.append("execute")
+        return {"success": True}
+
+    conflicted = decide_execution(
+        evaluation={**_ok_eval(0.9), "conflict": True},
+        side="BUY",
+        confidence=0.9,
+        execute_fn=boom,
+    )
+    assert conflicted["called_execute"] is False
+    assert conflicted["execution_decision"] == "conflict"
+    assert called == []
+
+
 def test_confidence_alone_does_not_execute(monkeypatch):
     called: list[str] = []
 
@@ -237,6 +270,92 @@ def test_pipeline_http_auth_and_status(monkeypatch):
     assert payload["live_execution_allowed"] is False
     assert payload["may_call_execute"] is False
     assert payload["sizing_allowed"] is False
+
+
+@pytest.mark.asyncio
+async def test_evaluate_and_log_off_never_calls_execute(monkeypatch, db_session):
+    monkeypatch.setenv("JEV_EXECUTION_MODE", "off")
+    called: list[str] = []
+
+    async def fake_eval(*_args, **_kwargs):
+        return _ok_eval(0.9)
+
+    def boom(**_kwargs):
+        called.append("execute")
+        return {"success": True, "order_id": "nope"}
+
+    monkeypatch.setattr("backend.services.jev_pipeline.evaluate_symbol", fake_eval)
+    result = await evaluate_and_log(
+        db_session,
+        symbol="BTCUSDT",
+        fallback_direction="LONG",
+        fallback_confidence=0.9,
+        fetch_bars=False,
+        execute_fn=boom,
+    )
+    assert result["execution_mode"] == "off"
+    assert result["called_execute"] is False
+    assert result["executed"] is False
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_evaluate_and_log_hold_plus_scanner_long_does_not_fill(monkeypatch, db_session):
+    monkeypatch.setenv("JEV_EXECUTION_MODE", "paper")
+    monkeypatch.setattr("backend.services.jev_pipeline.is_trading_allowed", lambda: True)
+    called: list[str] = []
+
+    async def hold_eval(*_args, **_kwargs):
+        return {"status": "ok", "action": None, "signal": "neutral", "confidence": 0.0, "vetoed": False, "conflict": False}
+
+    def boom(**_kwargs):
+        called.append("execute")
+        return {"success": True}
+
+    monkeypatch.setattr("backend.services.jev_pipeline.evaluate_symbol", hold_eval)
+    result = await evaluate_and_log(
+        db_session,
+        symbol="ETHUSDT",
+        fallback_direction="LONG",
+        fallback_confidence=0.88,
+        fetch_bars=False,
+        execute_fn=boom,
+    )
+    assert result["called_execute"] is False
+    assert result["executed"] is False
+    assert result["execution_decision"] == "no_direction"
+    assert called == []
+    assert float(result["confidence"]) == 0.0
+
+
+def test_paper_order_requires_mark_price():
+    result = execute_paper_order(symbol="BTCUSDT", side="BUY", price=0.0, evaluation={}, price_data={})
+    assert result["success"] is False
+    assert result["blocked"] is True
+    assert result["reason"] == "no_mark_price"
+
+
+def test_last_price_from_scan_bars():
+    assert last_price_from_context({"market": {"last_close": 101.5}}, {}) == 101.5
+    assert last_price_from_context({}, {"ohlcv": [{"open": 1, "high": 2, "low": 0.5, "close": 99.2, "volume": 1}]}) == 99.2
+
+
+def test_pipeline_post_fail_closed_without_admin_token(monkeypatch):
+    from starlette.testclient import TestClient
+
+    from backend.main import app
+    from backend.security import AUTH_ENV_VARS
+
+    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("PAPER_TRADING", "true")
+    for name in AUTH_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    client = TestClient(app, raise_server_exceptions=False)
+    denied = client.post("/api/jev/pipeline/orchestrate")
+    assert denied.status_code == 401
+    denied_ingest = client.post("/api/jev/ingest/market", json={"symbol": "BTCUSDT", "indicators": {}})
+    assert denied_ingest.status_code == 401
 
 
 def test_no_parallel_fastapi_stub_vendored():

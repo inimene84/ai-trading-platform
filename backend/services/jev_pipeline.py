@@ -44,6 +44,7 @@ ExecuteFn = Callable[..., dict[str, Any]]
 _BULLISH = {"STRONG_BUY", "BUY", "LONG", "BULLISH"}
 _BEARISH = {"STRONG_SELL", "SELL", "SHORT", "BEARISH"}
 PAPER_SESSION_ID = "jev_pipeline_paper"
+PAPER_PORTFOLIO_NAME = "jev_pipeline_paper"
 
 
 def utc_now() -> datetime:
@@ -158,7 +159,7 @@ def pending_scans(db: Session, limit: int = 1) -> list[JevMarketScan]:
     return (
         db.query(JevMarketScan)
         .filter(~JevMarketScan.id.in_(evaluated_ids))
-        .order_by(JevMarketScan.scan_timestamp.desc())
+        .order_by(JevMarketScan.scan_timestamp.asc())
         .limit(max(1, min(limit, 5)))
         .all()
     )
@@ -197,15 +198,18 @@ def metrics_from_indicators(indicators: dict[str, Any] | None) -> dict[str, Any]
     return metrics
 
 
-def map_pipeline_side(evaluation: dict[str, Any], fallback_direction: str | None) -> str | None:
+def map_pipeline_side(evaluation: dict[str, Any], fallback_direction: str | None = None) -> str | None:
+    """Side comes from Jev only. Scanner LONG/SHORT must not invent a fill."""
+    _ = fallback_direction
+    if evaluation.get("conflict") or evaluation.get("vetoed"):
+        return None
     action = str(evaluation.get("action") or "").upper()
     signal = str(evaluation.get("signal") or "").upper()
-    fallback = str(fallback_direction or "").upper()
-    if action in _BULLISH or signal in _BULLISH or fallback in _BULLISH:
+    if action in _BULLISH or signal in _BULLISH:
         if action in _BEARISH or signal in _BEARISH:
             return None
         return "BUY"
-    if action in _BEARISH or signal in _BEARISH or fallback in _BEARISH:
+    if action in _BEARISH or signal in _BEARISH:
         return "SELL"
     return None
 
@@ -221,10 +225,11 @@ def decide_execution(
     mode = jev_execution_mode()
     threshold = jev_trade_threshold()
     vetoed = bool(evaluation.get("vetoed"))
+    conflict = bool(evaluation.get("conflict"))
     status = str(evaluation.get("status") or "")
     directional = side in {"BUY", "SELL"}
     confident = confidence >= threshold
-    eligible = status == "ok" and directional and confident and not vetoed
+    eligible = status == "ok" and directional and confident and not vetoed and not conflict
     base = {
         "execution_mode": mode,
         "called_execute": False,
@@ -236,7 +241,7 @@ def decide_execution(
         "confidence": confidence,
     }
     if not eligible:
-        reason = _ineligible_reason(status, directional, confident, vetoed, threshold)
+        reason = _ineligible_reason(status, directional, confident, vetoed, conflict, threshold)
         return {**base, "execution_decision": reason}
 
     if mode == "off":
@@ -275,6 +280,28 @@ def check_paper_risk_gates(db: Session) -> None:
     enforce_risk_limits(db, get_risk_config(), open_trades, snapshot)
 
 
+def last_price_from_context(
+    evaluation: dict[str, Any] | None = None,
+    price_data: dict[str, Any] | None = None,
+) -> float:
+    market = (evaluation or {}).get("market") if isinstance(evaluation, dict) else None
+    if isinstance(market, dict):
+        close = _optional_float(market.get("last_close") or market.get("close"))
+        if close and close > 0:
+            return close
+    bars = bars_from_price_data(price_data if isinstance(price_data, dict) else None)
+    if bars:
+        close = _optional_float(bars[-1].get("close"))
+        if close and close > 0:
+            return close
+    if isinstance(price_data, dict):
+        for key in ("last", "last_price", "close", "price"):
+            close = _optional_float(price_data.get(key))
+            if close and close > 0:
+                return close
+    return 0.0
+
+
 def execute_paper_order(
     *,
     symbol: str,
@@ -284,6 +311,8 @@ def execute_paper_order(
     stop_loss: float = 0.0,
     take_profit: float = 0.0,
     db: Session | None = None,
+    evaluation: dict[str, Any] | None = None,
+    price_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Place a paper/sandbox fill via the platform engine. Never hits a live broker."""
     if db is not None:
@@ -296,20 +325,32 @@ def execute_paper_order(
             logger.warning("JEV paper execute fail-closed on risk check: %s", exc)
             return {"success": False, "blocked": True, "reason": f"risk_guard_error:{exc}", "order_id": ""}
 
+    mark = float(price or 0.0)
+    if mark <= 0:
+        mark = last_price_from_context(evaluation, price_data)
+    if mark <= 0:
+        return {"success": False, "blocked": True, "reason": "no_mark_price", "order_id": ""}
+
     qty = float(quantity if quantity is not None else jev_paper_quantity())
     ut = UnifiedTrading()
-    ut.init_session(
+    session = ut.init_session(
         "binance_futures",
         mode="paper",
         paper_balance=paper_starting_balance(),
         session_id=PAPER_SESSION_ID,
     )
+    dedicated = ut._paper.find_or_create_portfolio(
+        name=PAPER_PORTFOLIO_NAME,
+        balance=paper_starting_balance(),
+        exchange="binance_futures",
+    )
+    session.paper_portfolio_id = dedicated
     order = UnifiedOrder(
         symbol=normalize_symbol(symbol),
         side=OrderSide.BUY if side == "BUY" else OrderSide.SELL,
         order_type=OrderType.MARKET,
         quantity=qty,
-        price=price,
+        price=mark,
         stop_loss=stop_loss,
         take_profit=take_profit,
     )
@@ -321,6 +362,7 @@ def execute_paper_order(
         "filled_qty": resp.filled_qty,
         "message": resp.message,
         "broker": "paper",
+        "portfolio": PAPER_PORTFOLIO_NAME,
     }
 
 
@@ -355,8 +397,13 @@ async def evaluate_and_log(
     if source_scan is not None and not market:
         market = [{"indicators": source_scan.indicators, "price_data": source_scan.price_data}]
 
-    confidence = float(evaluation.get("confidence") or fallback_confidence or 0.0)
-    side = map_pipeline_side(evaluation, fallback_direction or (source_scan.signal_direction if source_scan else None))
+    raw_confidence = evaluation.get("confidence")
+    if raw_confidence is None:
+        confidence = float(fallback_confidence or 0.0)
+    else:
+        confidence = float(raw_confidence)
+    side = map_pipeline_side(evaluation)
+    scan_price = source_scan.price_data if source_scan is not None and isinstance(source_scan.price_data, dict) else {}
     decision = decide_execution(
         evaluation=evaluation,
         side=side,
@@ -372,6 +419,8 @@ async def evaluate_and_log(
                 symbol=symbol,
                 side=str(kwargs.get("side") or side),
                 db=db,
+                evaluation=evaluation,
+                price_data=scan_price,
             ),
         )
 
@@ -388,6 +437,7 @@ async def evaluate_and_log(
             "vetoed": bool(evaluation.get("vetoed")),
             "conflict": bool(evaluation.get("conflict")),
             "status": evaluation.get("status"),
+            "scanner_direction": fallback_direction,
         },
         market_context={"recent_scans": market},
         news_sentiment_context={"recent_news": news},
@@ -479,32 +529,39 @@ async def orchestrate_scan(
             "reason": "no pending scans",
             "executed": False,
             "execution_mode": jev_execution_mode(),
+            "processed": 0,
+            "results": [],
         }
-    scan = scans[0]
-    news_rows = recent_news_for_symbol(db, scan.symbol, days=3, limit=20)
-    news_ctx = [
-        {
-            "headline": row.headline,
-            "sentiment": row.sentiment_score,
-            "impact": row.impact_rating,
-            "published_at": row.published_at.isoformat() if row.published_at else None,
-        }
-        for row in news_rows
-    ]
-    result = await evaluate_and_log(
-        db,
-        symbol=scan.symbol,
-        timeframe=scan.timeframe,
-        source_scan=scan,
-        news_context=news_ctx,
-        fallback_direction=scan.signal_direction,
-        fallback_confidence=scan.confidence,
-        client=client,
-        fetch_bars=fetch_bars,
-        execute_fn=execute_fn,
-    )
-    result["scan_id"] = scan.id
-    return result
+    results: list[dict[str, Any]] = []
+    for scan in scans:
+        news_rows = recent_news_for_symbol(db, scan.symbol, days=3, limit=20)
+        news_ctx = [
+            {
+                "headline": row.headline,
+                "sentiment": row.sentiment_score,
+                "impact": row.impact_rating,
+                "published_at": row.published_at.isoformat() if row.published_at else None,
+            }
+            for row in news_rows
+        ]
+        result = await evaluate_and_log(
+            db,
+            symbol=scan.symbol,
+            timeframe=scan.timeframe,
+            source_scan=scan,
+            news_context=news_ctx,
+            fallback_direction=scan.signal_direction,
+            fallback_confidence=scan.confidence,
+            client=client,
+            fetch_bars=fetch_bars,
+            execute_fn=execute_fn,
+        )
+        result["scan_id"] = scan.id
+        results.append(result)
+    payload = dict(results[0])
+    payload["processed"] = len(results)
+    payload["results"] = results
+    return payload
 
 
 def calibration_snapshot(db: Session) -> dict[str, Any]:
@@ -570,11 +627,20 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
-def _ineligible_reason(status: str, directional: bool, confident: bool, vetoed: bool, threshold: float) -> str:
+def _ineligible_reason(
+    status: str,
+    directional: bool,
+    confident: bool,
+    vetoed: bool,
+    conflict: bool,
+    threshold: float,
+) -> str:
     if status != "ok":
         return "no_signal"
     if vetoed:
         return "vetoed"
+    if conflict:
+        return "conflict"
     if not directional:
         return "no_direction"
     if not confident:

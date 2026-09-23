@@ -29,7 +29,7 @@ SENTRY_PREFIXES = ("/sentry",)
 TRADING_PREFIXES = ("/trading", "/api/trading")
 JESSE_PREFIXES = ("/jesse", "/api/jesse")
 JEV_PREFIXES = ("/jev", "/api/jev")
-JEV_INGEST_PREFIXES = ("/data", "/api/data")
+JEV_INGEST_PREFIXES = ("/data/collect-", "/api/data/collect-")
 PUBLIC_TRADING_PATHS = {
     "/trading/strategies",
     "/api/trading/strategies",
