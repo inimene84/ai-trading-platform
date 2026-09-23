@@ -120,7 +120,7 @@ flowchart LR
 
 ## Live Dashboard
 
-Real captures from the production deployment (user details blurred).
+Real captures from the production deployment: Binance Futures live, OmniRoute auto-select, system status OK (user name and balance blurred).
 
 | Live trading desk | Markets overview |
 |---|---|
@@ -133,6 +133,19 @@ Real captures from the production deployment (user details blurred).
 Kronos foundation-model forecasts with batch runs across the unified feed.
 
 </div>
+
+**Price feed check.** Desk prices at capture time vs [CoinMarketCap](https://coinmarketcap.com/) quotes (2026-09-23 01:52 UTC):
+
+| Pair | Dashboard | CoinMarketCap | Diff |
+|---|---:|---:|---:|
+| BTC/USDT | 86,295.75 | 86,230.99 | +0.08% |
+| ETH/USDT | 2,753.41 | 2,749.16 | +0.15% |
+| SOL/USDT | 118.28 | 118.12 | +0.14% |
+| BNB/USDT | 789.30 | 788.64 | +0.08% |
+| XRP/USDT | 1.5807 | 1.5823 | -0.10% |
+| ADA/USDT | 0.2535 | 0.2529 | +0.25% |
+
+Differences are expected: the desk reads Binance Futures perpetuals, CoinMarketCap is a volume-weighted spot aggregate.
 
 ---
 
