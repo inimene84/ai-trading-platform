@@ -50,6 +50,8 @@ Thumbs.db
 *.log
 .build.log
 hedge_fund.db
+hedge_fund.db-shm
+hedge_fund.db-wal
 
 # ── Qdrant runtime storage (binary / auto-generated) ─────────────────────────
 qdrant-storage/
