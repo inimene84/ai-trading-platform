@@ -1,7 +1,6 @@
 from colorama import Fore, Style
 from tabulate import tabulate
 from .analysts import ANALYST_ORDER
-import os
 import json
 
 
@@ -256,8 +255,8 @@ def print_trading_output(result: dict) -> None:
 
 def print_backtest_results(table_rows: list) -> None:
     """Print the backtest results in a nicely formatted table"""
-    # Clear the screen
-    os.system("cls" if os.name == "nt" else "clear")
+    # Clear the screen (ANSI escape; avoids spawning a shell via os.system)
+    print("\033[2J\033[H", end="")
 
     # Split rows into ticker rows and summary rows
     ticker_rows = []
