@@ -1,9 +1,9 @@
 /**
  * Config Service
  * Handles secure retrieval of API keys and secrets.
- * Priority: 
- * 1. Environment Variables (Injected by platform)
- * 2. Local Storage (User provided via UI)
+ * Sources (browser only, never build-time env):
+ * 1. Session storage (secrets entered via the UI, cleared on browser close)
+ * 2. Local storage (non-secret settings)
  */
 
 const LOCAL_STORAGE_KEY = 'quantum_trade_settings';
@@ -11,37 +11,10 @@ const SESSION_SECRETS_KEY = 'quantum_trade_session_secrets';
 
 export const configService = {
   getSecret(key: string): string | undefined {
-    // 1. Check environment variables safely
-    let envValue;
-    try {
-      if (typeof process !== 'undefined' && process.env) {
-        envValue = (process.env as any)[key];
-      }
-      
-      // Fallback for Vite text replacement (specifically for GEMINI_API_KEY)
-      if (!envValue && key === 'GEMINI_API_KEY') {
-        // @ts-ignore
-        if (typeof process !== 'undefined' && process.env && process.env.GEMINI_API_KEY) {
-           // @ts-ignore
-           envValue = process.env.GEMINI_API_KEY;
-        }
-      }
-    } catch (e) {
-      // Ignored: process is not defined
-    }
-    
-    // Check Vite's import.meta.env if available
-    if (!envValue) {
-      try {
-        if (typeof import.meta !== 'undefined' && (import.meta as any).env) {
-          envValue = (import.meta as any).env[`VITE_${key}`] || (import.meta as any).env[key];
-        }
-      } catch (e) {}
-    }
-
-    if (envValue && envValue !== `MY_${key}`) {
-      return envValue;
-    }
+    // Secrets are never read from build-time env (process.env / import.meta.env).
+    // Vite inlines the whole import.meta.env object for dynamic lookups, so any
+    // VITE_* secret present at build time would ship in the public JS bundle.
+    // Keys live server-side; the browser only holds what the operator enters.
 
     // 2. Session-only secrets (never persist credentials across browser restarts)
     try {
@@ -71,23 +44,9 @@ export const configService = {
   /**
    * Check if a secret is managed by the system (environment variable)
    */
-  isSystemManaged(key: string): boolean {
-    let envValue;
-    try {
-      if (typeof process !== 'undefined' && process.env) {
-        envValue = (process.env as any)[key];
-      }
-    } catch (e) {}
-
-    if (!envValue) {
-      try {
-        if (typeof import.meta !== 'undefined' && (import.meta as any).env) {
-          envValue = (import.meta as any).env[`VITE_${key}`] || (import.meta as any).env[key];
-        }
-      } catch (e) {}
-    }
-
-    return !!(envValue && envValue !== `MY_${key}`);
+  isSystemManaged(_key: string): boolean {
+    // Build-time env secrets are no longer supported in the browser.
+    return false;
   },
 
   /**

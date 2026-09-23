@@ -60,7 +60,7 @@ def is_ollama_installed() -> bool:
             return False
     elif system == "windows":  # Windows
         try:
-            result = subprocess.run(["where", "ollama"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
+            result = subprocess.run(["where", "ollama"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             return result.returncode == 0
         except Exception:
             return False
@@ -108,7 +108,7 @@ def start_ollama_server() -> bool:
         if system == "darwin" or system == "linux":  # macOS or Linux
             subprocess.Popen(["ollama", "serve"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         elif system == "windows":  # Windows
-            subprocess.Popen(["ollama", "serve"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         else:
             print(f"{Fore.RED}Unsupported operating system: {system}{Style.RESET_ALL}")
             return False
