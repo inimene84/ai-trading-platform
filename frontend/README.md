@@ -15,6 +15,6 @@ View your app in AI Studio: https://ai.studio/apps/e703aa53-2884-4d9e-89db-43924
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Start the backend (the dashboard assistant is served by the backend, no browser API key needed)
 3. Run the app:
    `npm run dev`

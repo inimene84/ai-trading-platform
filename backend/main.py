@@ -10,7 +10,6 @@ import sentry_sdk
 import structlog
 
 from backend.routes import api_router
-from backend.services.ollama_service import ollama_service
 from backend.services.binance_wallet_poller import start_wallet_poller
 from backend.services.binance_order_poller import start_order_poller
 from backend.services.ctrader_poller import start_ctrader_poller
@@ -138,29 +137,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠ OpenSearch research indices initialization skipped/failed: {e}")
 
-
-    # 1. Startup Logic
-    try:
-        logger.info("Checking Ollama availability...")
-        status = await ollama_service.check_ollama_status()
-        
-        if status["installed"]:
-            if status["running"]:
-                logger.info(f"✓ Ollama is installed and running at {status['server_url']}")
-                if status["available_models"]:
-                    logger.info(f"✓ Available models: {', '.join(status['available_models'])}")
-                else:
-                    logger.info("ℹ No models are currently downloaded")
-            else:
-                logger.info("ℹ Ollama is installed but not running")
-                logger.info("ℹ You can start it from the Settings page or manually with 'ollama serve'")
-        else:
-            logger.info("ℹ Ollama is not installed. Install it to use local models.")
-            logger.info("ℹ Visit https://ollama.com to download and install Ollama")
-            
-    except Exception as e:
-        logger.warning(f"Could not check Ollama status: {e}")
-        logger.info("ℹ Ollama integration is available if you install it later")
 
     # Initialize Unified Trading Router (Fincept port)
     try:

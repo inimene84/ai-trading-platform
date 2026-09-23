@@ -1,13 +1,9 @@
 from fastapi import APIRouter, HTTPException
 
 from backend.models.schemas import ErrorResponse
-from backend.services.ollama_service import OllamaService
 from backend.llm.models import get_models_list
 
 router = APIRouter(prefix="/language-models")
-
-# Initialize Ollama service
-ollama_service = OllamaService()
 
 @router.get(
     path="/",
@@ -17,15 +13,9 @@ ollama_service = OllamaService()
     },
 )
 async def get_language_models():
-    """Get the list of available cloud-based and Ollama language models."""
+    """Get the list of available language models."""
     try:
-        # Start with cloud models
         models = get_models_list()
-        
-        # Add available Ollama models (handles all checking internally)
-        ollama_models = await ollama_service.get_available_models()
-        models.extend(ollama_models)
-        
         return {"models": models}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve models: {str(e)}")

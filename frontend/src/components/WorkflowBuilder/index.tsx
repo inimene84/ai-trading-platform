@@ -260,7 +260,7 @@ export default function WorkflowBuilder({
               <DraggableComponent icon={<Database size={14} />} label="PostgreSQL" type="Integration" />
               <DraggableComponent icon={<Cloud size={14} />} label="Supabase" type="Integration" />
               <DraggableComponent icon={<BarChart3 size={14} />} label="Grafana" type="Integration" />
-              <DraggableComponent icon={<Sparkles size={14} />} label="Gemini Agent" type="Action" />
+              <DraggableComponent icon={<Sparkles size={14} />} label="AI Agent" type="Action" />
             </div>
             <div className="pt-4 mt-2 border-t border-zinc-800 flex-shrink-0">
               <button
@@ -299,7 +299,7 @@ export default function WorkflowBuilder({
                   disabled={isOptimizing}
                   className="w-full bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1 border border-indigo-500/20 transition-all"
                 >
-                  <BrainCircuit size={12} /> {isOptimizing ? 'Optimizing...' : 'Optimize with Gemini'}
+                  <BrainCircuit size={12} /> {isOptimizing ? 'Optimizing...' : 'Optimize with AI'}
                 </button>
                 <div className="flex gap-2">
                   <button className="flex-1 bg-zinc-800 hover:bg-zinc-700 py-2 rounded-lg text-[10px] font-bold flex items-center justify-center gap-1">

@@ -12,13 +12,11 @@ services:
     environment:
       PYTHONUNBUFFERED: 1
       PYTHONPATH: /app
-      OLLAMA_BASE_URL: http://litellm:4000
       TRADING_MODE: ${TRADING_MODE:-paper}
       ACTIVE_BROKER: ${ACTIVE_BROKER:-ctrader}
       BINANCE_API_KEY: ${BINANCE_API_KEY}
       BINANCE_SECRET_KEY: ${BINANCE_SECRET_KEY}
       BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
-      GEMINI_API_KEY: ${GOOGLE_API_KEY}
       XAI_API_KEY: ${XAI_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
@@ -119,7 +117,6 @@ services:
     image: ghcr.io/berriai/litellm@sha256:2fdd90b14e3d9244ce297f418b983d8cfd90ba6e72a10a8ddb30f7cf64852390
     container_name: ai-trading-litellm
     environment:
-      GEMINI_API_KEY: ${GOOGLE_API_KEY}
       XAI_API_KEY: ${XAI_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}

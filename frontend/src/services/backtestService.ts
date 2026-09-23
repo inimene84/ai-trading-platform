@@ -163,8 +163,8 @@ class BacktestService {
 
   async getAiAnalysis(results: BacktestResult) {
     // Imported on demand so `@google/genai` stays out of the entry chunk.
-    const { geminiService } = await import('./geminiService');
-    const analysis = await geminiService.analyzeBacktest(results);
+    const { assistantService } = await import('./assistantService');
+    const analysis = await assistantService.analyzeBacktest(results);
     return { summary: analysis };
   }
 }

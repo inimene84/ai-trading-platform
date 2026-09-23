@@ -4,7 +4,7 @@ Ported from FinceptTerminal LlmService.cpp (do_request, do_tool_loop)
 
 This lets your LLM call functions (get_price, place_order, etc.) in a loop
 until the task is done. Works with ANY OpenAI-compatible endpoint:
-OpenAI, xAI, Groq, Ollama, OpenRouter, etc.
+OpenAI, xAI, Groq, OpenRouter, etc.
 
 Usage:
     from backend.services.llm_tool_loop import LlmToolClient, ToolRegistry

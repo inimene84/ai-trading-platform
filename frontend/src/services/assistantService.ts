@@ -6,9 +6,9 @@ export interface ChatMessage {
 }
 
 /**
- * Dashboard assistant — server-side via OmniRoute (no browser GEMINI_API_KEY).
+ * Dashboard assistant — server-side via OmniRoute. No API key lives in the browser.
  */
-export const geminiService = {
+export const assistantService = {
   async chat(message: string, history: ChatMessage[] = []) {
     const res = await apiService.assistantChat(
       message,

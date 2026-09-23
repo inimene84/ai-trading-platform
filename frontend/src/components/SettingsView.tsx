@@ -332,14 +332,6 @@ export const SettingsView = () => {
 
       <SettingsSection title="AI Brains (LLM Engines)" icon={Cpu}>
         <SettingField 
-          label="Gemini API Key" 
-          secretKey="GEMINI_API_KEY"
-          value={settings.GEMINI_API_KEY || ''} 
-          error={errors.GEMINI_API_KEY}
-          onChange={(v) => updateSetting('GEMINI_API_KEY', v)}
-          description="Optional direct key; dashboard assistant routes via OmniRoute when configured."
-        />
-        <SettingField 
           label="xAI (Grok) API Key" 
           secretKey="XAI_API_KEY"
           value={settings.XAI_API_KEY || ''} 

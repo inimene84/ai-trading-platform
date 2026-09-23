@@ -6,8 +6,7 @@ import questionary
 from colorama import Fore, Style
 
 from backend.utils.analysts import ANALYST_ORDER
-from backend.llm.models import LLM_ORDER, OLLAMA_LLM_ORDER, get_model_info, ModelProvider, find_model_by_name
-from backend.utils.ollama import ensure_ollama_and_model
+from backend.llm.models import LLM_ORDER, get_model_info, find_model_by_name
 
 from dataclasses import dataclass
 from typing import Optional
@@ -18,7 +17,6 @@ def add_common_args(
     *,
     require_tickers: bool = False,
     include_analyst_flags: bool = True,
-    include_ollama: bool = True,
 ) -> argparse.ArgumentParser:
     parser.add_argument(
         "--tickers",
@@ -38,8 +36,6 @@ def add_common_args(
             action="store_true",
             help="Use all available analysts (overrides --analysts)",
         )
-    if include_ollama:
-        parser.add_argument("--ollama", action="store_true", help="Use Ollama for local LLM inference")
     parser.add_argument("--model", type=str, required=False, help="Model name to use (e.g., gpt-4o)")
     return parser
 
@@ -102,7 +98,7 @@ def select_analysts(flags: dict | None = None) -> list[str]:
     return choices
 
 
-def select_model(use_ollama: bool, model_flag: str | None = None) -> tuple[str, str]:
+def select_model(model_flag: str | None = None) -> tuple[str, str]:
     model_name: str = ""
     model_provider: str | None = None
 
@@ -116,73 +112,39 @@ def select_model(use_ollama: bool, model_flag: str | None = None) -> tuple[str, 
         else:
             print(f"{Fore.RED}Model '{model_flag}' not found. Please select a model.{Style.RESET_ALL}")
 
-    if use_ollama:
-        print(f"{Fore.CYAN}Using Ollama for local LLM inference.{Style.RESET_ALL}")
-        model_name = questionary.select(
-            "Select your Ollama model:",
-            choices=[questionary.Choice(display, value=value) for display, value, _ in OLLAMA_LLM_ORDER],
-            style=questionary.Style(
-                [
-                    ("selected", "fg:green bold"),
-                    ("pointer", "fg:green bold"),
-                    ("highlighted", "fg:green"),
-                    ("answer", "fg:green bold"),
-                ]
-            ),
-        ).ask()
+    model_choice = questionary.select(
+        "Select your LLM model:",
+        choices=[questionary.Choice(display, value=(name, provider)) for display, name, provider in LLM_ORDER],
+        style=questionary.Style(
+            [
+                ("selected", "fg:green bold"),
+                ("pointer", "fg:green bold"),
+                ("highlighted", "fg:green"),
+                ("answer", "fg:green bold"),
+            ]
+        ),
+    ).ask()
 
+    if not model_choice:
+        print("\n\nInterrupt received. Exiting...")
+        sys.exit(0)
+
+    model_name, model_provider = model_choice
+
+    model_info = get_model_info(model_name, model_provider)
+    if model_info and model_info.is_custom():
+        model_name = questionary.text("Enter the custom model name:").ask()
         if not model_name:
             print("\n\nInterrupt received. Exiting...")
             sys.exit(0)
 
-        if model_name == "-":
-            model_name = questionary.text("Enter the custom model name:").ask()
-            if not model_name:
-                print("\n\nInterrupt received. Exiting...")
-                sys.exit(0)
-
-        if not ensure_ollama_and_model(model_name):
-            print(f"{Fore.RED}Cannot proceed without Ollama and the selected model.{Style.RESET_ALL}")
-            sys.exit(1)
-
-        model_provider = ModelProvider.OLLAMA.value
+    if model_info:
         print(
-            f"\nSelected {Fore.CYAN}Ollama{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n"
+            f"\nSelected {Fore.CYAN}{model_provider}{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n"
         )
     else:
-        model_choice = questionary.select(
-            "Select your LLM model:",
-            choices=[questionary.Choice(display, value=(name, provider)) for display, name, provider in LLM_ORDER],
-            style=questionary.Style(
-                [
-                    ("selected", "fg:green bold"),
-                    ("pointer", "fg:green bold"),
-                    ("highlighted", "fg:green"),
-                    ("answer", "fg:green bold"),
-                ]
-            ),
-        ).ask()
-
-        if not model_choice:
-            print("\n\nInterrupt received. Exiting...")
-            sys.exit(0)
-
-        model_name, model_provider = model_choice
-
-        model_info = get_model_info(model_name, model_provider)
-        if model_info and model_info.is_custom():
-            model_name = questionary.text("Enter the custom model name:").ask()
-            if not model_name:
-                print("\n\nInterrupt received. Exiting...")
-                sys.exit(0)
-
-        if model_info:
-            print(
-                f"\nSelected {Fore.CYAN}{model_provider}{Style.RESET_ALL} model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n"
-            )
-        else:
-            model_provider = "Unknown"
-            print(f"\nSelected model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n")
+        model_provider = "Unknown"
+        print(f"\nSelected model: {Fore.GREEN + Style.BRIGHT}{model_name}{Style.RESET_ALL}\n")
 
     return model_name, model_provider or ""
 
@@ -235,7 +197,7 @@ def parse_cli_inputs(
     parser = argparse.ArgumentParser(description=description)
 
     # Common/interactive flags
-    add_common_args(parser, require_tickers=require_tickers, include_analyst_flags=True, include_ollama=True)
+    add_common_args(parser, require_tickers=require_tickers, include_analyst_flags=True)
     add_date_args(parser, default_months_back=default_months_back)
 
     # Funding flags (standardized, with alias)
@@ -268,7 +230,7 @@ def parse_cli_inputs(
         "analysts_all": getattr(args, "analysts_all", False),
         "analysts": getattr(args, "analysts", None),
     })
-    model_name, model_provider = select_model(getattr(args, "ollama", False), getattr(args, "model", None))
+    model_name, model_provider = select_model(getattr(args, "model", None))
     start_date, end_date = resolve_dates(getattr(args, "start_date", None), getattr(args, "end_date", None), default_months_back=default_months_back)
 
     return CLIInputs(

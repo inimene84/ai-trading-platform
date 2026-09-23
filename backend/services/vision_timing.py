@@ -40,7 +40,17 @@ async def evaluate_vision_timing_optional(
     if notional_usd < VISION_MIN_NOTIONAL and heuristic_risk < 0.45:
         return None
 
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("LITELLM_API_KEY")
+    # Vision goes through the LiteLLM proxy (OpenAI-compatible); the default
+    # alias "gemini-3-flash" is served by OpenRouter, so no Google key is needed.
+    litellm_key = os.getenv("LITELLM_API_KEY") or os.getenv("LITELLM_MASTER_KEY")
+    if litellm_key:
+        api_key = litellm_key
+        base_url = os.getenv("LITELLM_BASE_URL", "http://litellm:4000/v1")
+        vision_model = os.getenv("VISION_TIMING_MODEL", "gemini-3-flash")
+    else:
+        api_key = os.getenv("OPENAI_API_KEY")
+        base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        vision_model = os.getenv("VISION_TIMING_MODEL", "gpt-4o-mini")
     if not api_key:
         logger.debug("VisionTiming: No Vision API key configured — skipping")
         return None
@@ -78,10 +88,10 @@ async def evaluate_vision_timing_optional(
             "Inspect the attached 1h/15m chart. Respond with JSON: {\"approved\": true/false, \"reason\": \"string\"}"
         )
 
-        from langchain_google_genai import ChatGoogleGenerativeAI
+        from langchain_openai import ChatOpenAI
         from langchain_core.messages import HumanMessage
 
-        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=os.getenv("GOOGLE_API_KEY"))
+        llm = ChatOpenAI(model=vision_model, api_key=api_key, base_url=base_url, timeout=60)
         res = await llm.ainvoke([
             HumanMessage(content=[
                 {"type": "text", "text": prompt},

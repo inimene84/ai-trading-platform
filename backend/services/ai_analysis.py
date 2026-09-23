@@ -1,6 +1,6 @@
 """
 AI Analysis Pipeline Service
-Dual-LLM cost optimization: Ollama (FREE) for research, Expensive model for final decisions.
+Local indicator research (free) + one routed LLM call for the final decision.
 """
 
 import json
@@ -10,7 +10,6 @@ import re
 import time
 from typing import Optional
 
-import httpx
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -50,9 +49,6 @@ class AIAnalysisService:
     def __init__(self):
         from backend.llm.router import pick_model, get_api_key
 
-        self.ollama_url = _env("OLLAMA_BASE_URL", "http://localhost:11434")
-        self.ollama_model = _env("OLLAMA_PRIMARY_MODEL", "phi3.5")
-
         # Primary: Kie.ai Claude Sonnet 4.6 via LiteLLM proxy
         deep_cfg = pick_model("deep_analysis")
         self.litellm_model = deep_cfg.name
@@ -68,11 +64,11 @@ class AIAnalysisService:
         self.xai_api_key = _env("XAI_API_KEY", "")
         self.xai_base_url = _env("XAI_BASE_URL", "https://api.x.ai/v1")
 
-        # Fallback: Anthropic / Gemini
+        # Fallback: Anthropic (Gemini runs via OpenRouter in the router chain)
         self.anthropic_api_key = _env("ANTHROPIC_API_KEY", "")
         self.anthropic_model = _env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-        self.gemini_api_key = _env("GOOGLE_API_KEY", "")
-        self.gemini_model = _env("GEMINI_MODEL", "gemini-2.5-flash")
+        self.gemini_model = _env("GEMINI_MODEL", "google/gemini-2.5-flash")
+        self.openrouter_api_key = _env("OPENROUTER_API_KEY", "")
 
         # Legacy aliases — primary decision model
         self.expensive_model = self.litellm_model
@@ -92,14 +88,6 @@ class AIAnalysisService:
 
     def _litellm_configured(self) -> bool:
         return bool(self.litellm_api_key and self.litellm_base_url)
-
-    def _ollama_configured(self) -> bool:
-        """Only use native Ollama when not pointed at the LiteLLM proxy."""
-        if not self.ollama_url:
-            return False
-        if "litellm" in self.ollama_url:
-            return False
-        return True
 
     @property
     def models_info(self) -> dict:
@@ -146,15 +134,9 @@ class AIAnalysisService:
                 },
                 {
                     "order": 5,
-                    "provider": "Google Gemini",
+                    "provider": "Gemini (OpenRouter)",
                     "model": self.gemini_model,
-                    "configured": bool(self.gemini_api_key),
-                },
-                {
-                    "order": 6,
-                    "provider": "Ollama",
-                    "model": self.ollama_model,
-                    "configured": self._ollama_configured(),
+                    "configured": bool(self.openrouter_api_key),
                 },
             ],
             "pipeline_steps": [
@@ -174,30 +156,6 @@ class AIAnalysisService:
                 },
             ],
         }
-
-    async def run_ollama(self, prompt: str, system: str = "") -> str:
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                messages = []
-                if system:
-                    messages.append({"role": "system", "content": system})
-                messages.append({"role": "user", "content": prompt})
-                resp = await client.post(
-                    f"{self.ollama_url}/api/chat",
-                    json={
-                        "model": self.ollama_model,
-                        "messages": messages,
-                        "stream": False,
-                    },
-                )
-                resp.raise_for_status()
-                return resp.json().get("message", {}).get("content", "No response")
-        except httpx.TimeoutException:
-            logger.error(f"Ollama timeout calling {self.ollama_model}")
-            return "[ERROR] Ollama request timed out after 120s"
-        except Exception as e:
-            logger.error(f"Ollama error: {e}")
-            return f"[ERROR] Ollama call failed: {str(e)}"
 
     async def run_expensive_model(self, prompt: str, system: str = "") -> dict:
         """Legacy alias - now uses the full fallback chain."""

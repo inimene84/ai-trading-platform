@@ -96,7 +96,7 @@ class LiveOrderRequest(BaseModel):
 class AgentTradeRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=8_000)
     model: Optional[str] = Field(default=None, max_length=120)
-    provider: Literal["xai", "openai", "groq", "ollama"] = "xai"
+    provider: Literal["xai", "openai", "groq"] = "xai"
 
 load_dotenv()
 
@@ -594,40 +594,6 @@ async def get_status():
         llm_providers.append({'name': 'OpenAI', 'model': 'gpt-4o', 'status': 'configured', 'type': 'cloud'})
     if os.getenv('GROQ_API_KEY') and os.getenv('GROQ_API_KEY') != 'your_groq_api_key_here':
         llm_providers.append({'name': 'Groq', 'model': 'mixtral', 'status': 'configured', 'type': 'cloud'})
-    if os.getenv('GOOGLE_API_KEY') and os.getenv('GOOGLE_API_KEY') != 'your_google_api_key_here':
-        llm_providers.append({'name': 'Google', 'model': 'gemini', 'status': 'configured', 'type': 'cloud'})
-
-    # Ollama (local models) — skip when pointed at the LiteLLM proxy, which is
-    # an OpenAI-compatible endpoint and has no Ollama /api/tags route.
-    ollama_url = os.getenv('OLLAMA_BASE_URL', '')
-    if ollama_url and 'litellm' not in ollama_url.lower():
-        try:
-            resp = httpx.get(f"{ollama_url}/api/tags", timeout=5)
-            if resp.status_code == 200:
-                models = resp.json().get('models', [])
-                role_map = {
-                    os.getenv('OLLAMA_PRIMARY_MODEL', 'phi3.5'): 'Primary (Reasoning)',
-                    os.getenv('OLLAMA_SECONDARY_MODEL', 'phi4'): 'Secondary (Fallback)',
-                    os.getenv('OLLAMA_LIGHTWEIGHT_MODEL', 'phi3.5'): 'Lightweight (Fast)',
-                }
-                for m in models:
-                    mname = m.get('name', '')
-                    role = 'Local'
-                    for key, val in role_map.items():
-                        if mname.startswith(key):
-                            role = val
-                            break
-                    size_gb = m.get('size', 0) / (1024**3)
-                    param_size = m.get('details', {}).get('parameter_size', '')
-                    llm_providers.append({
-                        'name': f"Ollama: {mname.split(':')[0]}",
-                        'model': f"{mname} ({param_size}, {size_gb:.1f}GB)",
-                        'status': 'configured',
-                        'type': 'local',
-                        'role': role,
-                    })
-        except Exception:
-            llm_providers.append({'name': 'Ollama', 'model': 'connection failed', 'status': 'error', 'type': 'local'})
 
     # Check brokers
     brokers = []
@@ -2757,9 +2723,6 @@ async def ai_agent_trade(request: AgentTradeRequest):
     elif provider == "groq":
         api_key = os.getenv("GROQ_API_KEY", "")
         base_url = "https://api.groq.com/openai/v1"
-    elif provider == "ollama":
-        api_key = "ollama"
-        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434") + "/v1"
 
     if not api_key or api_key == "your_xai_api_key_here":
         return {"error": f"API key not configured for {provider}"}

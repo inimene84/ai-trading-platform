@@ -1,0 +1,47 @@
+# Keep secrets, local state and bulky artifacts out of every Docker build
+# context. Dockerfile.backend COPYs explicit folders, but without this file
+# the whole repo (including .env) is still sent to the Docker daemon.
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+.cursor/
+.mcp.json
+**/mcp*.json
+
+# VCS / CI / editor
+.git
+.github
+.gitignore
+.vscode
+.idea
+
+# Python
+**/__pycache__
+**/*.pyc
+.venv
+venv
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# Node / frontend build output
+**/node_modules
+frontend/dist
+
+# Local data, logs and scratch
+data/
+logs/
+**/*.log
+scratch/
+output_phase3.txt
+*.sqlite
+*.db
