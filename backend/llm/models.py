@@ -2,12 +2,10 @@ import os
 import json
 from langchain_anthropic import ChatAnthropic
 from langchain_deepseek import ChatDeepSeek
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_xai import ChatXAI
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langchain_gigachat import GigaChat
-from langchain_ollama import ChatOllama
 from enum import Enum
 from pydantic import BaseModel
 from typing import Tuple, List
@@ -20,12 +18,10 @@ class ModelProvider(str, Enum):
     ALIBABA = "Alibaba"
     ANTHROPIC = "Anthropic"
     DEEPSEEK = "DeepSeek"
-    GOOGLE = "Google"
     GROQ = "Groq"
     META = "Meta"
     MISTRAL = "Mistral"
     OPENAI = "OpenAI"
-    OLLAMA = "Ollama"
     OPENROUTER = "OpenRouter"
     GIGACHAT = "GigaChat"
     AZURE_OPENAI = "Azure OpenAI"
@@ -53,9 +49,6 @@ class LLMModel(BaseModel):
         """Check if the model supports JSON mode"""
         if self.is_deepseek() or self.is_gemini():
             return False
-        # Only certain Ollama models support JSON mode
-        if self.is_ollama():
-            return "llama3" in self.model_name or "neural-chat" in self.model_name
         # OpenRouter models generally support JSON mode
         if self.provider == ModelProvider.OPENROUTER:
             return True
@@ -68,10 +61,6 @@ class LLMModel(BaseModel):
     def is_gemini(self) -> bool:
         """Check if the model is a Gemini model"""
         return self.model_name.startswith("gemini")
-
-    def is_ollama(self) -> bool:
-        """Check if the model is an Ollama model"""
-        return self.provider == ModelProvider.OLLAMA
 
 
 # Load models from JSON file
@@ -101,30 +90,23 @@ def load_models_from_json(json_path: str) -> List[LLMModel]:
 # Get the path to the JSON files
 current_dir = Path(__file__).parent
 models_json_path = current_dir / "api_models.json"
-ollama_models_json_path = current_dir / "ollama_models.json"
 
 # Load available models from JSON
 AVAILABLE_MODELS = load_models_from_json(str(models_json_path))
 
-# Load Ollama models from JSON
-OLLAMA_MODELS = load_models_from_json(str(ollama_models_json_path))
-
 # Create LLM_ORDER in the format expected by the UI
 LLM_ORDER = [model.to_choice_tuple() for model in AVAILABLE_MODELS]
-
-# Create Ollama LLM_ORDER separately
-OLLAMA_LLM_ORDER = [model.to_choice_tuple() for model in OLLAMA_MODELS]
 
 
 def get_model_info(model_name: str, model_provider: str) -> LLMModel | None:
     """Get model information by model_name"""
-    all_models = AVAILABLE_MODELS + OLLAMA_MODELS
+    all_models = AVAILABLE_MODELS
     return next((model for model in all_models if model.model_name == model_name and model.provider == model_provider), None)
 
 
 def find_model_by_name(model_name: str) -> LLMModel | None:
     """Find a model by its name across all available models."""
-    all_models = AVAILABLE_MODELS + OLLAMA_MODELS
+    all_models = AVAILABLE_MODELS
     return next((model for model in all_models if model.model_name == model_name), None)
 
 
@@ -140,7 +122,7 @@ def get_models_list():
     ]
 
 
-def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = None) -> ChatOpenAI | ChatGroq | ChatOllama | GigaChat | None:
+def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = None) -> ChatOpenAI | ChatGroq | GigaChat | None:
     if model_provider == ModelProvider.GROQ:
         api_key = (api_keys or {}).get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
         if not api_key:
@@ -169,21 +151,6 @@ def get_model(model_name: str, model_provider: ModelProvider, api_keys: dict = N
             print("API Key Error: Please make sure DEEPSEEK_API_KEY is set in your .env file or provided via API keys.")
             raise ValueError("DeepSeek API key not found.  Please make sure DEEPSEEK_API_KEY is set in your .env file or provided via API keys.")
         return ChatDeepSeek(model=model_name, api_key=api_key)
-    elif model_provider == ModelProvider.GOOGLE:
-        api_key = (api_keys or {}).get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            print("API Key Error: Please make sure GOOGLE_API_KEY is set in your .env file or provided via API keys.")
-            raise ValueError("Google API key not found.  Please make sure GOOGLE_API_KEY is set in your .env file or provided via API keys.")
-        return ChatGoogleGenerativeAI(model=model_name, api_key=api_key)
-    elif model_provider == ModelProvider.OLLAMA:
-        # For Ollama, we use a base URL instead of an API key
-        # Check if OLLAMA_HOST is set (for Docker on macOS)
-        ollama_host = os.getenv("OLLAMA_HOST", "localhost")
-        base_url = os.getenv("OLLAMA_BASE_URL", f"http://{ollama_host}:11434")
-        return ChatOllama(
-            model=model_name,
-            base_url=base_url,
-        )
     elif model_provider == ModelProvider.OPENROUTER:
         api_key = (api_keys or {}).get("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_API_KEY")
         if not api_key:

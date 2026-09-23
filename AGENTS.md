@@ -24,7 +24,7 @@ backend/          FastAPI application (Python 3.11+) — the core of the system
   brokers/        Broker abstraction (base, registry, auth)
   database/       SQLAlchemy models + connection (SQLite default, Postgres optional)
   alembic/        DB migrations
-  llm/            Multi-provider LLM router (xAI, Kie.ai, OpenAI, Anthropic, Ollama, ...)
+  llm/            Multi-provider LLM router (xAI, Kie.ai, OpenAI, Anthropic, OpenRouter, ...)
   backtesting/    Backtesting engine + CLI (`backtester` poetry script)
   tests/          pytest suite (unit/, integration/, mocks/)
   requirements.txt  PRODUCTION dependency source of truth (see below)

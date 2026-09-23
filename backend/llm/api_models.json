@@ -50,11 +50,6 @@
     "provider": "DeepSeek"
   },
   {
-    "display_name": "Gemini 3 Pro",
-    "model_name": "gemini-3-pro-preview",
-    "provider": "Google"
-  },
-  {
     "display_name": "GLM-4.5 Air",
     "model_name": "z-ai/glm-4.5-air",
     "provider": "OpenRouter"

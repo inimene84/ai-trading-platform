@@ -48,8 +48,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { configService } from './services/configService';
 // `@google/genai` is only needed once the user actually invokes an AI action,
 // so the service is imported on demand rather than at module load.
-const loadGeminiService = () =>
-  import('./services/geminiService').then((m) => m.geminiService);
+const loadAssistantService = () =>
+  import('./services/assistantService').then((m) => m.assistantService);
 // Route-level code splitting: each mode view (and the heavy chart libs they
 // pull in) is fetched on first navigation instead of shipping in the entry
 // chunk. Named exports are unwrapped to the `default` shape React.lazy wants.
@@ -351,13 +351,13 @@ const PositionRow = ({ asset, type, entry, mark, pnl, roe, isPositive, onClose }
   </tr>
 );
 
-// --- Gemini Chat Component ---
+// --- AI Assistant Chat Component ---
 interface Message {
   role: 'user' | 'model';
   text: string;
 }
 
-interface GeminiChatProps {
+interface AssistantChatProps {
   isOpen: boolean;
   onClose: () => void;
   messages: Message[];
@@ -365,7 +365,7 @@ interface GeminiChatProps {
   isLoading: boolean;
 }
 
-const GeminiChat = ({ isOpen, onClose, messages, onSendMessage, isLoading }: GeminiChatProps) => {
+const AssistantChat = ({ isOpen, onClose, messages, onSendMessage, isLoading }: AssistantChatProps) => {
   const [input, setInput] = useState('');
 
   const handleSend = () => {
@@ -431,7 +431,7 @@ const GeminiChat = ({ isOpen, onClose, messages, onSendMessage, isLoading }: Gem
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="Ask Gemini..."
+                placeholder="Ask the AI assistant..."
                 className="w-full bg-zinc-900 border border-zinc-800 rounded-xl py-2.5 pl-4 pr-12 text-xs focus:outline-none focus:border-emerald-500/50"
               />
               <button
@@ -750,13 +750,13 @@ export default function App() {
         role: m.role,
         text: m.text,
       }));
-      const response = await (await loadGeminiService()).chat(text, history);
+      const response = await (await loadAssistantService()).chat(text, history);
       setMessages(prev => [...prev, { role: 'model', text: response || 'No response' }]);
     } catch (error: any) {
-      console.error('Gemini Chat Error:', error);
-      const msg = error?.message || 'Could not connect to Gemini.';
+      console.error('Assistant Chat Error:', error);
+      const msg = error?.message || 'Could not reach the AI assistant.';
       setMessages(prev => [...prev, { role: 'model', text: `Error: ${msg}` }]);
-      showToast(`Gemini Chat Error: ${msg}`, 'error');
+      showToast(`Assistant Error: ${msg}`, 'error');
     } finally {
       setIsAiLoading(false);
     }
@@ -766,7 +766,7 @@ export default function App() {
     setAiInsight('Analyzing market data...');
     setIsAiLoading(true);
     try {
-      const insight = await (await loadGeminiService()).analyzeMarket(candles.slice(-10));
+      const insight = await (await loadAssistantService()).analyzeMarket(candles.slice(-10));
       setAiInsight(insight || 'No insight available.');
 
       // Also post to chat for history
@@ -787,10 +787,10 @@ export default function App() {
   const handleWorkflowOptimization = async () => {
     setIsOptimizing(true);
     setIsAiLoading(true);
-    showToast('Optimizing workflow with Gemini...', 'info');
+    showToast('Optimizing workflow with the AI assistant...', 'info');
 
     try {
-      const suggestion = await (await loadGeminiService()).optimizeWorkflow({ nodes, edges });
+      const suggestion = await (await loadAssistantService()).optimizeWorkflow({ nodes, edges });
 
       setMessages(prev => [...prev,
       { role: 'user', text: 'Optimize my current trading workflow and suggest improvements.' },
@@ -798,7 +798,7 @@ export default function App() {
       ]);
 
       setIsChatOpen(true);
-      showToast('Optimization complete! Check Gemini Chat for details.', 'success');
+      showToast('Optimization complete. See the assistant chat for details.', 'success');
     } catch (error) {
       console.error('Optimization error:', error);
       showToast('Optimization failed. Please try again.', 'error');
@@ -811,16 +811,16 @@ export default function App() {
   const handleBacktestAnalysis = async () => {
     if (!backtestResults) return;
     setIsAiLoading(true);
-    showToast('Gemini is analyzing backtest results...', 'info');
+    showToast('The AI assistant is analyzing backtest results...', 'info');
 
     try {
-      const analysis = await (await loadGeminiService()).analyzeBacktest(backtestResults);
+      const analysis = await (await loadAssistantService()).analyzeBacktest(backtestResults);
       setMessages(prev => [...prev,
       { role: 'user', text: 'Analyze these backtest results and suggest how to improve this strategy.' },
       { role: 'model', text: analysis || 'No analysis available.' }
       ]);
       setIsChatOpen(true);
-      showToast('Analysis complete! Check Gemini Chat.', 'success');
+      showToast('Analysis complete. See the assistant chat.', 'success');
     } catch (error) {
       showToast('Analysis failed.', 'error');
     } finally {
@@ -1162,7 +1162,7 @@ export default function App() {
             </div>
             <button
               onClick={() => setIsChatOpen(true)}
-              aria-label="Open Gemini AI Chat"
+              aria-label="Open AI assistant chat"
               className="p-2 text-zinc-400 hover:text-white transition-colors relative"
             >
               <Sparkles size={20} className="text-emerald-400" />
@@ -1566,14 +1566,14 @@ export default function App() {
                       <h3 className="text-sm font-bold">AI Performance Audit</h3>
                     </div>
                     <p className="text-xs text-zinc-500 mb-6 leading-relaxed">
-                      Get deep insights into your strategy performance from Gemini. Analyze drawdowns, win rates, and get actionable suggestions.
+                      Get deep insights into your strategy performance from the AI assistant. Analyze drawdowns, win rates, and get actionable suggestions.
                     </p>
                     <button
                       onClick={handleBacktestAnalysis}
                       disabled={isAiLoading}
                       className="mt-auto w-full py-4 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 rounded-xl text-xs font-bold transition-all border border-indigo-500/20 flex items-center justify-center gap-2"
                     >
-                      <BrainCircuit size={16} /> {isAiLoading ? 'Analyzing...' : 'Analyze with Gemini'}
+                      <BrainCircuit size={16} /> {isAiLoading ? 'Analyzing...' : 'Analyze with AI'}
                     </button>
                   </div>
 
@@ -1673,7 +1673,7 @@ export default function App() {
         </AnimatePresence>
       </main>
 
-      <GeminiChat
+      <AssistantChat
         isOpen={isChatOpen}
         onClose={() => setIsChatOpen(false)}
         messages={messages}
@@ -1769,7 +1769,7 @@ export default function App() {
                     },
                     {
                       category: 'AI & Analysis', items: [
-                        { label: 'Gemini Agent', type: 'Action', icon: Sparkles, desc: 'Process data using Google Gemini AI' },
+                        { label: 'AI Agent', type: 'Action', icon: Sparkles, desc: 'Process data with the routed AI model' },
                         { label: 'Sentiment Analysis', type: 'Action', icon: Activity, desc: 'Analyze market sentiment from news/social' },
                         { label: 'Data Extractor', type: 'Action', icon: Cpu, desc: 'Format unstructured text into JSON' },
                       ]

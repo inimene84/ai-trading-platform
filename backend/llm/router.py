@@ -314,11 +314,8 @@ _PROVIDER_TIMEOUT_DEFAULTS = {
     "xai": 12.0,
     "openai": 12.0,
     "anthropic": 12.0,
-    "google": 12.0,
-    "gemini": 12.0,
     "groq": 10.0,
     "litellm": 12.0,
-    "ollama": 20.0,
 }
 
 _RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
@@ -1077,67 +1074,15 @@ async def _invoke_provider(
                 return text
             raise ValueError(f"Output still truncated at max_tokens={tokens * 2} for {cfg.name}")
             
-    elif prov in ("google", "gemini"):
-        # Google Gemini generateContent format
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{cfg.name}:generateContent?key={api_key}"
-        
-        contents = []
-        if system:
-            contents.append({"role": "user", "parts": [{"text": f"System: {system}"}]})
-            contents.append({"role": "model", "parts": [{"text": "Understood."}]})
-        contents.append({"role": "user", "parts": [{"text": prompt}]})
-        
-        payload = {
-            "contents": contents,
-            "generationConfig": {
-                "temperature": temp,
-                "maxOutputTokens": tokens,
-            }
-        }
-        if response_json:
-            payload["generationConfig"]["responseMimeType"] = "application/json"
-            
-        async with httpx.AsyncClient(timeout=client_timeout) as client:
-            resp = await client.post(url, json=payload)
-            if not resp.is_success:
-                _raise_http_status(resp, prov)
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise ValueError("Gemini returned no candidates")
-            return candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            
-    elif prov == "ollama":
-        # Ollama local chat format
-        base_url = cfg.base_url or "http://localhost:11434"
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
-        
-        payload = {
-            "model": cfg.name,
-            "messages": messages,
-            "stream": False,
-        }
-        
-        async with httpx.AsyncClient(timeout=client_timeout) as client:
-            resp = await client.post(f"{base_url.rstrip('/')}/api/chat", json=payload)
-            if not resp.is_success:
-                _raise_http_status(resp, prov)
-            return resp.json().get("message", {}).get("content", "")
-            
     else:
         raise ValueError(f"Unsupported LLM provider: {prov}")
 
 
 def _provider_configured(cfg: ModelConfig) -> bool:
-    if cfg.provider in ("ollama",):
-        return True
     key = get_api_key(cfg)
     if not key:
         return False
-    if len(key) < 20 and cfg.api_key_env in ("XAI_API_KEY", "GOOGLE_API_KEY"):
+    if len(key) < 20 and cfg.api_key_env == "XAI_API_KEY":
         return False
     if any(marker in key.lower() for marker in ("changeme", "placeholder", "your_", "xxx")):
         return False
@@ -1169,12 +1114,6 @@ def build_provider_chain(task_type: str) -> list[tuple[str, ModelConfig]]:
         ("Fallback 5 (Anthropic)", _DEFAULT_REGISTRY["fallback_2"]),
         ("Fallback 6 (Gemini)", _DEFAULT_REGISTRY["fallback_3"]),
     ]
-    if os.getenv("OLLAMA_ENABLED", "false").lower() == "true":
-        raw_chain.append(("Fallback 7 (Ollama)", ModelConfig(
-            name=os.getenv("OLLAMA_PRIMARY_MODEL", "phi3.5"),
-            provider="ollama",
-            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-        )))
 
     configs_to_try: list[tuple[str, ModelConfig]] = []
     seen: set[tuple[str, str]] = set()

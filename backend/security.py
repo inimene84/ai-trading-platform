@@ -18,8 +18,6 @@ SENSITIVE_PREFIXES = (
     "/api/api-keys",
     "/storage",
     "/api/storage",
-    "/ollama",
-    "/api/ollama",
     # Signal candidates expose live trade intent (entries, stops, sizing).
     "/signals",
     "/api/signals",
