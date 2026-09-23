@@ -1,0 +1,295 @@
+{
+  "name": "12 - Jev Outcome Filler (next-candle scoring)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "triggerAtMinute": 20
+            }
+          ]
+        }
+      },
+      "id": "f85d6b32-2085-4592-858c-4e33991ace41",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "8243066f-632b-42ff-bb1d-89b12e93c307",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------- Code: Config ----------------\nlet envUrl = '';\ntry { envUrl = $env.SUPABASE_URL || ''; } catch (e) { envUrl = ''; }\nconst cfg = {\n  SUPABASE_URL: envUrl || \"https://YOUR-PROJECT.supabase.co\", // not secret; key lives in the Supabase credential\n  SUPABASE_TABLE: \"jev_signals\",\n  MIN_AGE_H: 2,            // only look at signals older than this (next 1h candle must be closed)\n  SETTLE_MS: 120000,       // wait 2 min after candle close before scoring\n  MAX_ROWS: 400,           // per run\n  FLAT_THRESHOLD: 0.001    // |return| below 0.10% (about round-trip fees) = SCRATCH / SKIP_QUIET\n};\ncfg.PENDING_BEFORE = new Date(Date.now() - cfg.MIN_AGE_H * 3600e3).toISOString();\nreturn [{ json: { config: cfg } }];\n"
+      },
+      "id": "fc9ab3f2-2c87-4092-838d-c69e2921f8bd",
+      "name": "Code: Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Code: Config').first().json.config.SUPABASE_URL }}/rest/v1/{{ $json.config.SUPABASE_TABLE }}?select=id,symbol,timeframe,decision,created_at&outcome=is.null&created_at=lt.{{ $json.config.PENDING_BEFORE }}&order=created_at.asc&limit={{ $json.config.MAX_ROWS }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "61f8aa5e-f43d-42db-b7d9-79daaf7fb7f7",
+      "name": "HTTP: Fetch Pending Signals",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        480,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Code: Plan \u2014 pick rows whose next full candle has closed\nconst cfg = $('Code: Config').first().json.config;\nconst IV = { '15m': 9e5, '30m': 18e5, '1h': 36e5, '2h': 72e5, '4h': 144e5, '1d': 864e5 };\nconst now = Date.now();\nconst rows = $input.all().flatMap(i => Array.isArray(i.json) ? i.json : (i.json && i.json.id != null ? [i.json] : []));\nconst out = [];\nfor (const r of rows) {\n  const tf = IV[r.timeframe] ? r.timeframe : '1h';\n  const iv = IV[tf];\n  const created = Date.parse(r.created_at);\n  if (!Number.isFinite(created) || !r.symbol) continue;\n  const nextOpen = Math.floor(created / iv) * iv + iv; // first candle fully after the signal\n  if (nextOpen + iv + cfg.SETTLE_MS > now) continue;   // not closed yet\n  out.push({ json: { id: r.id, symbol: String(r.symbol).toUpperCase(), decision: r.decision || '', interval: tf, startTime: nextOpen, ageH: (now - created) / 36e5 } });\n}\nreturn out.slice(0, cfg.MAX_ROWS);\n"
+      },
+      "id": "adc7d242-b6aa-4b82-bbfb-f27951184a90",
+      "name": "Code: Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://fapi.binance.com/fapi/v1/klines?symbol={{ $json.symbol }}&interval={{ $json.interval }}&startTime={{ $json.startTime }}&limit=1",
+        "options": {
+          "timeout": 15000,
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 500
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "id": "a5c11b93-1e67-4215-b3bd-5751723aded9",
+      "name": "HTTP: Futures Next Candle",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        960,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Code: Score \u2014 label each signal from the candle that followed it\nconst cfg = $('Code: Config').first().json.config;\nconst plans = $('Code: Plan').all();\nconst resp = $input.all();\nconst thr = cfg.FLAT_THRESHOLD; // fraction, ~round-trip fees\nconst nowIso = new Date().toISOString();\nconst out = [];\nplans.forEach((p, i) => {\n  const plan = p.json;\n  let k = null;\n  try {\n    const raw = resp[i] && resp[i].json ? (resp[i].json.data ?? resp[i].json) : null;\n    const arr = typeof raw === 'string' ? JSON.parse(raw) : raw;\n    if (Array.isArray(arr) && Array.isArray(arr[0]) && Number(arr[0][0]) === plan.startTime) k = arr[0];\n  } catch (e) { k = null; }\n  if (!k) {\n    // no candle (delisted / symbol not on futures / API error): retry until 48h, then give up\n    if (plan.ageH > 48) out.push({ json: { id: plan.id, patch: { outcome: 'NO_DATA', calibrated_at: nowIso } } });\n    return;\n  }\n  const open = Number(k[1]), close = Number(k[4]);\n  if (!(open > 0) || !Number.isFinite(close)) return;\n  const ret = (close - open) / open;\n  const d = plan.decision.toUpperCase();\n  let outcome;\n  if (d === 'LONG' || d === 'SHORT') {\n    const s = d === 'LONG' ? ret : -ret;\n    outcome = s > thr ? 'WIN' : s < -thr ? 'LOSS' : 'SCRATCH';\n  } else {\n    outcome = ret > thr ? 'SKIP_UP' : ret < -thr ? 'SKIP_DOWN' : 'SKIP_QUIET';\n  }\n  out.push({ json: { id: plan.id, patch: { next_candle_return: Math.round(ret * 1e6) / 1e6, outcome, calibrated_at: nowIso } } });\n});\nreturn out;\n"
+      },
+      "id": "48896c12-13ea-4875-918e-3d6de8703a72",
+      "name": "Code: Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $('Code: Config').first().json.config.SUPABASE_URL }}/rest/v1/{{ $('Code: Config').first().json.config.SUPABASE_TABLE }}?id=eq.{{ $json.id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.patch) }}",
+        "options": {
+          "timeout": 15000,
+          "batching": {
+            "batch": {
+              "batchSize": 10,
+              "batchInterval": 300
+            }
+          }
+        }
+      },
+      "id": "86dad071-1b89-4515-910d-c4d7baa8446d",
+      "name": "HTTP: Patch Signal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1440,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------- Code: Summary ----------------\nconst scored = $('Code: Score').all();\nconst counts = {};\nfor (const s of scored) { const o = s.json.patch.outcome; counts[o] = (counts[o] || 0) + 1; }\nconst failed = $input.all().filter(i => i.json && i.json.error).length;\nreturn [{ json: { planned: $('Code: Plan').all().length, scored: scored.length, patch_errors: failed, counts } }];\n"
+      },
+      "id": "ed19bfc7-3c38-45fd-b9fb-ec3fb4767fd6",
+      "name": "Code: Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Jev outcome filler\n\nScores rows in `jev_signals` written by **11 - Jev Ensemble v2**.\n\nFor every unscored signal older than 2h it fetches the **next full candle** after the signal (Binance Futures, same timeframe) and writes:\n- `next_candle_return` = (close - open) / open of that candle\n- `outcome`: LONG/SHORT -> `WIN` / `LOSS` / `SCRATCH` (|move| < 0.10%); anything else -> `SKIP_UP` / `SKIP_DOWN` / `SKIP_QUIET`\n- `calibrated_at`\n\nSymbols with no futures candle are retried until 48h old, then marked `NO_DATA`.\n\nSetup: attach your **Supabase** credential (service role key) to both Supabase HTTP nodes and set `SUPABASE_URL` in Code: Config (or the n8n env). Runs hourly at :20.\n\nStats: `select * from jev_signal_scorecard;` (see `supabase/jev_signal_scorecard.sql`).",
+        "height": 340,
+        "width": 620
+      },
+      "id": "61272331-c167-43a0-80de-1c5b63b4592a",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        200,
+        -360
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code: Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code: Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Config": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Fetch Pending Signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: Fetch Pending Signals": {
+      "main": [
+        [
+          {
+            "node": "Code: Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Plan": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Futures Next Candle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: Futures Next Candle": {
+      "main": [
+        [
+          {
+            "node": "Code: Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code: Score": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Patch Signal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: Patch Signal": {
+      "main": [
+        [
+          {
+            "node": "Code: Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
