@@ -3,6 +3,19 @@
 
 @theme {
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-bg: #101410;
+  --color-surface: #171d18;
+  --color-raised: #212922;
+  --color-fg: #e7f0e4;
+  --color-muted: #a8b5ab;
+  --color-line: #314036;
+  --color-signal: #d6f25c;
+  --color-risk: #ff6a45;
+}
+
+.desk-one {
+  color: var(--color-fg);
+  background: var(--color-bg);
 }
 
 @layer base {

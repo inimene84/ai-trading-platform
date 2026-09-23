@@ -8,6 +8,7 @@ timeouts, HTTP errors, and invalid JSON never become a trade.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -37,7 +38,12 @@ class JevClient:
         self.timeout = jev_timeout_seconds() if timeout is None else timeout
         self._transport = transport
 
-    async def system_one(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+    async def system_one(
+        self,
+        state: dict[str, Any],
+        questions: dict[str, Any],
+        validator: Callable[[Any], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         if not self.api_key:
             raise JevUnavailable("TYPESAFE_API_KEY not configured")
         url = f"{self.base_url}/v1/systemone"
@@ -58,7 +64,8 @@ class JevClient:
         except ValueError as exc:
             raise JevUnavailable("Jev response was not JSON") from exc
         try:
-            return validate_system_one(body)
+            checker = validator or validate_system_one
+            return checker(body)
         except JevSchemaError as exc:
             raise JevUnavailable(f"Jev schema rejected: {exc}") from exc
 

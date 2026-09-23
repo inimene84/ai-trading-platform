@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -50,7 +51,12 @@ class MockJevClient:
 
     name = "mock"
 
-    async def system_one(self, _state: dict[str, Any], _questions: dict[str, Any]) -> dict[str, Any]:
+    async def system_one(
+        self,
+        _state: dict[str, Any],
+        _questions: dict[str, Any],
+        validator: Callable[[Any], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         if circuit_open():
             raise JevUnavailable("Jev provider paused after credit errors")
         payload = {
@@ -78,7 +84,8 @@ class MockJevClient:
             },
             "usage": {"input_tokens": 0, "output_tokens": 0},
         }
-        return validate_system_one(payload)
+        checker = validator or validate_system_one
+        return checker(payload)
 
 
 async def post_openrouter_decision(
@@ -126,10 +133,16 @@ class OpenRouterJevClient:
     def __init__(self, transport: httpx.BaseTransport | None = None) -> None:
         self._transport = transport
 
-    async def system_one(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+    async def system_one(
+        self,
+        state: dict[str, Any],
+        questions: dict[str, Any],
+        validator: Callable[[Any], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         payload = await post_openrouter_decision(state, questions, transport=self._transport)
+        checker = validator or validate_system_one
         try:
-            return validate_system_one(payload)
+            return checker(payload)
         except JevSchemaError as exc:
             raise JevUnavailable(f"Jev schema rejected: {exc}") from exc
 
@@ -140,7 +153,12 @@ class LiteLLMJevClient:
     def __init__(self, transport: httpx.BaseTransport | None = None) -> None:
         self._transport = transport
 
-    async def system_one(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
+    async def system_one(
+        self,
+        state: dict[str, Any],
+        questions: dict[str, Any],
+        validator: Callable[[Any], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         if circuit_open():
             raise JevUnavailable("Jev provider paused after credit errors")
         base = os.getenv("LITELLM_BASE_URL", "http://litellm:4000").rstrip("/")
@@ -157,7 +175,8 @@ class LiteLLMJevClient:
                     note_credit_failure("402")
                     raise JevUnavailable("Jev provider returned 402")
                 response.raise_for_status()
-                return validate_system_one(response.json())
+                checker = validator or validate_system_one
+                return checker(response.json())
         except JevUnavailable:
             raise
         except httpx.HTTPError as exc:

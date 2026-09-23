@@ -78,6 +78,9 @@ const PaperTradingView = lazy(() => import('./components/PaperTradingView'));
 const OpinionLayerView = lazy(() =>
   import('./components/OpinionLayerView').then((m) => ({ default: m.OpinionLayerView })),
 );
+const DeskView = lazy(() =>
+  import('./components/desk/Desk').then((m) => ({ default: m.Desk })),
+);
 const OperationsPage = lazy(() =>
   import('./components/OperationsPage').then((m) => ({ default: m.OperationsPage })),
 );
@@ -105,7 +108,7 @@ import { apiService } from './services/apiService';
 import { workflowEngine } from './services/workflowEngine';
 
 // --- Types ---
-type AppMode = 'manual' | 'ai' | 'backtest' | 'settings' | 'markets' | 'portfolio' | 'wallet' | 'signals' | 'status' | 'opinion' | 'operations' | 'paper' | 'timing-control' | 'charts' | 'openapi-lab' | 'forecast';
+type AppMode = 'manual' | 'ai' | 'backtest' | 'settings' | 'markets' | 'portfolio' | 'wallet' | 'signals' | 'status' | 'opinion' | 'operations' | 'paper' | 'timing-control' | 'charts' | 'openapi-lab' | 'forecast' | 'desk';
 
 
 // --- Mock Data ---
@@ -1040,6 +1043,7 @@ export default function App() {
           <NavItem icon={<Cpu size={20} />} label="Agent Builder" active={mode === 'ai'} onClick={() => setMode('ai')} />
           <NavItem icon={<Zap size={20} />} label="Signals" active={mode === 'signals'} badge={loopRunning ? 'LIVE' : undefined} onClick={() => setMode('signals')} />
           <NavItem icon={<BrainCircuit size={20} />} label="Opinion Layer" active={mode === 'opinion'} onClick={() => setMode('opinion')} />
+          <NavItem icon={<Sparkles size={20} />} label="Jev Desk" active={mode === 'desk'} onClick={() => setMode('desk')} />
           <NavItem icon={<History size={20} />} label="Backtesting" active={mode === 'backtest'} onClick={() => setMode('backtest')} />
           <NavItem icon={<PieChart size={20} />} label="Portfolio" active={mode === 'portfolio'} onClick={() => setMode('portfolio')} />
           <NavItem icon={<Wallet size={20} />} label="Wallet" active={mode === 'wallet'} onClick={() => setMode('wallet')} />
@@ -1091,6 +1095,7 @@ export default function App() {
                                   mode === 'wallet' ? 'Wallet & Transfers' :
                                     mode === 'signals' ? 'AI Trading Signals' :
                                       mode === 'opinion' ? 'Opinion Layer' :
+                                        mode === 'desk' ? 'Jev Desk' :
                                         mode === 'status' ? 'System Status' : ''}
               </h2>
               {mode === 'ai' && (
@@ -1664,6 +1669,8 @@ export default function App() {
             <SignalsView />
           ) : mode === 'opinion' ? (
             <OpinionLayerView />
+          ) : mode === 'desk' ? (
+            <DeskView key="desk" />
           ) : mode === 'status' ? (
             <StatusView key="status" />
           ) : mode === 'operations' ? (

@@ -75,6 +75,8 @@ def test_paper_startup_allows_missing_admin_token(monkeypatch):
 def test_jev_routes_are_sensitive():
     assert is_sensitive_request(_req("GET", "/jev/evaluate")) is True
     assert is_sensitive_request(_req("GET", "/api/jev/evaluate")) is True
+    assert is_sensitive_request(_req("POST", "/jev/revalue")) is True
+    assert is_sensitive_request(_req("POST", "/api/jev/revalue")) is True
 
 
 def test_jesse_and_finmem_routes_are_sensitive():

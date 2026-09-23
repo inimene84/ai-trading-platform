@@ -16,6 +16,7 @@ from backend.jev.calibration import calibration_report
 from backend.jev.evidence import gather_evidence
 from backend.jev.journal import get_journal, reset_journal_cache
 from backend.jev.research import classify_research, signing_key_path
+from backend.jev.revalue import revalue_tape
 from backend.jev.service import evaluate_symbol
 from backend.jev.trust import replay_hysteresis, sign_jsonl, trust_report
 from backend.security import validate_admin_request
@@ -24,6 +25,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/jev", tags=["jev"])
 crypto_router = APIRouter(prefix="/signals/jev", tags=["jev-signals"])
+
+
+class RevalueBody(BaseModel):
+    symbols: list[str] = Field(..., min_length=1, max_length=8)
+    loss_frac: float = Field(default=0.0, ge=-1.0, le=1.0)
+    gross_frac: float = Field(default=0.0, ge=0.0, le=5.0)
+
+
+@router.post("/revalue")
+async def revalue(body: RevalueBody, request: Request):
+    """Fast tape revalue. Advisory only: no social pull, no order, no sizing."""
+    validate_admin_request(request)
+    logger.info("Jev revalue requested for %s", ",".join(body.symbols))
+    return await revalue_tape(
+        body.symbols,
+        loss_frac=body.loss_frac,
+        gross_frac=body.gross_frac,
+        fetch_bars=True,
+    )
 
 
 @router.get("/evaluate")
