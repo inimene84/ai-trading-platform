@@ -300,8 +300,8 @@ async def test_execute_candidate_accepts_ctrader_sent_status():
         return_value=True,
     ), patch(
         "backend.services.signal_candidate_engine.ctrader_service.place_order",
-        return_value={"status": "sent", "symbol": "EURUSD", "direction": "BUY", "quantity": 0.01},
-    ), patch(
+        return_value={"status": "sent", "symbol": "EURUSD", "direction": "SELL", "quantity": 0.01},
+    ) as mock_place, patch(
         "backend.services.signal_candidate_engine.persist_ctrader_execution",
         return_value=99,
     ) as mock_persist:
@@ -311,7 +311,11 @@ async def test_execute_candidate_accepts_ctrader_sent_status():
     assert signal_candidate_engine.candidates[sig_id]["status"] == CandidateStatus.EXECUTED
     mock_persist.assert_called_once()
     assert mock_persist.call_args.kwargs["symbol"] == "EURUSD"
-    assert mock_persist.call_args.kwargs["direction"] == "BUY"
+    # Default CTRADER_INVERT_SIDE=true: BUY setup is sent as SELL with mirrored SL/TP.
+    assert mock_persist.call_args.kwargs["direction"] == "SELL"
+    assert mock_place.call_args.kwargs["direction"] == "SELL"
+    assert mock_place.call_args.kwargs["stop_loss"] == pytest.approx(1.0880)
+    assert mock_place.call_args.kwargs["take_profit"] == pytest.approx(1.0790)
 
 
 @pytest.mark.asyncio
@@ -1098,6 +1102,8 @@ async def test_scan_news_does_not_rearm_after_executed_twin():
         "backend.routes.news.get_news_feed", new=AsyncMock(return_value={})
     ), patch(
         "backend.routes.news.get_market_sentiment", new=AsyncMock(return_value={})
+    ), patch.object(
+        engine, "_ctrader_invert_side_enabled", return_value=False
     ):
         created = await engine.scan_news_and_events()
 
@@ -1185,6 +1191,7 @@ async def test_scan_markets_skips_cross_strategy_same_direction_live_twin():
          patch.object(engine, "_evaluate_straddle", return_value=None), \
          patch.object(engine, "_evaluate_slingshot", return_value=None), \
          patch.object(engine, "_fx_gate_mode", return_value="off"), \
+         patch.object(engine, "_ctrader_invert_side_enabled", return_value=False), \
          patch.object(engine, "_has_open_position", return_value=False), \
          patch.object(engine, "_portfolio_risk_breach", return_value=None):
         created = await engine.scan_markets(universe=["EURUSD"], timeframe="M5")
@@ -1270,6 +1277,7 @@ async def test_scan_markets_skips_recent_executed_cross_strategy_twin():
          patch.object(engine, "_evaluate_straddle", return_value=None), \
          patch.object(engine, "_evaluate_slingshot", return_value=None), \
          patch.object(engine, "_fx_gate_mode", return_value="off"), \
+         patch.object(engine, "_ctrader_invert_side_enabled", return_value=False), \
          patch.object(engine, "_has_open_position", return_value=False), \
          patch.object(engine, "_portfolio_risk_breach", return_value=None):
         created = await engine.scan_markets(universe=["EURUSD"], timeframe="M5")

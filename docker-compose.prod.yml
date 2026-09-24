@@ -21,6 +21,9 @@ services:
       BINANCE_DRY_RUN: ${BINANCE_DRY_RUN:-true}
       DRY_RUN_ALL: ${DRY_RUN_ALL:-true}
       CTRADER_FOREX_ONLY: ${CTRADER_FOREX_ONLY:-true}
+      # Default ON: IC demo FX book was systematically on the losing side.
+      # Set CTRADER_INVERT_SIDE=false in .env to restore pre-fix polarity.
+      CTRADER_INVERT_SIDE: ${CTRADER_INVERT_SIDE:-true}
       CTRADER_MAX_OPEN_POSITIONS: ${CTRADER_MAX_OPEN_POSITIONS:-10}
       CTRADER_MAX_READY_PER_POLL: ${CTRADER_MAX_READY_PER_POLL:-10}
       CTRADER_MAX_LOTS: ${CTRADER_MAX_LOTS:-0.10}
