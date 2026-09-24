@@ -341,6 +341,12 @@ class SignalCandidateEngine:
             return signal
         original = self._normalize_direction(signal.get("direction"))
         entry = signal.get("entry_price")
+        if entry is None:
+            logger.info(
+                "[%s] cTrader FX invert skipped: missing entry, refusing unmirrored flip",
+                symbol,
+            )
+            return None
         digits = CTraderService.digits_for(symbol)
         flipped, sl, tp = self.invert_side_and_protection(
             original,

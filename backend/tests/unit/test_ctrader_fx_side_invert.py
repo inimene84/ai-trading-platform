@@ -95,6 +95,18 @@ def test_should_invert_only_ctrader_forex():
         assert engine._should_invert_ctrader_fx_side("ctrader", "EURUSD") is False
 
 
+def test_apply_invert_refuses_missing_entry():
+    engine = SignalCandidateEngine()
+    signal = {
+        "direction": "BUY",
+        "entry_price": None,
+        "stop_loss": 1.0820,
+        "take_profit": 1.0910,
+    }
+    assert engine.apply_ctrader_fx_side_invert("EURUSD", signal) is None
+    assert signal["direction"] == "BUY"
+
+
 def test_apply_invert_is_idempotent_and_annotates():
     engine = SignalCandidateEngine()
     signal = {
@@ -308,3 +320,55 @@ async def test_scan_markets_stores_inverted_fx_side():
     assert cand["side_inverted"] is True
     assert cand["stop_loss"] > cand["entry_price"]
     assert cand["take_profit"] < cand["entry_price"]
+
+
+@pytest.mark.asyncio
+async def test_venue_closed_skip_does_not_invert_candidate():
+    engine = SignalCandidateEngine()
+    engine.candidates.clear()
+    now_ts = int(time.time())
+    engine.candidates["fx-closed"] = _ready_fx_candidate("fx-closed", now_ts, direction="BUY")
+
+    with patch("backend.services.sentry_state.is_trading_allowed", return_value=True), \
+         patch("backend.services.signal_candidate_engine.is_venue_open", return_value=False), \
+         patch("backend.services.signal_candidate_engine.ctrader_service.place_order") as mock_place:
+        res = await engine.execute_candidate("fx-closed", force=False)
+
+    assert res.get("skipped") is True
+    assert "VENUE_CLOSED" in res.get("error", "")
+    mock_place.assert_not_called()
+    cand = engine.candidates["fx-closed"]
+    assert cand["direction"] == "BUY"
+    assert cand.get("side_inverted") in (None, False)
+    assert cand["stop_loss"] == pytest.approx(1.0820)
+
+
+@pytest.mark.asyncio
+async def test_scan_news_inverts_falling_tape_to_buy():
+    engine = SignalCandidateEngine()
+    engine.candidates.clear()
+    falling = [
+        {"close": 1.10 - i * 0.001, "high": 1.10 - i * 0.001 + 0.0002,
+         "low": 1.10 - i * 0.001 - 0.0002, "volume": 100}
+        for i in range(30)
+    ]
+    calendar = {"events": [{"event": "NFP", "currency": "USD", "impact": "high"}]}
+    with patch("backend.services.sentry_state.is_trading_allowed", return_value=True), \
+         patch(
+             "backend.services.signal_candidate_engine.ctrader_service.get_trendbars",
+             return_value=falling,
+         ), \
+         patch.object(engine, "_attach_stop_atr", new_callable=AsyncMock), \
+         patch.object(engine, "_has_open_position", return_value=False), \
+         patch.object(engine, "_portfolio_risk_breach", return_value=None), \
+         patch("backend.routes.news.get_economic_calendar", new=AsyncMock(return_value=calendar)), \
+         patch("backend.routes.news.get_news_feed", new=AsyncMock(return_value={})), \
+         patch("backend.routes.news.get_market_sentiment", new=AsyncMock(return_value={})):
+        created = await engine.scan_news_and_events()
+
+    assert created
+    cand = created[0]
+    assert cand["original_direction"] == "SELL"
+    assert cand["direction"] == "BUY"
+    assert cand["stop_loss"] < cand["entry_price"]
+    assert cand["take_profit"] > cand["entry_price"]
