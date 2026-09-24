@@ -19,6 +19,11 @@ from backend.services.signal_candidate_engine import (
 from backend.services.ctrader_service import CTraderService
 
 
+def test_log_safe_strips_crlf():
+    assert SignalCandidateEngine._log_safe("EURUSD\nBUY\r") == "EURUSDBUY"
+    assert SignalCandidateEngine._log_safe(None) == ""
+
+
 def test_invert_buy_mirrors_sl_below_to_sl_above():
     flipped, sl, tp = SignalCandidateEngine.invert_side_and_protection(
         "BUY", 1.0850, 1.0820, 1.0910, digits=5,

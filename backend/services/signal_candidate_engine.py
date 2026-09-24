@@ -272,6 +272,11 @@ class SignalCandidateEngine:
             return "SELL"
         return side
 
+    @staticmethod
+    def _log_safe(value: Any) -> str:
+        """Strip CR/LF so untrusted symbol/reason text cannot split log lines."""
+        return str(value if value is not None else "").replace("\r", "").replace("\n", "")[:64]
+
     # ── cTrader FX side invert ──────────────────────────────────────────────
     # IC demo book (Sep 11–24, n=55 closed): ~18% win rate / −$121 vs ~73% /
     # +$121 if every side were flipped. MOMENTUM_TREND_PULSE dominated.
@@ -344,7 +349,7 @@ class SignalCandidateEngine:
         if entry is None:
             logger.info(
                 "[%s] cTrader FX invert skipped: missing entry, refusing unmirrored flip",
-                symbol,
+                self._log_safe(symbol),
             )
             return None
         digits = CTraderService.digits_for(symbol)
@@ -375,7 +380,9 @@ class SignalCandidateEngine:
                 logger.info(
                     "[%s] cTrader FX invert veto: post-invert geometry rejected "
                     "(%s → %s)",
-                    symbol, original, flipped,
+                    self._log_safe(symbol),
+                    self._log_safe(original),
+                    self._log_safe(flipped),
                 )
                 return None
             sl, tp = validated
@@ -389,7 +396,12 @@ class SignalCandidateEngine:
         signal["reason"] = f"{reason} {tag}".strip() if reason else tag
         logger.info(
             "[%s] cTrader FX side invert %s → %s sl=%s tp=%s (entry=%s)",
-            symbol, original, flipped, sl, tp, entry,
+            self._log_safe(symbol),
+            self._log_safe(original),
+            self._log_safe(flipped),
+            sl,
+            tp,
+            entry,
         )
         return signal
 
