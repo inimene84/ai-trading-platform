@@ -109,11 +109,18 @@ async def test_macro_sell_candidate_has_stop_above_entry():
         finally:
             signal_candidate_engine.candidates = previous
 
-    sells = [c for c in created if c["direction"] == "SELL"]
-    assert sells, "a falling market should produce a SELL macro candidate"
-    for c in sells:
-        assert c["stop_loss"] > c["entry_price"], "SELL stop must sit above entry"
-        assert c["take_profit"] < c["entry_price"], "SELL target must sit below entry"
+    assert created, "a falling market should produce a macro candidate"
+    for c in created:
+        # CTRADER_INVERT_SIDE default ON: strategy SELL is stored as BUY.
+        # Geometry must still match the *stored* side.
+        if c["direction"] == "SELL":
+            assert c["stop_loss"] > c["entry_price"], "SELL stop must sit above entry"
+            assert c["take_profit"] < c["entry_price"], "SELL target must sit below entry"
+        else:
+            assert c["direction"] == "BUY"
+            assert c.get("original_direction") == "SELL"
+            assert c["stop_loss"] < c["entry_price"], "BUY stop must sit below entry"
+            assert c["take_profit"] > c["entry_price"], "BUY target must sit above entry"
 
 
 # ── Binance / cTrader timeframe mapping ──────────────────────────────────────

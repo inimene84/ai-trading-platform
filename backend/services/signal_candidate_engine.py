@@ -272,6 +272,161 @@ class SignalCandidateEngine:
             return "SELL"
         return side
 
+    @staticmethod
+    def _log_safe(value: Any) -> str:
+        """Strip CR/LF so untrusted symbol/reason text cannot split log lines."""
+        return str(value if value is not None else "").replace("\r", "").replace("\n", "")[:64]
+
+    # ── cTrader FX side invert ──────────────────────────────────────────────
+    # IC demo book (Sep 11–24, n=55 closed): ~18% win rate / −$121 vs ~73% /
+    # +$121 if every side were flipped. MOMENTUM_TREND_PULSE dominated.
+    # BUY=1 / SELL=2 on Spotware is conventional — this is strategy polarity
+    # vs subsequent FX moves (trend pulse in a mean-reverting tape), not a
+    # protocol mapping bug. Default ON for cTrader FX only; Binance untouched.
+    # Disable with CTRADER_INVERT_SIDE=false after the edge is re-measured.
+    @staticmethod
+    def _ctrader_invert_side_enabled() -> bool:
+        return os.getenv("CTRADER_INVERT_SIDE", "true").strip().lower() in ("1", "true", "yes", "on")
+
+    @staticmethod
+    def invert_trade_side(direction: Optional[str]) -> str:
+        side = SignalCandidateEngine._normalize_direction(direction)
+        if side == "BUY":
+            return "SELL"
+        if side == "SELL":
+            return "BUY"
+        return side
+
+    @staticmethod
+    def mirror_price_around_entry(
+        entry: Optional[float],
+        level: Optional[float],
+        digits: int = 5,
+    ) -> Optional[float]:
+        """Reflect a protective level through entry so SL/TP swap sides with the trade."""
+        if entry is None or level is None:
+            return level
+        return round((2.0 * float(entry)) - float(level), digits)
+
+    @classmethod
+    def invert_side_and_protection(
+        cls,
+        direction: Optional[str],
+        entry: Optional[float],
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+        *,
+        digits: int = 5,
+    ) -> tuple[str, Optional[float], Optional[float]]:
+        """Flip BUY↔SELL and mirror SL/TP around entry (stop stays on the loss side)."""
+        return (
+            cls.invert_trade_side(direction),
+            cls.mirror_price_around_entry(entry, stop_loss, digits),
+            cls.mirror_price_around_entry(entry, take_profit, digits),
+        )
+
+    def _should_invert_ctrader_fx_side(self, broker: str, symbol: str) -> bool:
+        if not self._ctrader_invert_side_enabled():
+            return False
+        if str(broker or "").lower() != "ctrader":
+            return False
+        return classify_symbol(str(symbol or "")) == "forex"
+
+    def apply_ctrader_fx_side_invert(
+        self,
+        symbol: str,
+        signal: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Invert a cTrader FX signal in place and re-clamp SL/TP for the new side.
+
+        Returns the mutated signal, or None when post-invert geometry is rejected.
+        Idempotent when ``side_inverted`` is already set.
+        """
+        if signal.get("side_inverted"):
+            return signal
+        original = self._normalize_direction(signal.get("direction"))
+        entry = signal.get("entry_price")
+        if entry is None:
+            logger.info(
+                "[%s] cTrader FX invert skipped: missing entry, refusing unmirrored flip",
+                self._log_safe(symbol),
+            )
+            return None
+        digits = CTraderService.digits_for(symbol)
+        flipped, sl, tp = self.invert_side_and_protection(
+            original,
+            entry,
+            signal.get("stop_loss"),
+            signal.get("take_profit"),
+            digits=digits,
+        )
+        if flipped == original:
+            return signal
+        natural_sl, natural_tp = sl, tp
+        if entry is not None:
+            sl, tp = CTraderService.clamp_protective_prices(
+                symbol, float(entry), sl, tp, direction=flipped,
+            )
+            validated = CTraderService.validate_protective_geometry(
+                symbol,
+                float(entry),
+                natural_sl,
+                natural_tp,
+                sl,
+                tp,
+                direction=flipped,
+            )
+            if validated is None:
+                logger.info(
+                    "[%s] cTrader FX invert veto: post-invert geometry rejected "
+                    "(%s → %s)",
+                    self._log_safe(symbol),
+                    self._log_safe(original),
+                    self._log_safe(flipped),
+                )
+                return None
+            sl, tp = validated
+        signal["direction"] = flipped
+        signal["stop_loss"] = sl
+        signal["take_profit"] = tp
+        signal["original_direction"] = original
+        signal["side_inverted"] = True
+        reason = str(signal.get("reason") or "").rstrip()
+        tag = f"[cTrader FX side inverted {original}→{flipped}; CTRADER_INVERT_SIDE=true]"
+        signal["reason"] = f"{reason} {tag}".strip() if reason else tag
+        logger.info(
+            "[%s] cTrader FX side invert %s → %s sl=%s tp=%s (entry=%s)",
+            self._log_safe(symbol),
+            self._log_safe(original),
+            self._log_safe(flipped),
+            sl,
+            tp,
+            entry,
+        )
+        return signal
+
+    def _ensure_ctrader_fx_side_invert(self, cand: Dict[str, Any]) -> bool:
+        """Apply invert to a live candidate once. False = skip (geometry veto)."""
+        if not self._should_invert_ctrader_fx_side(
+            str(cand.get("broker") or ""), str(cand.get("symbol") or "")
+        ):
+            return True
+        if cand.get("side_inverted"):
+            return True
+        updated = self.apply_ctrader_fx_side_invert(str(cand.get("symbol") or ""), cand)
+        if updated is None:
+            return False
+        entry = cand.get("entry_price")
+        sl = cand.get("stop_loss")
+        if entry and sl:
+            cand["sizing"] = self._calculate_size(
+                str(cand.get("symbol") or ""),
+                float(entry),
+                float(sl),
+                "ctrader",
+            )
+        return True
+
     def _open_position_keys(self, broker: str) -> Optional[Set[tuple]]:
         """(symbol, BUY/SELL) pairs currently open, or None if the book is unreadable."""
         keys: Set[tuple] = set()
@@ -1240,10 +1395,11 @@ class SignalCandidateEngine:
                             if validated is None:
                                 continue  # next strategy may produce valid geometry
                             raw_signal["stop_loss"], raw_signal["take_profit"] = validated
-                        size_data = self._calculate_size(sym, raw_signal["entry_price"], raw_signal["stop_loss"], broker)
 
                         # P1: Kronos + heuristic timing gate. Shadow mode logs
                         # and annotates the candidate; enforce mode blocks.
+                        # Gate the *strategy* side first; invert after approval
+                        # so Kronos cannot veto the empirically-winning flip.
                         gate_result = None
                         if broker == "ctrader" and self._fx_gate_mode() != "off":
                             try:
@@ -1262,6 +1418,14 @@ class SignalCandidateEngine:
                             ):
                                 logger.info(f"[{sym}] FX gate ACTIVE VETO: {gate_result.reasoning}")
                                 continue
+
+                        if self._should_invert_ctrader_fx_side(broker, sym):
+                            inverted = self.apply_ctrader_fx_side_invert(sym, raw_signal)
+                            if inverted is None:
+                                continue
+                            raw_signal = inverted
+
+                        size_data = self._calculate_size(sym, raw_signal["entry_price"], raw_signal["stop_loss"], broker)
 
                         # Timing window parameters
                         timing_mode = raw_signal["timing_mode"]
@@ -1288,6 +1452,8 @@ class SignalCandidateEngine:
                             "status": CandidateStatus.PENDING if earliest > now_ts else CandidateStatus.READY,
                             "confidence": raw_signal["confidence"],
                             "reason": raw_signal["reason"],
+                            "original_direction": raw_signal.get("original_direction"),
+                            "side_inverted": bool(raw_signal.get("side_inverted")),
                             "features": features,
                             "sizing": size_data,
                             "fx_gate": (
@@ -1408,6 +1574,21 @@ class SignalCandidateEngine:
                 if validated is None:
                     continue
                 sl, tp = validated
+                raw_macro = {
+                    "direction": direction,
+                    "entry_price": entry,
+                    "stop_loss": sl,
+                    "take_profit": tp,
+                    "reason": f"High Impact Macro Event: '{ev.get('event')}' ({ev.get('currency')}). Post-reaction momentum window armed.",
+                }
+                if self._should_invert_ctrader_fx_side("ctrader", matched_sym):
+                    inverted = self.apply_ctrader_fx_side_invert(matched_sym, raw_macro)
+                    if inverted is None:
+                        continue
+                    raw_macro = inverted
+                    direction = raw_macro["direction"]
+                    sl = raw_macro["stop_loss"]
+                    tp = raw_macro["take_profit"]
                 size_data = self._calculate_size(matched_sym, entry, sl, "ctrader")
 
                 now_ts = int(time.time())
@@ -1423,7 +1604,9 @@ class SignalCandidateEngine:
                     "timing_mode": TimingMode.POST_REACTION,
                     "status": CandidateStatus.PENDING,
                     "confidence": 0.85,
-                    "reason": f"High Impact Macro Event: '{ev.get('event')}' ({ev.get('currency')}). Post-reaction momentum window armed.",
+                    "reason": raw_macro["reason"],
+                    "original_direction": raw_macro.get("original_direction"),
+                    "side_inverted": bool(raw_macro.get("side_inverted")),
                     "features": features,
                     "sizing": size_data,
                     "earliest_exec_at": now_ts + (self.timing_config["post_reaction_delay_min"] * 60),
@@ -1716,6 +1899,19 @@ class SignalCandidateEngine:
                     "skipped": True,
                     "error": binance_block,
                 }
+
+        # After skip gates, invert cTrader FX so same-side / exposure checks
+        # see the side we will actually send. In-flight candidates created
+        # before this flag still flip once (side_inverted is the lock).
+        if cand.get("broker") == "ctrader" and not self._ensure_ctrader_fx_side_invert(cand):
+            return {
+                "success": False,
+                "skipped": True,
+                "error": (
+                    f"cTrader FX side invert rejected {cand.get('symbol')} "
+                    "geometry; not sending IC order."
+                ),
+            }
 
         # Same-direction open book: refuse even when one_position_per_symbol
         # is disabled so scans cannot stack a second EURUSD SELL after fill.
