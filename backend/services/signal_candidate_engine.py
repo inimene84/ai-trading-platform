@@ -1809,16 +1809,6 @@ class SignalCandidateEngine:
         if not is_trading_allowed():
             return {"success": False, "error": "Trading halted by sentry."}
 
-        if cand.get("broker") == "ctrader" and not self._ensure_ctrader_fx_side_invert(cand):
-            return {
-                "success": False,
-                "skipped": True,
-                "error": (
-                    f"cTrader FX side invert rejected {cand.get('symbol')} "
-                    "geometry; not sending IC order."
-                ),
-            }
-
         now_ts = int(time.time())
         if not force:
             if now_ts < cand["earliest_exec_at"]:
@@ -1891,6 +1881,19 @@ class SignalCandidateEngine:
                     "skipped": True,
                     "error": binance_block,
                 }
+
+        # After skip gates, invert cTrader FX so same-side / exposure checks
+        # see the side we will actually send. In-flight candidates created
+        # before this flag still flip once (side_inverted is the lock).
+        if cand.get("broker") == "ctrader" and not self._ensure_ctrader_fx_side_invert(cand):
+            return {
+                "success": False,
+                "skipped": True,
+                "error": (
+                    f"cTrader FX side invert rejected {cand.get('symbol')} "
+                    "geometry; not sending IC order."
+                ),
+            }
 
         # Same-direction open book: refuse even when one_position_per_symbol
         # is disabled so scans cannot stack a second EURUSD SELL after fill.
