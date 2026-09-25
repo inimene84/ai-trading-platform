@@ -13,7 +13,8 @@ manually (or via cron) against the VPS.
 
 | File | Purpose |
 |---|---|
-| `vps_ssh_common.py` | Shared SSH connection settings used by ~36 `vps_*` scripts. Do not move or rename — many scripts `import` it. |
+| `vps_ssh_common.py` | Shared SSH connection settings used by ~36 `vps_*` scripts. Supports `SSH_HOST_HERMES` (Allikas/OmniRoute) alongside `SSH_HOST` (trading). |
+| `vps_fix_two_vps_connections.sh` | One-shot SSH + OmniRoute + GrokBOT wiring between trading and Allikas VPSes. See `docs/ops/TWO_VPS_CONNECTIONS.md`. |
 
 ## Status tags
 
