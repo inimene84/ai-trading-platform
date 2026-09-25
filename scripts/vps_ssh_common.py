@@ -12,7 +12,6 @@ Env vars:
     SSH_USER             SSH user (default: root)
     SSH_PORT             SSH port (default: 22)
     SSH_KEY_PATH         Private key file (default: ~/.ssh/id_vps_bot)
-    SSH_TARGET_ROLE      trading | allikas | hermes | construction
 """
 
 from __future__ import annotations
@@ -29,14 +28,23 @@ SSH_KEY_PATH = os.getenv("SSH_KEY_PATH", "")
 
 
 def _host_for_role(role: str | None = None) -> str:
-    role = (role or os.getenv("SSH_TARGET_ROLE") or "trading").strip().lower()
-    if role in {"allikas", "hermes", "construction", "omniroute", "omni"}:
+    """Resolve host. Omit role (existing callers) always uses trading SSH_HOST."""
+    if role is None or str(role).strip() == "":
+        if not SSH_HOST:
+            raise ValueError("SSH_HOST environment variable is required")
+        return SSH_HOST
+    normalized = str(role).strip().lower()
+    allikas_roles = {"allikas", "hermes", "construction", "omniroute", "omni"}
+    trading_roles = {"trading", "qt", "quantumtrade"}
+    if normalized in allikas_roles:
         if not SSH_HOST_HERMES:
             raise ValueError("SSH_HOST_HERMES / SSH_HOST_ALLIKAS is required for the Allikas OmniRoute host")
         return SSH_HOST_HERMES
-    if not SSH_HOST:
-        raise ValueError("SSH_HOST environment variable is required")
-    return SSH_HOST
+    if normalized in trading_roles:
+        if not SSH_HOST:
+            raise ValueError("SSH_HOST environment variable is required")
+        return SSH_HOST
+    raise ValueError(f"Unknown SSH role {role!r}; use trading or allikas")
 
 
 TARGET = f"{SSH_USER}@{SSH_HOST}" if SSH_HOST else ""
