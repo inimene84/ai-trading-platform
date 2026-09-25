@@ -5,23 +5,41 @@ configuration comes from environment variables, with the documented
 defaults as fallback.
 
 Env vars:
-    SSH_HOST      VPS address (must be provided via environment variable)
-    SSH_USER      SSH user (default: root)
-    SSH_PORT      SSH port (default: 22)
-    SSH_KEY_PATH  Private key file (default: ~/.ssh/id_vps_bot)
+    SSH_HOST             Trading VPS (default target)
+    SSH_HOST_HERMES      Allikas / OmniRoute / Hermes VPS
+    SSH_HOST_ALLIKAS     alias for SSH_HOST_HERMES
+    SSH_HOST_CONSTRUCTION alias for SSH_HOST_HERMES
+    SSH_USER             SSH user (default: root)
+    SSH_PORT             SSH port (default: 22)
+    SSH_KEY_PATH         Private key file (default: ~/.ssh/id_vps_bot)
+    SSH_TARGET_ROLE      trading | allikas | hermes | construction
 """
 
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 SSH_HOST = os.getenv("SSH_HOST", "")
+SSH_HOST_HERMES = os.getenv("SSH_HOST_HERMES") or os.getenv("SSH_HOST_ALLIKAS") or os.getenv("SSH_HOST_CONSTRUCTION") or ""
 SSH_USER = os.getenv("SSH_USER", "root")
 SSH_PORT = os.getenv("SSH_PORT", "22")
 SSH_KEY_PATH = os.getenv("SSH_KEY_PATH", "")
 
-TARGET = f"{SSH_USER}@{SSH_HOST}"
+
+def _host_for_role(role: str | None = None) -> str:
+    role = (role or os.getenv("SSH_TARGET_ROLE") or "trading").strip().lower()
+    if role in {"allikas", "hermes", "construction", "omniroute", "omni"}:
+        if not SSH_HOST_HERMES:
+            raise ValueError("SSH_HOST_HERMES / SSH_HOST_ALLIKAS is required for the Allikas OmniRoute host")
+        return SSH_HOST_HERMES
+    if not SSH_HOST:
+        raise ValueError("SSH_HOST environment variable is required")
+    return SSH_HOST
+
+
+TARGET = f"{SSH_USER}@{SSH_HOST}" if SSH_HOST else ""
 
 def _get_ssh_opts() -> list[str]:
     opts = [
@@ -33,7 +51,6 @@ def _get_ssh_opts() -> list[str]:
         # Check SSH_PRIVATE_KEY env var
         priv_key = os.getenv("SSH_PRIVATE_KEY", "")
         if priv_key:
-            import tempfile
             kf = tempfile.NamedTemporaryFile(delete=False, mode="w")
             begin_marker = "-----BEGIN OPENSSH PRIVATE KEY-----"
             end_marker = "-----END OPENSSH PRIVATE KEY-----"
@@ -56,14 +73,14 @@ def _get_ssh_opts() -> list[str]:
         opts = ["-i", key_path, *opts]
     return opts
 
-def ssh_cmd(remote_command: str) -> list[str]:
-    """Build an ssh argv that runs `remote_command` on the VPS."""
-    return ["ssh", *_get_ssh_opts(), "-p", SSH_PORT, TARGET, remote_command]
+def ssh_cmd(remote_command: str, role: str | None = None) -> list[str]:
+    """Build an ssh argv that runs `remote_command` on the selected VPS."""
+    host = _host_for_role(role)
+    return ["ssh", *_get_ssh_opts(), "-p", SSH_PORT, f"{SSH_USER}@{host}", remote_command]
 
 
-
-
-def scp_cmd(local_path: str, remote_path: str) -> list[str]:
-    """Build an scp argv that copies a local file to `remote_path` on the VPS."""
-    return ["scp", *_get_ssh_opts(), "-P", SSH_PORT, str(local_path), f"{TARGET}:{remote_path}"]
+def scp_cmd(local_path: str, remote_path: str, role: str | None = None) -> list[str]:
+    """Build an scp argv that copies a local file to `remote_path` on the selected VPS."""
+    host = _host_for_role(role)
+    return ["scp", *_get_ssh_opts(), "-P", SSH_PORT, str(local_path), f"{SSH_USER}@{host}:{remote_path}"]
 

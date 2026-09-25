@@ -34,13 +34,16 @@ That script:
 
 ## Two-VPS layout
 
-| Host | Role |
-| --- | --- |
-| Trading VPS (`$SSH_HOST`) | backend, MCP `:9100` (localhost), nginx `:8081`, A0, hermes-webui |
-| Hermes VPS (optional second host) | hermes-agent + hermes-webui (other stacks) |
+| Host | Role | Connections we use |
+| --- | --- | --- |
+| Trading VPS (`$SSH_HOST`) | QuantumTrade live money, local `vps-qdrant`, MCP `:9100`, nginx `:8081` | Do not expose trading Qdrant off-box |
+| Allikas / Hermes VPS (`$SSH_HOST_HERMES` / `$SSH_HOST_ALLIKAS`) | OmniRoute `https://omni.allikas.online`, OpenViking `https://viking.allikas.online`, Hermes, OCE | HTTPS OmniRoute + Viking. Same SSH key as trading. |
+
+The Allikas host also runs **OCE's** Qdrant for construction ERP memory. That is **not** a standalone Qdrant VPS and is **not** `QDRANT_URL` for QuantumTrade. Trading Qdrant stays `http://vps-qdrant:6333` on the trading Docker network.
 
 - **A0 / hermes-webui on trading VPS** → MCP `http://ai-trading-mcp:9100/mcp` on `trading-net`
-- **Hermes on another VPS** → REST `http://$SSH_HOST:8081/api/...` (MCP port is not public)
+- **Hermes on Allikas** → REST `http://$SSH_HOST:8081/api/...` (MCP port is not public)
+- **OmniRoute from trading** → `https://omni.allikas.online/v1` (`OMNIROUTE_BASE_URL`)
 
 ## A0 configuration
 
