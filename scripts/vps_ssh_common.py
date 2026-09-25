@@ -80,9 +80,9 @@ def ssh_cmd(remote_command: str, host: str | None = None) -> list[str]:
         remote_command: Shell command to run on the remote host.
         host: Optional override host/IP. Defaults to SSH_HOST (trading VPS).
     """
-    target_host = host or SSH_HOST_TRADING
+    target_host = host if host is not None else SSH_HOST_TRADING
     if not target_host:
-        raise ValueError("SSH_HOST / SSH_HOST_TRADING is required")
+        raise ValueError("SSH target host is required (set SSH_HOST or pass host=)")
     target = f"{SSH_USER}@{target_host}"
     return ["ssh", *_get_ssh_opts(), "-p", SSH_PORT, target, remote_command]
 
