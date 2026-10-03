@@ -1,0 +1,117 @@
+name: Refresh cTrader token
+
+# Renew the saved cTrader refresh token. Does not print token values.
+# Stays in the current trading mode. Does not switch the book to live.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: vps-ctrader-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Refresh token and reconnect
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_PRIVATE_KEY}" ]; then
+            echo "::error::SSH_PRIVATE_KEY is not available to this workflow."
+            exit 1
+          fi
+          host="${SSH_HOST:-72.60.18.113}"
+          user="${SSH_USER:-root}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "${user}@${host}" 'bash -s' << 'REMOTE'
+          set -euo pipefail
+          cd /root/ai-trading-platform-v3
+          docker exec -i ai-trading-backend python - << 'PY'
+          from pathlib import Path
+          from backend.services.ctrader_tokens import ctrader_token_store
+
+          before = ctrader_token_store.get_tokens().get("updated_at")
+          ctrader_token_store.refresh_if_needed(force=True)
+          tokens = ctrader_token_store.get_tokens()
+          refreshed = tokens.get("updated_at") != before
+          print("refreshed", bool(refreshed))
+          access = str(tokens.get("access_token") or "")
+          refresh = str(tokens.get("refresh_token") or "")
+          account = str(tokens.get("account_id") or "")
+          print("access_len", len(access))
+          print("refresh_len", len(refresh))
+          if not refreshed or not access or not refresh:
+              raise SystemExit(0)
+          path = Path("/app/.env")
+          lines = path.read_text(encoding="utf-8").splitlines()
+          wanted = {
+              "CTRADER_ACCESS_TOKEN": access,
+              "CTRADER_REFRESH_TOKEN": refresh,
+          }
+          if account.isdigit() and int(account) > 0:
+              wanted["CTRADER_ACCOUNT_ID"] = account
+          seen = set()
+          out = []
+          for line in lines:
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  out.append(line)
+                  continue
+              key = line.split("=", 1)[0]
+              if key in wanted:
+                  out.append(f"{key}={wanted[key]}")
+                  seen.add(key)
+              else:
+                  out.append(line)
+          for key, value in wanted.items():
+              if key not in seen:
+                  out.append(f"{key}={value}")
+          path.write_text("\n".join(out) + "\n", encoding="utf-8")
+          print("env_token_lines_updated", ",".join(sorted(wanted)))
+          Path("/tmp/ctrader_refreshed").write_text("1", encoding="utf-8")
+          PY
+          if ! docker exec ai-trading-backend test -f /tmp/ctrader_refreshed; then
+            echo "refresh_rejected"
+            docker logs --since 3m ai-trading-backend 2>&1 | grep -E 'token refresh rejected|token successfully renewed' | sed -E 's/(token|refresh|access)[^ ]{8,}/[redacted]/Ig' | tail -8
+            exit 0
+          fi
+          docker compose -f docker-compose.prod.yml up -d backend
+          ok=0
+          for i in $(seq 1 24); do
+            if curl -sf http://127.0.0.1:8001/health >/dev/null; then
+              echo backend_healthy
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          test "$ok" = 1
+          python3 - << 'PY'
+          import json
+          import urllib.request
+          from pathlib import Path
+          env = {}
+          for line in Path(".env").read_text(encoding="utf-8").splitlines():
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              env[key] = value
+          request = urllib.request.Request(
+              "http://127.0.0.1:8001/trading/ctrader/status",
+              headers={"X-API-Key": env.get("ADMIN_API_KEY", "")},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              body = json.loads(response.read().decode())
+          print("mode_still", env.get("TRADING_MODE", "unset"))
+          for field in ("connected", "authenticated", "dry_run", "host", "last_error", "connect_cooldown_s"):
+              print("ctrader", field, body.get(field))
+          PY
+          REMOTE
