@@ -74,5 +74,99 @@ jobs:
           print("last_cycle", loop.get("last_cycle"))
           print("next_cycle", loop.get("next_cycle"))
           print("error", loop.get("error"))
+
+          def safe(path):
+              try:
+                  return call(path)
+              except Exception as exc:
+                  print("endpoint_error", path, type(exc).__name__)
+                  return None
+
+          book = safe("/trading/paper/portfolio")
+          positions = safe("/trading/paper/positions")
+          stats = safe("/trading/paper/stats")
+          if isinstance(book, dict):
+              pf = book.get("portfolio") or {}
+              print(
+                  "paper_book",
+                  "cash", pf.get("cash"),
+                  "equity", pf.get("equity"),
+                  "margin", pf.get("margin_used"),
+                  "orders", pf.get("order_count"),
+                  "fills", pf.get("trade_count"),
+                  "symbols", sorted((pf.get("positions") or {}).keys()),
+              )
+              for sym, pos in sorted((pf.get("positions") or {}).items()):
+                  long_qty = float(pos.get("long") or 0)
+                  short_qty = float(pos.get("short") or 0)
+                  if long_qty or short_qty:
+                      print(
+                          "paper_pos", sym,
+                          "long", long_qty, "long_avg", pos.get("long_cost_basis"),
+                          "short", short_qty, "short_avg", pos.get("short_cost_basis"),
+                      )
+          if isinstance(stats, dict):
+              print(
+                  "paper_stats",
+                  "trades", stats.get("total_trades"),
+                  "pnl", stats.get("total_pnl"),
+                  "fees", stats.get("total_fees"),
+                  "wins", stats.get("winning_trades"),
+                  "losses", stats.get("losing_trades"),
+              )
+          if isinstance(positions, dict):
+              print("paper_position_rows", positions.get("count"))
+              for row in positions.get("positions") or []:
+                  print(
+                      "paper_row", row.get("symbol"), row.get("side"),
+                      "qty", row.get("quantity"), "avg", row.get("avg_price"),
+                  )
+          PY
+          docker exec -i ai-trading-backend python - << 'PY'
+          from sqlalchemy import func
+          from backend.database.connection import SessionLocal
+          from backend.database.models import Trade, PaperTrade, PaperPortfolio
+
+          db = SessionLocal()
+          try:
+              books = db.query(PaperPortfolio).all()
+              print("db_paper_books", len(books))
+              for book in books:
+                  print(
+                      "db_book", book.portfolio_id, book.broker,
+                      "cash", round(float(book.cash or 0), 4),
+                      "initial", round(float(book.initial_balance or 0), 4),
+                      "margin", round(float(book.margin_used or 0), 4),
+                  )
+              fills = db.query(func.count(PaperTrade.id), func.coalesce(func.sum(PaperTrade.pnl), 0), func.coalesce(func.sum(PaperTrade.fee), 0)).one()
+              print("db_paper_fills", int(fills[0]), "realized_pnl", round(float(fills[1]), 4), "fees", round(float(fills[2]), 4))
+              open_rows = (
+                  db.query(Trade)
+                  .filter(Trade.status.in_(["open", "filled"]))
+                  .order_by(Trade.id.asc())
+                  .all()
+              )
+              print("db_open_trades", len(open_rows))
+              nonzero = 0
+              total = 0.0
+              for row in open_rows:
+                  pnl = float(row.pnl or 0)
+                  total += pnl
+                  if abs(pnl) > 1e-9:
+                      nonzero += 1
+                  print(
+                      "open", row.id, row.symbol, row.direction,
+                      "qty", row.quantity, "entry", row.entry_price,
+                      "stored_pnl", pnl, "mode", row.mode, "broker", row.broker, "status", row.status,
+                  )
+              closed = (
+                  db.query(func.count(Trade.id), func.coalesce(func.sum(Trade.pnl), 0))
+                  .filter(Trade.status == "closed", Trade.mode == "paper")
+                  .one()
+              )
+              print("open_stored_pnl_sum", round(total, 4), "open_nonzero", nonzero)
+              print("closed_paper_trades", int(closed[0]), "closed_paper_pnl", round(float(closed[1]), 4))
+          finally:
+              db.close()
           PY
           REMOTE
