@@ -1,6 +1,7 @@
 """Purged CV embargo/purge must cover max_holding_bars (48 on 1h) and lookback."""
 
 import numpy as np
+import pandas as pd
 
 from embargo_audit import (
     DEFAULT_FEATURE_LOOKBACK_BARS,
@@ -53,6 +54,22 @@ def test_purged_kfold_embargo_bars_excludes_buffer():
         test_max = int(max(test_idx))
         buffer = set(range(test_max + 1, min(n, test_max + 1 + embargo)))
         assert set(train_idx).isdisjoint(buffer)
+
+
+def test_datetime_embargo_is_bars_not_event_count():
+    """Sparse events: 48 embargo bars = 48 hours, not 48 events."""
+    idx = pd.date_range("2024-01-01", periods=20, freq="6h")
+    frame = pd.DataFrame({"x": np.arange(20)}, index=idx)
+    pkf = PurgedKFold(n_splits=2, embargo_bars=48, bar_timedelta=pd.Timedelta(hours=1))
+    train_idx, test_idx = next(pkf.split(frame))
+    test_end_ts = idx[int(max(test_idx))]
+    cutoff = test_end_ts + pd.Timedelta(hours=48)
+    embargoed = {i for i, ts in enumerate(idx) if test_end_ts < ts <= cutoff}
+    assert len(embargoed) < 48
+    assert set(train_idx).isdisjoint(embargoed)
+    later = {i for i, ts in enumerate(idx) if ts > cutoff}
+    assert later
+    assert later.issubset(set(train_idx))
 
 
 def test_embargo_bars_for_n_never_below_required():

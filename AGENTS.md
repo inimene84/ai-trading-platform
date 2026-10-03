@@ -138,13 +138,15 @@ Deployments should be executed via standard CI/CD pipelines or automated deploy 
 Direct SSH access requires private keys configured in secure runner environments.
 
 ### Required Secrets
-- `SSH_HOST`: Target server hostname or IP address (configured in secure environment variables only)
+- `SSH_HOST`: Trading VPS hostname or IP (QuantumTrade live money)
+- `SSH_HOST_HERMES` / `SSH_HOST_ALLIKAS`: Allikas VPS (OmniRoute `omni.allikas.online`, OpenViking, Hermes). Same `SSH_PRIVATE_KEY` as trading. This is **not** the trading Qdrant box — QT `QDRANT_URL` stays `http://vps-qdrant:6333`.
 - `SSH_USER`: Deployment user (use a dedicated non-root deploy user with restricted Docker permissions)
 - `SSH_PRIVATE_KEY`: Deployment key with pass-phrase protection
 
 Never commit credentials, private keys, or raw IP addresses into git-tracked repositories.
 
-- `SSH_HOST` - VPS IP address
+- `SSH_HOST` - trading VPS address
+- `SSH_HOST_HERMES` - Allikas / OmniRoute VPS (`scripts/ssh_allikas_remote.sh`)
 - `SSH_USER` - `root`
 - `SSH_PRIVATE_KEY` - ed25519 private key (may be stored as single line with spaces; `scripts/ssh_vps_remote.sh` reformats OpenSSH keys automatically)
 

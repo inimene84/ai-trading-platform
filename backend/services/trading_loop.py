@@ -1302,9 +1302,7 @@ class TradingLoopService:
 
             # Fetch funding rate before evaluation to allow gating
             try:
-                from backend.services.binance_market_data import get_binance_market_data
-                bmd = get_binance_market_data()
-                fr_data = await bmd.get_funding_rate(symbol)
+                fr_data = await binance_market_data.get_funding_rate(symbol)
                 current_funding_rate = float(fr_data.get('fundingRate', 0)) if fr_data else 0.0
             except Exception:
                 current_funding_rate = 0.0

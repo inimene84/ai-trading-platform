@@ -171,8 +171,10 @@ def entry_client_order_id(
     raw = f"x{futures_sym[:6]}{side[0]}{purpose}{qty_tag}{minute}"
     if len(raw) <= 36:
         return raw
+    # Idempotency digest, not a security MAC.
     digest = hashlib.sha1(
-        f"{futures_sym}|{side}|{purpose}|{quantity}|{minute}".encode()
+        f"{futures_sym}|{side}|{purpose}|{quantity}|{minute}".encode(),
+        usedforsecurity=False,
     ).hexdigest()[:16]
     return f"x{futures_sym[:6]}{side[0]}{purpose}{digest}"[:36]
 
