@@ -98,6 +98,7 @@ def geometry_dict(
         "trail_activation_atr": float(TRAIL_ACTIVATION_ATR),
         "trail_atr_mult": float(TRAIL_ATR_MULT),
         "atr_period": int(atr_period),
+        "atr_method": "sma_prior_n",
         "max_holding_bars": int(max_holding_bars),
         "theoretical_payoff_ratio": round(theoretical_payoff_ratio(tp_mult, sl_mult), 4),
         "breakeven_win_probability": round(breakeven_win_probability(theoretical_payoff_ratio(tp_mult, sl_mult)), 4),
