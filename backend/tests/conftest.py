@@ -57,3 +57,36 @@ def fx_venue_open_for_engine_tests(monkeypatch):
         "backend.services.signal_candidate_engine.is_venue_open",
         lambda symbol, now=None: True,
     )
+
+
+@pytest.fixture
+def db_session():
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import StaticPool
+    from sqlalchemy.orm import sessionmaker
+    from backend.database.models import Base
+    from backend.database.connection import get_db
+    from backend.main import app
+
+    test_engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=test_engine)
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+    session = TestingSessionLocal()
+
+    def override_get_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        yield session
+    finally:
+        session.close()
+        app.dependency_overrides.pop(get_db, None)
+

@@ -360,6 +360,7 @@ async def require_admin_token_for_sensitive_requests(request: Request, call_next
             "/jesse", "/api/jesse",
             "/jev", "/api/jev",
             "/data", "/api/data",
+            "/control-plane", "/api/control-plane",
         ))
     )
     if trading_mutation and not admin_auth_enabled():

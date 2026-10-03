@@ -787,9 +787,27 @@ class UnifiedTrading:
         if not session:
             return UnifiedOrderResponse(False, "", "No active session. Call init_session first.", "")
 
-        # Safeguard: if global trading mode is not LIVE, force route to paper trading engine
+        # Safeguard 1: Kill switch / sentry halt check
+        from backend.services.sentry_state import is_trading_allowed, read_state
+        if not is_trading_allowed():
+            sentry_info = read_state()
+            halt_reason = sentry_info.get("reason") or "Kill switch or sentry halt is engaged"
+            logger.warning(
+                f"[SAFETY GUARD] Trading blocked by kill switch / sentry: {halt_reason} "
+                f"for {order.symbol} {order.side.value if hasattr(order.side, 'value') else order.side}"
+            )
+            return UnifiedOrderResponse(False, "", f"Trading blocked: {halt_reason}", session.mode)
+
+        # Safeguard 2: Global trading mode check
         from backend.services.trading_mode import get_trading_mode, TradingMode
         global_mode = get_trading_mode()
+
+        if global_mode == TradingMode.SHADOW:
+            logger.info(
+                f"[SAFETY GUARD] Global TRADING_MODE=SHADOW. Order for {order.symbol} "
+                f"blocked from live and paper broker execution."
+            )
+            return UnifiedOrderResponse(False, "", "Trading blocked: global TRADING_MODE is SHADOW", "shadow")
         
         if session.mode == "live" and global_mode != TradingMode.LIVE:
             logger.warning(

@@ -410,18 +410,12 @@ async def evaluate_and_log(
         confidence=confidence,
         execute_fn=None if not jev_may_call_execute() else execute_fn,
     )
-    if decision["execution_mode"] == "paper" and decision["eligible"] and execute_fn is None and jev_may_call_execute():
-        decision = decide_execution(
-            evaluation=evaluation,
-            side=side,
-            confidence=confidence,
-            execute_fn=lambda **kwargs: execute_paper_order(
-                symbol=symbol,
-                side=str(kwargs.get("side") or side),
-                db=db,
-                evaluation=evaluation,
-                price_data=scan_price,
-            ),
+    # WP2: Autonomous order creation in JEV pipeline decommissioned.
+    # JEV is strictly advisory to the canonical decision engine.
+    if decision["execution_mode"] == "paper" and decision["eligible"] and execute_fn is None:
+        logger.info(
+            f"[{symbol}] JEV advisory paper signal (side={side}, conf={confidence:.2f}); "
+            f"direct execution bypassed per WP2 unified decision engine architecture."
         )
 
     now = utc_now()

@@ -526,3 +526,176 @@ class JevPipelineTrade(Base):
     )
 
 
+class ControlPlaneState(Base):
+    """Persistent control-plane state and kill switch audit record."""
+    __tablename__ = "control_plane_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    kill_switch_engaged = Column(Boolean, nullable=False, default=False, index=True)
+    actor = Column(String(100), nullable=True)
+    reason = Column(Text, nullable=True)
+    details = Column(JSON, nullable=True)
+    engaged_at = Column(DateTime(timezone=True), nullable=True)
+    released_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class IngestionMarketScan(Base):
+    """Immutable ledger of market scans ingested through /api/ingestion/v1/market-scans."""
+    __tablename__ = "ingestion_market_scans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    scan_id = Column(String(64), nullable=False, index=True)
+    source = Column(String(50), nullable=False, index=True)
+    scan_timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    received_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    observation_count = Column(Integer, nullable=False, default=1)
+    payload_sha256 = Column(String(64), nullable=False, index=True)
+    payload = Column(JSON, nullable=False)
+    trace_id = Column(String(64), nullable=True, index=True)
+
+    __table_args__ = (
+        UniqueConstraint("source", "scan_id", name="uq_ingestion_source_scan"),
+        Index("idx_ingestion_scans_received", "received_at"),
+        Index("idx_ingestion_scans_source_time", "source", "scan_timestamp"),
+    )
+
+
+class IngestionOutbox(Base):
+    """Transactional outbox for reliable, asynchronous event delivery."""
+    __tablename__ = "ingestion_outbox"
+
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(String(64), unique=True, nullable=False, index=True)
+    event_type = Column(String(50), nullable=False, index=True)
+    aggregate_type = Column(String(50), nullable=False, default="market_scan")
+    aggregate_id = Column(String(64), nullable=False, index=True)
+    payload = Column(JSON, nullable=False)
+    status = Column(String(20), nullable=False, default="pending", index=True)  # pending, processing, completed, failed, dead
+    attempt_count = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=5)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    locked_at = Column(DateTime(timezone=True), nullable=True)
+    locked_by = Column(String(64), nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("idx_outbox_status_attempt", "status", "next_attempt_at"),
+    )
+
+
+class DecisionRecord(Base):
+    """
+    Authoritative record of trading engine decisions with baseline vs counterfactual (with-JEV)
+    decision traces for every evaluated observation in an ingested scan.
+    """
+    __tablename__ = "decision_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    decision_id = Column(String(64), unique=True, nullable=False, index=True)
+    trace_id = Column(String(64), nullable=True, index=True)
+    scan_id = Column(String(64), nullable=False, index=True)
+    event_id = Column(String(64), nullable=False, index=True)
+
+    symbol = Column(String(32), nullable=False, index=True)
+    venue = Column(String(32), nullable=False, default="binance_futures")
+    timeframe = Column(String(16), nullable=False, default="M5")
+    observed_price = Column(Float, nullable=True)
+
+    # Baseline decision (Canonical engine without JEV)
+    baseline_action = Column(String(32), nullable=False, default="HOLD")
+    baseline_confidence = Column(Float, nullable=False, default=0.0)
+    baseline_reason = Column(Text, nullable=True)
+
+    # Counterfactual decision (Canonical engine with JEV advisory opinion)
+    with_jev_action = Column(String(32), nullable=False, default="HOLD")
+    with_jev_confidence = Column(Float, nullable=False, default=0.0)
+    with_jev_reason = Column(Text, nullable=True)
+
+    # Divergence classification (AGREED, UPGRADED, DOWNGRADED, FLIPPED, OPPOSED)
+    divergence = Column(String(32), nullable=False, default="AGREED")
+
+    # Attached JEV advisory opinion attributes
+    jev_signal = Column(String(32), nullable=True)
+    jev_confidence = Column(Float, nullable=True)
+    jev_vetoed = Column(Boolean, default=False)
+    jev_conflict = Column(Boolean, default=False)
+    jev_reason = Column(Text, nullable=True)
+
+    # Execution gating
+    execution_mode = Column(String(32), nullable=False, default="shadow")
+    executed = Column(Boolean, nullable=False, default=False)
+    order_intent_id = Column(String(64), nullable=True)
+
+    details = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    __table_args__ = (
+        Index("idx_decision_records_scan", "scan_id"),
+        Index("idx_decision_records_symbol_created", "symbol", "created_at"),
+        Index("idx_decision_records_divergence", "divergence"),
+    )
+
+
+class DecisionOpinion(Base):
+    """
+    Structured advisory opinions emitted by JEV or sub-analysts during observation evaluation.
+    """
+    __tablename__ = "decision_opinions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    opinion_id = Column(String(64), unique=True, nullable=False, index=True)
+    trace_id = Column(String(64), nullable=True, index=True)
+    scan_id = Column(String(64), nullable=False, index=True)
+    symbol = Column(String(32), nullable=False, index=True)
+    source = Column(String(32), nullable=False, default="jev_analyst")
+
+    signal = Column(String(32), nullable=False)
+    confidence = Column(Float, nullable=False, default=0.0)
+    reasoning = Column(Text, nullable=True)
+    vetoed = Column(Boolean, default=False)
+    conflict = Column(Boolean, default=False)
+    raw_payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+class DecisionOutcome(Base):
+    """
+    Authoritative forward-return outcomes and ML labels for decision records.
+    Provides standardized 1H/4H returns, triple-barrier labels, and PnL attribution.
+    """
+    __tablename__ = "decision_outcomes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    outcome_id = Column(String(64), unique=True, nullable=False, index=True)
+    decision_id = Column(String(64), nullable=False, index=True)
+    symbol = Column(String(32), nullable=False, index=True)
+    horizon = Column(String(10), nullable=False, index=True)  # "1H", "4H", "24H"
+
+    reference_price = Column(Float, nullable=False)
+    horizon_price = Column(Float, nullable=False)
+    forward_return_pct = Column(Float, nullable=False)
+    mfe_pct = Column(Float, nullable=True)
+    mae_pct = Column(Float, nullable=True)
+
+    label = Column(String(16), nullable=False, index=True)  # "WIN", "LOSS", "SCRATCH"
+    policy_version = Column(String(32), nullable=False, default="v1_triple_barrier")
+
+    trade_id = Column(Integer, nullable=True, index=True)
+    realized_pnl = Column(Float, nullable=True)
+    fees_paid = Column(Float, nullable=True, default=0.0)
+    qdrant_synced = Column(Boolean, nullable=False, default=False, index=True)
+
+    details = Column(JSON, nullable=False, default=dict)
+    labeled_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    __table_args__ = (
+        UniqueConstraint("decision_id", "horizon", "policy_version", name="uq_decision_horizon_policy"),
+        Index("idx_decision_outcomes_sym_label", "symbol", "label"),
+    )
+
+
+
+

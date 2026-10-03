@@ -34,6 +34,7 @@ PUBLIC_TRADING_PATHS = {
     "/trading/strategies",
     "/api/trading/strategies",
 }
+INGESTION_PREFIXES = ("/ingestion", "/api/ingestion")
 
 
 def _tokens_from_env(env_names: Iterable[str] = AUTH_ENV_VARS) -> list[str]:
@@ -73,6 +74,10 @@ def is_sensitive_request(request: Request) -> bool:
     if path.startswith(JEV_PREFIXES) or path.startswith(JEV_INGEST_PREFIXES):
         # Jev evaluations and scanner ingest are advisory research, same auth as Jesse.
         return True
+
+    if path.startswith(INGESTION_PREFIXES):
+        # Ingestion routes enforce dedicated producer key authentication (X-Ingestion-Key or Admin Bearer)
+        return False
 
     return method not in {"GET", "HEAD"}
 

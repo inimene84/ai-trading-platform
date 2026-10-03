@@ -28,6 +28,9 @@ from backend.routes.jev import crypto_router as jev_crypto_router
 from backend.routes.jev import router as jev_router
 from backend.routes.jev_pipeline import ingest_alias_router as jev_ingest_alias_router
 from backend.routes.jev_pipeline import router as jev_pipeline_router
+from backend.routes.control_plane import router as control_plane_router
+from backend.routes.ingestion import router as ingestion_router
+from backend.routes.desk import router as desk_router
 
 # Main API router
 api_router = APIRouter()
@@ -79,4 +82,12 @@ api_router.include_router(jev_ingest_alias_router, tags=["jev-ingest"])
 api_router.include_router(jev_ingest_alias_router, prefix="/api", tags=["jev-ingest-api"])
 api_router.include_router(jev_crypto_router, tags=["jev-signals"])
 api_router.include_router(jev_crypto_router, prefix="/api", tags=["jev-signals-api"])
+api_router.include_router(control_plane_router, tags=["control-plane"])
+api_router.include_router(control_plane_router, prefix="/api", tags=["control-plane-api"])
+api_router.include_router(ingestion_router, tags=["ingestion"])
+api_router.include_router(ingestion_router, prefix="/api", tags=["ingestion-api"])
+api_router.include_router(desk_router, tags=["desk"])
+api_router.include_router(desk_router, prefix="/api", tags=["desk-api"])
+
+
 
