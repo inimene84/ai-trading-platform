@@ -1,0 +1,79 @@
+name: Scan runtime errors
+
+# Read-only. Groups recent backend warnings and prints mode flags, not secrets.
+on:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Scan
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          host="${SSH_HOST:-72.60.18.113}"
+          user="${SSH_USER:-root}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "${user}@${host}" 'bash -s' << 'REMOTE'
+          set -euo pipefail
+          cd /root/ai-trading-platform-v3
+          python3 - << 'PY'
+          from pathlib import Path
+          env = {}
+          for line in Path(".env").read_text(encoding="utf-8").splitlines():
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              env[key] = value.strip().strip('"').strip("'")
+          flags = [
+              "TRADING_MODE", "PAPER_TRADING", "DRY_RUN_ALL", "ACTIVE_BROKER",
+              "CTRADER_ENV", "CTRADER_PAPER_MODE", "BINANCE_TESTNET",
+              "BINANCE_PAPER_PARALLEL", "BINANCE_ORDERS",
+          ]
+          for key in flags:
+              print(f"flag {key} {env.get(key, 'unset')}")
+          confirm = env.get("CTRADER_LIVE_CONFIRM", "")
+          print("flag CTRADER_LIVE_CONFIRM", "I_UNDERSTAND" if confirm == "I_UNDERSTAND" else "other_or_unset")
+          print("flag SENTRY_AUTO_RESUME_LIVE_CONFIRM", "set" if env.get("SENTRY_AUTO_RESUME_LIVE_CONFIRM") else "unset")
+          PY
+          echo "--- error groups ---"
+          docker logs --since 4h ai-trading-backend 2>&1 \
+            | grep -E 'ERROR|WARNING|CRITICAL' \
+            | grep -viE 'access_token|refresh_token|client_secret|authorization|bearer ' \
+            | sed -E 's/[A-Za-z0-9_\-]{32,}/[redacted]/g' \
+            | sed -E 's/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[ip]/g' \
+            > /tmp/err-lines.txt || true
+          python3 - << 'PY'
+          from collections import Counter
+          from pathlib import Path
+          counts = Counter()
+          samples = {}
+          for raw in Path("/tmp/err-lines.txt").read_text(encoding="utf-8", errors="replace").splitlines():
+              msg = raw.strip()
+              if not msg:
+                  continue
+              for mark in ("ERROR", "WARNING", "CRITICAL"):
+                  if mark in msg:
+                      msg = msg[msg.find(mark):]
+                      break
+              if ": " in msg:
+                  head, tail = msg.split(": ", 1)
+                  key = head + ": " + tail[:90]
+              else:
+                  key = msg[:110]
+              counts[key] += 1
+              samples.setdefault(key, msg[:180])
+          for key, count in counts.most_common(40):
+              print(f"{count:4d}  {samples[key]}")
+          print("groups", len(counts), "lines", sum(counts.values()))
+          PY
+          REMOTE
