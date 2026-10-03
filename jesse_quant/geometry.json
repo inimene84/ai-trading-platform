@@ -32,7 +32,9 @@
   },
   "validation": {
     "purge_horizon": 48,
+    "embargo_bars": 200,
     "embargo_fraction": 0.01,
-    "cpcv_n_splits": 16
+    "cpcv_n_splits": 16,
+    "note": "embargo_bars wins over embargo_fraction; must be >= max(48, longest lookback)"
   }
 }

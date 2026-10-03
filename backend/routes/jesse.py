@@ -158,13 +158,13 @@ async def _ml_models_payload() -> Dict[str, Any]:
     }
 
 
-@router.get("/models", operation_id="get_jesse_models")
+@router.get("/models")
 async def get_jesse_models() -> Dict[str, Any]:
     """Ops alias for `/ml-models` — list artifacts and promotion snapshot."""
     return await _ml_models_payload()
 
 
-@router.get("/ml-models", operation_id="get_jesse_ml_models")
+@router.get("/ml-models")
 async def get_ml_models() -> Dict[str, Any]:
     """List trained ML artifacts plus the live promotion snapshot.
 

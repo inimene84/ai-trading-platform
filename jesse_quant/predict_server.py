@@ -70,7 +70,8 @@ SERVER_PORT = int(os.getenv("ML_PORT", "9003"))
 # Gate override: only for research. Live trading must never set this.
 GATE_OVERRIDE = os.getenv("ML_GATE_OVERRIDE", "false").strip().lower() in ("1", "true", "yes", "on")
 
-KELLY_FRACTION = 0.25
+KELLY_FRACTION = 0.5
+KELLY_ABS_CAP = 0.02
 MIN_TRADES_FOR_EMPIRICAL_PAYOFF = 30
 
 # Model cache in memory
@@ -148,35 +149,40 @@ def calculate_fractional_kelly(
     win_prob: float,
     payoff_ratio: float = theoretical_payoff_ratio(),
     fraction: float = KELLY_FRACTION,
+    abs_cap: float = KELLY_ABS_CAP,
     payoff_source: str = "theoretical_geometry",
 ) -> Dict[str, Any]:
     """
     Constrained Fractional Kelly position sizing.
-      f* = fraction * (p * b - (1 - p)) / b
-    The size multiplier normalises f* by the fractional Kelly of a *reference* edge of
-    +10 percentage points above break-even for the same b, so 1.0x means "the model is
-    as confident as a strategy that wins 10pp more often than it needs to". It is clamped
-        to [0.20, 1.0]; the live engine also applies a 0.25 thin-book floor.
+      f = min(fraction * (p * b - (1 - p)) / b, abs_cap)
+    Half-Kelly by default with a 2% equity ceiling on the wallet fraction.
+    The size multiplier normalises the *uncapped* half-Kelly by a reference
+    edge (+10pp above break-even) so the 2% cap does not flatten size to 0.20.
     """
     if payoff_ratio <= 0:
         payoff_ratio = 1.0
     b = payoff_ratio
     p = float(win_prob)
     full_kelly = (p * b - (1.0 - p)) / b
-    fractional_kelly = max(0.0, full_kelly) * fraction
+    uncapped = max(0.0, full_kelly) * fraction
+    fractional_kelly = min(uncapped, float(abs_cap))
 
     p_ref = min(0.95, breakeven_win_probability(b) + 0.10)
     baseline_kelly = max(1e-6, ((p_ref * b - (1.0 - p_ref)) / b) * fraction)
-    size_multiplier = round(float(np.clip(fractional_kelly / baseline_kelly, 0.20, 1.0)), 3) if fractional_kelly > 0 else 0.0
+    size_multiplier = (
+        round(float(np.clip(uncapped / baseline_kelly, 0.20, 1.0)), 3) if uncapped > 0 else 0.0
+    )
 
     return {
         "fractional_kelly": round(float(fractional_kelly), 4),
+        "fractional_kelly_uncapped": round(float(uncapped), 4),
         "full_kelly": round(float(full_kelly), 4),
         "payoff_ratio": round(b, 4),
         "payoff_ratio_source": payoff_source,
         "breakeven_probability": round(breakeven_win_probability(b), 4),
         "expected_value_r": round(expected_value_r(p, b), 4),
         "kelly_fraction": fraction,
+        "kelly_abs_cap": float(abs_cap),
         "baseline_kelly": round(float(baseline_kelly), 4),
         "size_multiplier": size_multiplier,
     }

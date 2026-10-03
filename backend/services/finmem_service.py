@@ -258,7 +258,8 @@ class FinMemLayeredMemory:
         vec = await generate_text_embedding(content, vector_size=self.vector_size)
         if not vec:
             # Deterministic pseudo-embedding fallback
-            h = int(hashlib.md5(content.encode("utf-8")).hexdigest(), 16)
+            # Deterministic seed only, not a security digest.
+            h = int(hashlib.md5(content.encode("utf-8"), usedforsecurity=False).hexdigest(), 16)
             np.random.seed(h % (2**32))
             rnd = np.random.normal(0, 1, self.vector_size)
             vec = (rnd / np.linalg.norm(rnd)).tolist()

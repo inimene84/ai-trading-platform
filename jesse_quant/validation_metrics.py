@@ -33,9 +33,8 @@ def _norm_ppf(p: float) -> float:
     """Standard Normal Percent Point Function (inverse CDF / quantile)."""
     if HAS_SCIPY:
         return float(norm.ppf(p))
-    # Rational approximation for central & tail quantiles
-    p = max(1e-12, min(1.0 - 1e-12, p))
-    # Acklam's inverse normal approximation
+    p = max(1e-12, min(1.0 - 1e-12, float(p)))
+    # Acklam's inverse normal approximation (r = sqrt(-2 * ln(tail_p)))
     a = [-3.969683028665376e+01,  2.209460984245205e+02, -2.759285104469687e+02,
           1.383577518672690e+02, -3.066479806614716e+01,  2.506628277459239e+00]
     b = [-5.447609879822406e+01,  1.615858368580409e+02, -1.556989798598866e+02,
@@ -51,10 +50,10 @@ def _norm_ppf(p: float) -> float:
         return q * (((((a[0]*r + a[1])*r + a[2])*r + a[3])*r + a[4])*r + a[5]) / \
                (((((b[0]*r + b[1])*r + b[2])*r + b[3])*r + b[4])*r + 1.0)
     r = p if q < 0 else 1.0 - p
-    r = math.sqrt(-math.log(r))
+    r = math.sqrt(-2.0 * math.log(r))
     x = (((((c[0]*r + c[1])*r + c[2])*r + c[3])*r + c[4])*r + c[5]) / \
         ((((d[0]*r + d[1])*r + d[2])*r + d[3])*r + 1.0)
-    return -x if q < 0 else x
+    return x if q < 0 else -x
 
 
 def calculate_sharpe_ratio(returns: Union[np.ndarray, pd.Series], annualization: int = 365) -> float:
@@ -369,6 +368,7 @@ class PurgedKFold:
         samples_info_sets: Optional[pd.Series] = None,
         embargo_pct: float = 0.01,
         embargo_bars: Optional[int] = None,
+        bar_timedelta: Optional[pd.Timedelta] = None,
     ):
         """
         Parameters:
@@ -378,11 +378,16 @@ class PurgedKFold:
           embargo_pct: Fraction of total observations to embargo immediately after test set.
           embargo_bars: Absolute embargo length. When set, wins over embargo_pct.
                         Must be >= max(max_holding_bars, longest feature lookback).
+                        On a DatetimeIndex this is a *time* buffer (bars × bar_timedelta),
+                        not an event-count buffer.
+          bar_timedelta: Candle duration used to convert embargo_bars to time.
+                         Defaults to 1 hour when X has a DatetimeIndex.
         """
         self.n_splits = n_splits
         self.samples_info_sets = samples_info_sets
         self.embargo_pct = embargo_pct
         self.embargo_bars = embargo_bars
+        self.bar_timedelta = bar_timedelta
 
     def get_n_splits(self, X=None, y=None, groups=None) -> int:
         return int(self.n_splits)
@@ -422,9 +427,25 @@ class PurgedKFold:
                     if t1 >= test_start_bound:
                         train_mask[t] = False
 
-            # 2. Embargo samples immediately following the test set
-            embargo_end = min(n_samples, test_end + embargo)
-            train_mask[test_end:embargo_end] = False
+            # 2. Embargo samples immediately following the test set.
+            # Event-sampled rows use a time buffer (embargo_bars × bar length)
+            # so 48/200 means hours, not 48/200 QuantumAI events.
+            idx = getattr(X, "index", None)
+            if (
+                self.embargo_bars is not None
+                and idx is not None
+                and isinstance(idx, pd.DatetimeIndex)
+                and test_end > 0
+                and test_end < n_samples
+            ):
+                delta = self.bar_timedelta or pd.Timedelta(hours=1)
+                test_end_ts = idx[test_end - 1]
+                cutoff = test_end_ts + int(self.embargo_bars) * delta
+                embargo_mask = (idx > test_end_ts) & (idx <= cutoff)
+                train_mask[np.asarray(embargo_mask)] = False
+            else:
+                embargo_end = min(n_samples, test_end + embargo)
+                train_mask[test_end:embargo_end] = False
 
             train_indices = indices[train_mask]
             yield train_indices, test_indices
