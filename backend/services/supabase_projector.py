@@ -60,11 +60,13 @@ class SupabaseProjector:
         namespace = uuid.NAMESPACE_DNS
         row_id = str(uuid.uuid5(namespace, f"{record.scan_id}_{record.symbol}"))
 
-        created_str = (
-            record.created_at.isoformat()
-            if hasattr(record.created_at, "isoformat")
-            else str(record.created_at)
-        )
+        if record.created_at and hasattr(record.created_at, "isoformat"):
+            created_str = record.created_at.isoformat()
+        elif record.created_at:
+            created_str = str(record.created_at)
+        else:
+            from datetime import datetime, timezone
+            created_str = datetime.now(timezone.utc).isoformat()
 
         indicators = (record.details or {}).get("indicators") or {}
         raw_answers = (opinion.raw_payload or {}) if opinion else {}
