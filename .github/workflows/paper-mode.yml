@@ -46,9 +46,7 @@ jobs:
           git checkout main
           git pull --ff-only origin main
           git log -1 --oneline
-          if ! curl -sf http://127.0.0.1:8001/health >/dev/null; then
-            docker compose -f docker-compose.prod.yml up -d --build backend
-          fi
+          docker compose -f docker-compose.prod.yml up -d --build backend
           ok=0
           for i in $(seq 1 36); do
             if curl -sf http://127.0.0.1:8001/health >/dev/null; then
@@ -124,7 +122,7 @@ jobs:
               if symbols:
                   payload["symbols"] = symbols
               call("POST", "/trading/loop/start", payload)
-              time.sleep(8)
+              time.sleep(20)
           status, loop = report("after")
           if status.get("mode") != "paper" or status.get("dry_run") is not True:
               raise SystemExit("refusing: process is not in paper mode")
