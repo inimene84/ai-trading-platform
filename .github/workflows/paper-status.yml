@@ -169,4 +169,53 @@ jobs:
           finally:
               db.close()
           PY
+          python3 - << 'PY'
+          import json
+          import urllib.request
+          from pathlib import Path
+          env = {}
+          for line in Path(".env").read_text(encoding="utf-8").splitlines():
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              env[key] = value
+          admin = env.get("ADMIN_API_KEY", "")
+          def call(path, key=""):
+              headers = {}
+              if key:
+                  headers["X-API-Key"] = key
+              request = urllib.request.Request("http://127.0.0.1:8001" + path, headers=headers)
+              try:
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      return response.status, json.loads(response.read().decode())
+              except Exception as exc:
+                  code = getattr(exc, "code", None)
+                  return code, None
+          code, body = call("/trading/ctrader/status", admin)
+          print("ctrader_http", code)
+          if isinstance(body, dict):
+              for field in (
+                  "connected", "authenticated", "dry_run", "env", "open_positions",
+                  "last_error", "connect_cooldown_s", "host", "balance", "equity", "margin",
+              ):
+                  print("ctrader", field, body.get(field))
+          no_key, _ = call("/trading/positions")
+          with_key, _ = call("/trading/positions", admin)
+          print("positions_without_key", no_key, "positions_with_key", with_key)
+          print("ctrader_client_id_set", bool(env.get("CTRADER_CLIENT_ID")))
+          print("ctrader_access_token_set", bool(env.get("CTRADER_ACCESS_TOKEN")))
+          print("ctrader_account_id_set", bool(env.get("CTRADER_ACCOUNT_ID")))
+          print("ctrader_paper_mode", env.get("CTRADER_PAPER_MODE", "unset"))
+          print("ctrader_auto_connect", env.get("CTRADER_AUTO_CONNECT", "unset"))
+          PY
+          echo "--- containers ---"
+          docker ps --format '{{.Names}} {{.Status}}' | grep -E 'ai-trading|traefik|qtp-gate' || true
+          echo "--- frontend files ---"
+          stat -c '%y %n' frontend/dist/index.html 2>/dev/null || echo "no frontend dist"
+          echo "--- nginx local ---"
+          curl -s -o /dev/null -w 'nginx_root %{http_code}\n' http://127.0.0.1:8081/ || true
+          curl -s -o /dev/null -w 'nginx_health %{http_code}\n' http://127.0.0.1:8081/health || true
+          curl -s -o /dev/null -w 'nginx_positions %{http_code}\n' http://127.0.0.1:8081/api/backend/trading/positions || true
+          echo "--- ctrader logs ---"
+          docker logs --since 90m ai-trading-backend 2>&1 | grep -E 'cTrader|ctrader' | grep -v -E 'token|secret|Authorization' | tail -30
           REMOTE
