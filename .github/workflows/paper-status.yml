@@ -1,0 +1,78 @@
+name: Paper status
+
+# Read-only. Does not rebuild, restart, or change TRADING_MODE.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: vps-paper-status
+  cancel-in-progress: false
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    steps:
+      - name: Read paper loop status
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_PRIVATE_KEY}" ]; then
+            echo "::error::SSH_PRIVATE_KEY is not available to this workflow."
+            exit 1
+          fi
+          host="${SSH_HOST:-72.60.18.113}"
+          user="${SSH_USER:-root}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "${user}@${host}" 'bash -s' << 'REMOTE'
+          set -euo pipefail
+          cd /root/ai-trading-platform-v3
+          echo "git $(git rev-parse --short HEAD)"
+          docker inspect -f '{{.State.Status}} {{.State.StartedAt}}' ai-trading-backend
+          python3 - << 'PY'
+          import json
+          import urllib.request
+          from pathlib import Path
+
+          env = {}
+          for line in Path(".env").read_text(encoding="utf-8").splitlines():
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              env[key] = value
+          admin = env.get("ADMIN_API_KEY", "")
+
+          def call(path):
+              request = urllib.request.Request(
+                  "http://127.0.0.1:8001" + path,
+                  headers={"X-API-Key": admin},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.loads(response.read().decode())
+
+          health = call("/health")
+          status = call("/trading/status")
+          loop = call("/trading/loop/status")
+          print("mode", status.get("mode"), "dry_run", status.get("dry_run"), "broker", status.get("active_broker"))
+          print("trading_allowed", health.get("trading_allowed"), "trading_status", health.get("trading_status"))
+          print(
+              "loop_running", loop.get("running"),
+              "state", loop.get("state"),
+              "cycles", loop.get("cycle_count"),
+              "symbols", len(loop.get("symbols") or []),
+              "strategy", loop.get("strategy"),
+              "interval_minutes", loop.get("interval_minutes"),
+          )
+          print("cash", loop.get("cash"), "equity", loop.get("equity"), "margin_used", loop.get("margin_used"))
+          print("last_cycle", loop.get("last_cycle"))
+          print("next_cycle", loop.get("next_cycle"))
+          print("error", loop.get("error"))
+          PY
+          REMOTE
