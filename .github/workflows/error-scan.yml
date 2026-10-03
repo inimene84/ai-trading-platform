@@ -42,8 +42,14 @@ jobs:
           for key in flags:
               print(f"flag {key} {env.get(key, 'unset')}")
           confirm = env.get("CTRADER_LIVE_CONFIRM", "")
-          print("flag CTRADER_LIVE_CONFIRM", "I_UNDERSTAND" if confirm == "I_UNDERSTAND" else "other_or_unset")
-          print("flag SENTRY_AUTO_RESUME_LIVE_CONFIRM", "set" if env.get("SENTRY_AUTO_RESUME_LIVE_CONFIRM") else "unset")
+          print("flag CTRADER_LIVE_CONFIRM", "missing" if "CTRADER_LIVE_CONFIRM" not in env else f"len={len(confirm)}")
+          if confirm and len(confirm) <= 40:
+              print("flag CTRADER_LIVE_CONFIRM_value", confirm)
+          short_keys = [key for key in env if key.lower() in {"live", "ctrade_live_confirm", "ctrader_live"} or "CONFIRM" in key or key.endswith("_ENV")]
+          for key in sorted(short_keys):
+              value = env[key]
+              shown = value if len(value) <= 40 else f"len={len(value)}"
+              print("related", key, shown)
           PY
           echo "--- error groups ---"
           docker logs --since 4h ai-trading-backend 2>&1 \
