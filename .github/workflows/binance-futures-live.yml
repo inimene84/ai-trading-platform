@@ -1,0 +1,127 @@
+name: Enable Binance futures orders
+
+# Turns off the paper-parallel detour. Does not close open positions.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: vps-binance-futures
+  cancel-in-progress: false
+
+jobs:
+  enable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Enable live Binance futures routing
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_PRIVATE_KEY}" ]; then
+            echo "::error::SSH_PRIVATE_KEY is not available to this workflow."
+            exit 1
+          fi
+          host="${SSH_HOST:-72.60.18.113}"
+          user="${SSH_USER:-root}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "${user}@${host}" 'bash -s' << 'REMOTE'
+          set -euo pipefail
+          cd /root/ai-trading-platform-v3
+          python3 - << 'PY'
+          from pathlib import Path
+          path = Path(".env")
+          key = "BINANCE_PAPER_PARALLEL"
+          lines = path.read_text(encoding="utf-8").splitlines()
+          seen = False
+          out = []
+          for line in lines:
+              if line.startswith(key + "="):
+                  out.append(key + "=false")
+                  seen = True
+              else:
+                  out.append(line)
+          if not seen:
+              out.append(key + "=false")
+          path.write_text("\n".join(out) + "\n", encoding="utf-8")
+          print("set BINANCE_PAPER_PARALLEL false")
+          PY
+          docker compose -f docker-compose.prod.yml up -d backend
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8001/health >/dev/null; then
+              echo backend_healthy
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          test "$ok" = 1
+          sleep 12
+          python3 - << 'PY'
+          import json
+          import urllib.request
+          from pathlib import Path
+          env = {}
+          for line in Path(".env").read_text(encoding="utf-8").splitlines():
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  continue
+              k, v = line.split("=", 1)
+              env[k] = v.strip().strip('"').strip("'")
+          for key in (
+              "TRADING_MODE", "BINANCE_PAPER_PARALLEL", "BINANCE_TESTNET", "BINANCE_DRY_RUN",
+          ):
+              print("flag", key, env.get(key, "unset"))
+          admin = env.get("ADMIN_API_KEY", "")
+          def call(path):
+              req = urllib.request.Request(
+                  "http://127.0.0.1:8001" + path,
+                  headers={"X-API-Key": admin},
+              )
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.loads(response.read().decode())
+          status = call("/trading/status")
+          loop = call("/trading/loop/status")
+          broker = call("/trading/ctrader/status")
+          print("api_mode", status.get("mode"), "dry_run", status.get("dry_run"))
+          print("loop_running", loop.get("running"), "error", loop.get("error"))
+          print(
+              "ctrader_connected", broker.get("connected"),
+              "host", broker.get("host"),
+              "equity", broker.get("equity"),
+              "open_positions", broker.get("open_positions"),
+          )
+          PY
+          docker exec -i ai-trading-backend python - << 'PY'
+          from backend.database.connection import SessionLocal
+          from backend.database.models import Trade
+          db = SessionLocal()
+          try:
+              rows = (
+                  db.query(Trade)
+                  .filter(Trade.status.in_(["open", "filled"]))
+                  .order_by(Trade.id.asc())
+                  .all()
+              )
+              print("open_rows", len(rows))
+              for row in rows:
+                  print(
+                      "open", row.id, row.symbol, row.direction,
+                      "qty", row.quantity, "mode", row.mode, "broker", row.broker,
+                      "status", row.status,
+                  )
+          finally:
+              db.close()
+          PY
+          echo "--- routing log ---"
+          docker logs --since 3m ai-trading-backend 2>&1 \
+            | grep -E 'Binance paper-parallel|Binance live session|BinanceFuturesService' \
+            | grep -viE 'access_token|secret|authorization' \
+            | tail -20
+          REMOTE
