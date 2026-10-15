@@ -476,8 +476,12 @@ class CTraderProtocol:
                     # stop making fresh requests for a minute. Do not drop the
                     # socket — a disconnect re-auths, reloads the symbol catalog,
                     # and reconciles, which is what piles onto the limiter.
-                    self._service._rate_limited_until = time.time() + 60
-                    logger.warning("cTrader rate-limited — 60s request cooldown, session kept")
+                    cooldown = float(os.getenv("CTRADER_RATE_LIMIT_COOLDOWN_SEC", "180") or 180)
+                    self._service._rate_limited_until = time.time() + max(60.0, cooldown)
+                    logger.warning(
+                        "cTrader rate-limited — %.0fs request cooldown, session kept",
+                        max(60.0, cooldown),
+                    )
                     return
                 self._service._auth_event.set()
                 if self.transport:

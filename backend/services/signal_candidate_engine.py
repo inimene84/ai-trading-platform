@@ -27,6 +27,7 @@ from backend.services.binance_market_data import binance_market_data
 from backend.services.multi_asset_bars import classify_symbol, tf_to_binance_interval
 from backend.services.trading_mode import live_ctrader_orders_allowed
 from backend.services.symbol_aliases import same_crypto_perp_leg
+from backend.services.position_caps import live_binance_position_count
 from backend.services.market_hours import is_venue_open
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,16 @@ class SignalCandidateEngine:
             "max_same_base": int(os.getenv("CTRADER_MAX_SAME_BASE", "2")),
             "max_currency_exposure": int(os.getenv("CTRADER_MAX_CURRENCY_EXPOSURE", "2")),
             "max_candidates": int(os.getenv("CTRADER_MAX_CANDIDATES", "200")),
-            "max_binance_positions": int(os.getenv("MAX_BINANCE_POSITIONS", "10")),
+            "max_binance_positions": min(
+                n
+                for n in (
+                    int(os.getenv("MAX_BINANCE_POSITIONS", "10") or 10),
+                    int(os.getenv("BINANCE_MAX_OPEN_POSITIONS", "0") or 0) or 10**9,
+                    int(os.getenv("MAX_POSITIONS", "0") or 0) or 10**9,
+                    int(os.getenv("MAX_OPEN_POSITIONS", "0") or 0) or 10**9,
+                )
+                if n > 0
+            ),
             # Portfolio risk budget per broker book: sum of risk_usd across live
             # (PENDING/READY) candidates plus the incoming trade may not exceed
             # this % of account equity. 12 READY x 0.5% used to stack to ~6%.
@@ -615,8 +625,10 @@ class SignalCandidateEngine:
                     f"(same perp leg as {cand_sym})."
                 )
         max_binance = int(self.execution_config.get("max_binance_positions") or 0)
-        if max_binance > 0 and len(open_binance) >= max_binance:
-            return f"Max open Binance positions reached ({max_binance})."
+        live_count = live_binance_position_count(open_binance)
+        observed = max(len(open_binance), live_count)
+        if max_binance > 0 and observed >= max_binance:
+            return f"Max open Binance positions reached ({observed}/{max_binance})."
         return None
 
     def _refuse_new_candidate_reason(

@@ -109,6 +109,64 @@ def test_upsert_creates_missing_live_row_and_skips_paper():
     assert live.mode == "live"
 
 
+def test_upsert_attaches_to_existing_strategy_row_instead_of_twinning():
+    db = _session()
+    db.add(
+        Trade(
+            symbol="ETHUSDC",
+            direction="SELL",
+            quantity=0.02,
+            entry_price=4000.0,
+            status="open",
+            broker="binance_futures",
+            exchange="binance_futures",
+            strategy="combined",
+            mode="live",
+        )
+    )
+    db.commit()
+
+    res = upsert_binance_live_trades(
+        db,
+        [{"symbol": "ETHUSDC", "side": "SELL", "quantity": 0.02, "entry_price": 4001.0}],
+    )
+    assert res["created"] == 0
+    assert res["updated"] == 1
+    assert db.query(Trade).count() == 1
+    row = db.query(Trade).one()
+    assert row.strategy == "combined"
+    assert row.broker_position_id == "ETHUSDC:SHORT"
+
+
+def test_upsert_aligns_usdc_row_to_live_usdt_symbol():
+    db = _session()
+    db.add(
+        Trade(
+            symbol="ETHUSDC",
+            direction="SELL",
+            quantity=0.02,
+            entry_price=4000.0,
+            status="open",
+            broker="binance_futures",
+            exchange="binance_futures",
+            strategy="combined",
+            mode="live",
+        )
+    )
+    db.commit()
+
+    res = upsert_binance_live_trades(
+        db,
+        [{"symbol": "ETHUSDT", "side": "SELL", "quantity": 0.02, "entry_price": 4001.0}],
+    )
+    assert res["created"] == 0
+    assert res["updated"] == 1
+    row = db.query(Trade).one()
+    assert row.symbol == "ETHUSDT"
+    assert row.strategy == "combined"
+    assert row.broker_position_id == "ETHUSDT:SHORT"
+
+
 def test_overlay_live_mark_does_not_relabel_binance():
     payload = {
         "symbol": "SOLUSDT",

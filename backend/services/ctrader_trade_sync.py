@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from backend.database.connection import SessionLocal
 from backend.database.models import Trade
+from backend.services.trade_dedupe import find_open_leg
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +334,27 @@ def reconcile_ctrader_positions(
             updated += 1
             continue
 
+        # Persist-then-reconcile used to insert a second open row when the
+        # execution row already had a PID that did not string-match (or the
+        # snapshot raced the insert). Attach to that leg instead of twinning.
+        existing_leg = find_open_leg(
+            [r for r in ctrader_open_rows if r.id not in matched_db_trade_ids],
+            symbol=symbol,
+            direction=side,
+            broker="ctrader",
+        )
+        if existing_leg is not None:
+            matched_db_trade_ids.add(existing_leg.id)
+            if pid:
+                existing_leg.broker_position_id = pid
+                by_pid[pid] = existing_leg
+            existing_leg.quantity = qty or existing_leg.quantity
+            if entry > 0:
+                existing_leg.entry_price = entry
+            existing_leg.direction = side
+            updated += 1
+            continue
+
         db.add(
             Trade(
                 symbol=symbol,
@@ -442,10 +464,12 @@ def reconcile_ctrader_positions(
         row.pnl = pnl
         close_reason = (recent_deal.get("close_type") if recent_deal else None) or "SL/TP hit / closed on cTrader"
         current_notes = getattr(row, "notes", "") or ""
-        try:
-            row.notes = current_notes + f" | Closed externally ({close_reason})"
-        except AttributeError:
-            pass
+        marker = f"Closed externally ({close_reason})"
+        if marker not in current_notes and "Closed externally" not in current_notes:
+            try:
+                row.notes = current_notes + f" | {marker}"
+            except AttributeError:
+                pass
         closed += 1
         if (pnl is not None and pnl < 0) or "SL" in str(close_reason).upper():
             try:

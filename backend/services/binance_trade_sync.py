@@ -10,6 +10,8 @@ from backend.services.ledger import (
     binance_position_key,
     is_binance_paper_fill,
 )
+from backend.services.symbol_aliases import perp_alias_set
+from backend.services.trade_dedupe import find_open_leg
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +57,12 @@ def upsert_binance_live_trades(db: Any, live_positions: List[Dict[str, Any]]) ->
             .first()
         )
         if open_row is None:
+            aliases = perp_alias_set(symbol) or {symbol}
             candidates = (
                 db.query(Trade)
                 .filter(
                     Trade.status.in_(_OPEN_STATUSES),
-                    Trade.symbol == symbol,
+                    Trade.symbol.in_(aliases),
                     Trade.direction == direction,
                 )
                 .order_by(Trade.id.desc())
@@ -74,6 +77,13 @@ def upsert_binance_live_trades(db: Any, live_positions: List[Dict[str, Any]]) ->
                 ),
                 None,
             )
+            if open_row is None:
+                open_row = find_open_leg(
+                    [t for t in candidates if not is_binance_paper_fill(t)],
+                    symbol=symbol,
+                    direction=direction,
+                    broker="binance_futures",
+                )
 
         if open_row is not None:
             open_row.quantity = qty
@@ -85,6 +95,8 @@ def upsert_binance_live_trades(db: Any, live_positions: List[Dict[str, Any]]) ->
             open_row.mode = "live"
             open_row.broker_position_id = key
             open_row.status = "open"
+            if symbol and str(open_row.symbol or "").upper() != symbol:
+                open_row.symbol = symbol
             updated += 1
             continue
 
