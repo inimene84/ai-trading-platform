@@ -9,6 +9,8 @@ from typing import Optional
 
 import httpx
 
+from backend.services.provider_credit_circuit import credit_circuit, looks_like_credit_error
+
 logger = logging.getLogger(__name__)
 
 OPENROUTER_EMBED_URL = os.getenv(
@@ -55,6 +57,9 @@ async def _openrouter_embed(text: str, model: str) -> Optional[list[float]]:
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(OPENROUTER_EMBED_URL, headers=headers, json=payload)
+        if resp.status_code == 402:
+            credit_circuit.note_failure("openrouter", "embedding 402")
+            resp.raise_for_status()
         resp.raise_for_status()
         data = resp.json()
         return data["data"][0]["embedding"]
@@ -97,11 +102,21 @@ async def generate_text_embedding(
     providers.append(("litellm", _litellm_embed))
 
     for name, fn in providers:
+        if credit_circuit.is_open(name):
+            logger.info(
+                "[%s] embedding skipped — credit circuit open (%.0fs left)",
+                name,
+                credit_circuit.remaining_seconds(name),
+            )
+            continue
         try:
             vec = await fn(cleaned, embed_model)
             if vec:
+                credit_circuit.note_success(name)
                 return _fit_vector(vec, vector_size, normalize)
         except Exception as exc:
+            if looks_like_credit_error(exc):
+                credit_circuit.note_failure(name, str(exc))
             logger.warning("[%s] embedding failed (%s): %s", name, embed_model, exc)
 
     return None

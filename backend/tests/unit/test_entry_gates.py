@@ -88,22 +88,38 @@ def test_negative_expectancy_symbols_handles_null_aggregates():
 
 def test_expectancy_gate_never_blocks_open_positions():
     """A symbol with an open position must stay managed even if it bleeds."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.database.models import Base, Trade
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.now(timezone.utc)
+    for i in range(20):
+        db.add(Trade(
+            symbol="AVAXUSDT", direction="SELL", quantity=1, entry_price=10,
+            status="closed", pnl=-0.4, strategy="combined", closed_at=now,
+        ))
+        db.add(Trade(
+            symbol="SOLUSDT", direction="SELL", quantity=1, entry_price=10,
+            status="closed", pnl=-0.4, strategy="combined", closed_at=now,
+        ))
+    db.add(Trade(
+        symbol="AVAXUSDT", direction="SELL", quantity=1, entry_price=10,
+        status="open", strategy="combined",
+    ))
+    db.commit()
+
     loop = TradingLoopService()
     loop.risk_config = MagicMock(
         symbol_expectancy_gate_enabled=True,
         symbol_expectancy_lookback_days=30,
         symbol_expectancy_min_trades=20,
+        symbol_expectancy_probe_after_hours=72,
+        symbol_expectancy_probe_cooldown_hours=24,
     )
-    db = MagicMock()
-    # Aggregate rows: both AVAX and SOL are proven losers
-    db.query.return_value.filter.return_value.group_by.return_value.all.return_value = [
-        ("AVAXUSDT", 59, -8.08),
-        ("SOLUSDT", 65, -8.04),
-    ]
-    # AVAX has an open position -> exempt from blocking
-    db.query.return_value.filter.return_value.distinct.return_value.all.return_value = [
-        ("AVAXUSDT",),
-    ]
     with patch("backend.services.trading_loop.SessionLocal", return_value=db):
         kept = loop._apply_expectancy_gate(["AVAXUSDT", "SOLUSDT", "ADAUSDT"])
     assert kept == ["AVAXUSDT", "ADAUSDT"]

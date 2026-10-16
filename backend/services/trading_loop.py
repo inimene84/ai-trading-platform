@@ -55,7 +55,14 @@ from backend.services.trading_loop_helpers import (
     remove_closed_pyramid_layer,
     trades_for_direction_cap,
     is_ctrader_trade,
+    is_ctrader_symbol,
 )
+from backend.services.position_caps import (
+    binance_book_at_cap,
+    effective_binance_position_cap,
+    live_binance_position_count,
+)
+from backend.services.trade_dedupe import aggregate_symbol_pnl
 from backend.services.symbol_aliases import (
     first_matching_open,
     is_flatten_action,
@@ -156,6 +163,9 @@ class TradingLoopService:
         # evaluated. The loop cycles every 15 min on 1h bars, so without this
         # the same bar was re-decided up to 4x (churn + redundant LLM cost).
         self._last_eval_bar: dict = {}
+        # Expectancy-gate probe clock (in-memory; survives the process, not restarts).
+        self._expectancy_blocked_since: dict = {}
+        self._expectancy_last_probe: dict = {}
 
     def _entry_bar_interval(self) -> str:
         """OHLCV timeframe for the entry pipeline.
@@ -868,10 +878,19 @@ class TradingLoopService:
             
             # Count unique symbols with open positions (including filled)
             from sqlalchemy import func
-            self._open_count = db.query(func.count(func.distinct(Trade.symbol))).filter(
+            db_open = db.query(func.count(func.distinct(Trade.symbol))).filter(
                 Trade.status.in_(["open", "filled"]),
                 (Trade.broker != "ctrader") | (Trade.broker.is_(None))
             ).scalar() or 0
+            live_open = 0
+            if self._is_live_binance():
+                try:
+                    live_open = live_binance_position_count(
+                        binance_futures_broker.get_positions(raise_on_error=True)
+                    )
+                except Exception as _live_cap_e:
+                    logger.warning(f"Live Binance position count for cap failed: {_live_cap_e}")
+            self._open_count = max(int(db_open), int(live_open))
             self._total_open_count = db.query(func.count(func.distinct(Trade.symbol))).filter(
                 Trade.status.in_(["open", "filled"])
             ).scalar() or 0
@@ -1009,10 +1028,14 @@ class TradingLoopService:
                     db_check.commit()
                     logger.info(f"  Position Manager: {_exits_triggered} positions closed this cycle.")
                     # Refresh open count after exits
-                    self._open_count = db_check.query(func.count(func.distinct(Trade.symbol))).filter(
+                    db_open = db_check.query(func.count(func.distinct(Trade.symbol))).filter(
                         Trade.status.in_(["open", "filled"]),
                         (Trade.broker != "ctrader") | (Trade.broker.is_(None))
                     ).scalar() or 0
+                    self._open_count = max(
+                        int(db_open),
+                        live_binance_position_count(getattr(self, "_cycle_positions", [])),
+                    )
                     self._total_open_count = db_check.query(func.count(func.distinct(Trade.symbol))).filter(
                         Trade.status.in_(["open", "filled"])
                     ).scalar() or 0
@@ -1071,9 +1094,14 @@ class TradingLoopService:
                 db_open.close()
             known = {s.upper() for s in manage_symbols}
             for s in open_syms:
-                if s.upper() not in known:
-                    manage_symbols.append(s)
-                    known.add(s.upper())
+                if not s or s.upper() in known:
+                    continue
+                # Open cTrader FX/metal rows must not enter the Binance scan.
+                # They produced the -1121 invalid-symbol storm (GBPUSD/USDCAD).
+                if is_ctrader_symbol(s):
+                    continue
+                manage_symbols.append(s)
+                known.add(s.upper())
         except Exception as e:
             logger.warning(f"  open-symbol merge failed ({e}); using configured universe only")
 
@@ -1216,6 +1244,13 @@ class TradingLoopService:
         open_slot_committed = False
 
         try:
+            if is_ctrader_symbol(symbol):
+                logger.info(
+                    "  [ %s ] skip Binance scan — cTrader/FX symbol does not belong on this book",
+                    symbol,
+                )
+                return {"signals": 0, "trades": 0}
+
             # 1. Fetch existing position (DB + live exchange — hedge mode can drift)
             # USDT/USDC perps are one book: BTCUSDC must see a live BTCUSDT long.
             alias_syms = perp_alias_set(symbol)
@@ -1449,15 +1484,24 @@ class TradingLoopService:
                 #    and overshoot the cap (race on shared self._open_count).
                 async with self._execution_lock:
                     # Re-check the position cap inside the lock with the freshest count
-                    max_binance_cap = getattr(self.risk_config, "max_binance_positions", 10)
+                    max_binance_cap = effective_binance_position_cap(self.risk_config)
                     max_total_cap = self.risk_config.max_positions
                     total_open = getattr(self, "_total_open_count", self._open_count)
+                    at_binance_cap, observed, _cap = binance_book_at_cap(
+                        self.risk_config,
+                        db_open_count=self._open_count,
+                        live_positions=getattr(self, "_cycle_positions", []),
+                    )
                     if (
                         not existing
                         and not is_flatten_action(getattr(decision, "action", ""))
-                        and (self._open_count >= max_binance_cap or total_open >= max_total_cap)
+                        and (at_binance_cap or total_open >= max_total_cap)
                     ):
-                        cap_msg = f"binance cap ({max_binance_cap})" if self._open_count >= max_binance_cap else f"total cap ({max_total_cap})"
+                        cap_msg = (
+                            f"binance cap ({observed}/{max_binance_cap})"
+                            if at_binance_cap
+                            else f"total cap ({max_total_cap})"
+                        )
                         logger.warning(
                             f"  [ {symbol} ] entry skipped: max positions "
                             f"({cap_msg}) reached at execution time"
@@ -1959,6 +2003,9 @@ class TradingLoopService:
         listed, unlisted = [], []
         for s in candidates:
             su = s.upper()
+            if is_ctrader_symbol(s):
+                unlisted.append(s)
+                continue
             status = binance_futures_broker.futures_listing_status(s)
             if status is False and su not in open_symbols:
                 unlisted.append(s)
@@ -2037,31 +2084,34 @@ class TradingLoopService:
     def _apply_expectancy_gate(self, candidates: list[str]) -> list[str]:
         """Skip NEW entries on symbols with proven negative expectancy.
 
-        Aggregates realized P&L per symbol over a rolling lookback window and
-        blocks symbols with >= min_trades closes and net-negative P&L. Symbols
-        with open positions are never blocked (management must continue), and
-        losses age out of the rolling window so blocked symbols get retried.
-        Fails OPEN on any DB error.
+        Uses deduped strategy-row P&L (reconciliation twins excluded) so the
+        inflated local DB cannot lock a book. After
+        ``symbol_expectancy_probe_after_hours`` of being blocked with no new
+        close, one probe entry is allowed so the gate cannot self-lock.
+        Open positions are never blocked. Fails OPEN on any DB error.
         """
         if not getattr(self.risk_config, "symbol_expectancy_gate_enabled", False):
             return candidates
         if not candidates:
             return candidates
         try:
-            from sqlalchemy import func
             lookback_days = int(self.risk_config.symbol_expectancy_lookback_days)
             min_trades = int(self.risk_config.symbol_expectancy_min_trades)
+            probe_after_h = float(
+                getattr(self.risk_config, "symbol_expectancy_probe_after_hours", 72.0) or 72.0
+            )
+            probe_cd_h = float(
+                getattr(self.risk_config, "symbol_expectancy_probe_cooldown_hours", 24.0) or 24.0
+            )
             cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
             db = SessionLocal()
             try:
-                rows = (
-                    db.query(Trade.symbol, func.count(Trade.id), func.sum(Trade.pnl))
+                closed_raw = (
+                    db.query(Trade)
                     .filter(
                         Trade.status == "closed",
                         Trade.pnl.isnot(None),
-                        Trade.closed_at >= cutoff,
                     )
-                    .group_by(Trade.symbol)
                     .all()
                 )
                 open_symbols = {
@@ -2071,15 +2121,71 @@ class TradingLoopService:
             finally:
                 db.close()
 
+            closed = []
+            for trade in closed_raw:
+                raw_closed = getattr(trade, "closed_at", None)
+                if raw_closed is None:
+                    continue
+                ts = raw_closed
+                if isinstance(ts, datetime) and ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if isinstance(ts, datetime) and ts >= cutoff:
+                    closed.append(trade)
+
+            rows = aggregate_symbol_pnl(closed)
+            last_close_by_symbol: dict[str, datetime] = {}
+            for trade in closed:
+                su = str(getattr(trade, "symbol", "") or "").upper()
+                ts = getattr(trade, "closed_at", None)
+                if not su or not isinstance(ts, datetime):
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                prev = last_close_by_symbol.get(su)
+                if prev is None or ts > prev:
+                    last_close_by_symbol[su] = ts
             blocked = negative_expectancy_symbols(rows, min_trades) - open_symbols
             if not blocked:
+                for s in list(self._expectancy_blocked_since):
+                    if s not in blocked:
+                        self._expectancy_blocked_since.pop(s, None)
                 return candidates
-            kept = [s for s in candidates if s.upper() not in blocked]
-            skipped = [s for s in candidates if s.upper() in blocked]
+
+            now = datetime.now(timezone.utc)
+            probe_after = timedelta(hours=max(0.0, probe_after_h))
+            probe_cd = timedelta(hours=max(0.0, probe_cd_h))
+            kept, skipped, probed = [], [], []
+            for s in candidates:
+                su = s.upper()
+                if su not in blocked:
+                    self._expectancy_blocked_since.pop(su, None)
+                    kept.append(s)
+                    continue
+                first = self._expectancy_blocked_since.setdefault(su, now)
+                last_close = last_close_by_symbol.get(su)
+                last_probe = self._expectancy_last_probe.get(su)
+                # Prefer the newest close so a restart cannot reset the 72h
+                # clock and re-lock a book that has already been silent.
+                blocked_for = now - first
+                if last_close is not None:
+                    blocked_for = max(blocked_for, now - last_close)
+                long_enough = blocked_for >= probe_after
+                cooldown_ok = last_probe is None or (now - last_probe) >= probe_cd
+                if long_enough and cooldown_ok:
+                    self._expectancy_last_probe[su] = now
+                    probed.append(s)
+                    kept.append(s)
+                else:
+                    skipped.append(s)
             if skipped:
                 logger.info(
                     f"  [SYMBOL GATE] negative expectancy over {lookback_days}d "
                     f"(skipped): {skipped}"
+                )
+            if probed:
+                logger.info(
+                    f"  [SYMBOL GATE] expectancy probe after {probe_after_h:.0f}h "
+                    f"block (allowed): {probed}"
                 )
             return kept
         except Exception as e:
