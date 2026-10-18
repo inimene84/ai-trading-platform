@@ -34,7 +34,13 @@ ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / ".env"
 TOKENS_FILE = ROOT / "data" / "ctrader_tokens.json"
 
-from backend.services.ctrader_oauth import auth_url as _ctrader_auth_url, token_urls as _ctrader_token_urls, is_sandbox_app
+from backend.services.ctrader_oauth import (
+    auth_url as _ctrader_auth_url,
+    ctrader_env as _ctrader_env,
+    is_sandbox_app,
+    protobuf_host as _protobuf_host,
+    token_urls as _ctrader_token_urls,
+)
 
 
 def _load_env() -> None:
@@ -179,8 +185,11 @@ def main() -> None:
     if cmd == "url":
         print(build_auth_url())
         print(f"\nRedirect URI registered in your Spotware app must match:\n  {_redirect_uri()}")
+        print(f"Account type CTRADER_ENV={_ctrader_env()} → protobuf host {_protobuf_host()}")
+        print("Approve the demo hedging account (same CTRADER_ACCOUNT_ID), not a live-money book.")
         print("\nAfter approving access, copy the `code` query param from the redirect URL.")
         print("Then run:  python scripts/get_ctrader_token.py exchange <code>")
+        print("Then POST /trading/ctrader/enable — host must stay demo.ctraderapi.com for a demo account.")
         return
 
     if cmd == "exchange":
