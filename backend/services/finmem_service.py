@@ -503,6 +503,36 @@ class FinMemService:
         self.characters: Dict[str, FinMemCharacter] = {}
         self._seed_default_memories_task = None
 
+    @property
+    def memory_store(self) -> FinMemLayeredMemory:
+        """Alias for ``self.memory``.
+
+        Postmortem and other callers historically used ``finmem_service.memory_store``.
+        The store itself is ``FinMemLayeredMemory`` on ``self.memory``.
+        """
+        return self.memory
+
+    async def store_memory(
+        self,
+        symbol: str,
+        layer: str,
+        content: str,
+        source_type: str = "news",
+        base_importance: Optional[float] = None,
+        sentiments: Optional[Dict[str, float]] = None,
+        timestamp: Optional[float] = None,
+    ) -> Optional[str]:
+        """Store a memory event (embeds via ``generate_text_embedding``, then Qdrant)."""
+        return await self.memory.store_memory(
+            symbol=symbol,
+            layer=layer,
+            content=content,
+            source_type=source_type,
+            base_importance=base_importance,
+            sentiments=sentiments,
+            timestamp=timestamp,
+        )
+
     def get_character(self, symbol: str) -> FinMemCharacter:
         norm_sym = normalize_symbol(symbol)
         if norm_sym not in self.characters:
