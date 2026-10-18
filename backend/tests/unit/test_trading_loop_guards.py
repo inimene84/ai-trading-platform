@@ -247,8 +247,11 @@ def test_filter_symbols_rejects_illiquid_and_unknown():
 
 
 def test_filter_symbols_keeps_open_legs_without_binance_ticker():
-    """Open FX / unknown symbols must stay in the manage set even when
-    Binance has no 24h ticker (otherwise SL/TP maintenance is abandoned)."""
+    """Open crypto legs stay in the manage set even without a 24h ticker.
+
+    Open FX must NOT — those belong to the cTrader book and produced the
+    live -1121 invalid-symbol storm when injected into the Binance scan.
+    """
     loop = _loop(_fake_risk_config(min_24h_quote_volume_usdt=10_000_000))
 
     open_db = MagicMock()
@@ -266,8 +269,8 @@ def test_filter_symbols_keeps_open_legs_without_binance_ticker():
         result = _filter_symbols_sync(loop, ["BTCUSDT", "ILLIQUSDT", "EURUSD", "GHOSTUSDT"])
 
     assert "BTCUSDT" in result
-    assert "ILLIQUSDT" in result  # open, even if illiquid
-    assert "EURUSD" in result     # open, even if no Binance ticker
+    assert "ILLIQUSDT" in result  # open crypto, even if illiquid
+    assert "EURUSD" not in result  # cTrader FX must not hit Binance
     assert "GHOSTUSDT" not in result
 
 
@@ -289,31 +292,145 @@ def test_expectancy_gate_fails_open_on_db_error():
 def test_expectancy_gate_blocks_negative_pnl_symbols():
     """Symbols with >= min_trades closes and net-negative P&L are dropped for
     NEW entries — but never blocked if they have an open position."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.database.models import Base, Trade
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.now(timezone.utc)
+    for _ in range(5):
+        db.add(Trade(symbol="BTCUSDT", direction="SELL", quantity=1, entry_price=10,
+                     status="closed", pnl=-24.0, strategy="combined", closed_at=now))
+    for _ in range(2):
+        db.add(Trade(symbol="ETHUSDT", direction="SELL", quantity=1, entry_price=10,
+                     status="closed", pnl=-25.0, strategy="combined", closed_at=now))
+    for _ in range(4):
+        db.add(Trade(symbol="SOLUSDT", direction="BUY", quantity=1, entry_price=10,
+                     status="closed", pnl=20.0, strategy="combined", closed_at=now))
+    db.commit()
+
     loop = _loop(_fake_risk_config(
         symbol_expectancy_gate_enabled=True,
         symbol_expectancy_min_trades=3,
         symbol_expectancy_lookback_days=30,
+        symbol_expectancy_probe_after_hours=72,
+        symbol_expectancy_probe_cooldown_hours=24,
     ))
-
-    db = MagicMock()
-    agg_q = MagicMock()
-    agg_q.filter.return_value.group_by.return_value.all.return_value = [
-        ("BTCUSDT", 5, -120.0),   # 5 trades, negative -> blocked
-        ("ETHUSDT", 2, -50.0),     # < min_trades -> NOT blocked
-        ("SOLUSDT", 4, 80.0),     # positive -> not blocked
-    ]
-    open_q = MagicMock()
-    open_q.filter.return_value.distinct.return_value.all.return_value = []  # no open positions
-
-    # First db.query() = aggregate expectancy rows; second = open positions.
-    db.query.side_effect = [agg_q, open_q]
-
     with patch("backend.services.trading_loop.SessionLocal", return_value=db):
         result = loop._apply_expectancy_gate(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
 
     assert "BTCUSDT" not in result
     assert "ETHUSDT" in result
     assert "SOLUSDT" in result
+
+
+def test_expectancy_gate_ignores_reconciliation_twins():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.database.models import Base, Trade
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.now(timezone.utc)
+    for _ in range(5):
+        db.add(Trade(symbol="ETHUSDC", direction="SELL", quantity=0.05, entry_price=4000,
+                     status="closed", pnl=0.40, strategy="combined", closed_at=now))
+        db.add(Trade(symbol="ETHUSDC", direction="SELL", quantity=0.05, entry_price=4000,
+                     status="closed", pnl=-4.00, strategy="exchange_reconciliation", closed_at=now))
+    db.commit()
+
+    loop = _loop(_fake_risk_config(
+        symbol_expectancy_gate_enabled=True,
+        symbol_expectancy_min_trades=5,
+        symbol_expectancy_lookback_days=30,
+        symbol_expectancy_probe_after_hours=72,
+        symbol_expectancy_probe_cooldown_hours=24,
+    ))
+    with patch("backend.services.trading_loop.SessionLocal", return_value=db):
+        result = loop._apply_expectancy_gate(["ETHUSDC", "SOLUSDC"])
+    assert result == ["ETHUSDC", "SOLUSDC"]
+
+
+def test_expectancy_gate_allows_probe_after_block_hours():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.database.models import Base, Trade
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    now = datetime.now(timezone.utc)
+    for _ in range(5):
+        db.add(Trade(symbol="LINKUSDC", direction="SELL", quantity=1, entry_price=10,
+                     status="closed", pnl=-1.0, strategy="combined", closed_at=now))
+    db.commit()
+
+    loop = _loop(_fake_risk_config(
+        symbol_expectancy_gate_enabled=True,
+        symbol_expectancy_min_trades=5,
+        symbol_expectancy_lookback_days=30,
+        symbol_expectancy_probe_after_hours=0,
+        symbol_expectancy_probe_cooldown_hours=24,
+    ))
+    loop._expectancy_blocked_since["LINKUSDC"] = now - timedelta(hours=80)
+    with patch("backend.services.trading_loop.SessionLocal", return_value=db):
+        result = loop._apply_expectancy_gate(["LINKUSDC"])
+    assert result == ["LINKUSDC"]
+    assert "LINKUSDC" in loop._expectancy_last_probe
+
+
+def test_expectancy_gate_probe_survives_process_restart():
+    """Newest close older than probe_after_hours unlocks one entry without in-memory state."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.database.models import Base, Trade
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    stale = datetime.now(timezone.utc) - timedelta(hours=80)
+    for i in range(5):
+        db.add(Trade(
+            symbol="ADAUSDC", direction="SELL", quantity=1, entry_price=10,
+            status="closed", pnl=-1.0, strategy="combined",
+            closed_at=stale - timedelta(minutes=i),
+        ))
+    db.commit()
+
+    loop = _loop(_fake_risk_config(
+        symbol_expectancy_gate_enabled=True,
+        symbol_expectancy_min_trades=5,
+        symbol_expectancy_lookback_days=30,
+        symbol_expectancy_probe_after_hours=72,
+        symbol_expectancy_probe_cooldown_hours=24,
+    ))
+    with patch("backend.services.trading_loop.SessionLocal", return_value=db):
+        result = loop._apply_expectancy_gate(["ADAUSDC"])
+    assert result == ["ADAUSDC"]
+    assert "ADAUSDC" in loop._expectancy_last_probe
+
+
+def test_filter_symbols_drops_open_forex_from_binance_scan():
+    loop = _loop(_fake_risk_config(min_24h_quote_volume_usdt=0))
+    open_db = MagicMock()
+    oq = MagicMock()
+    oq.filter.return_value.distinct.return_value.all.return_value = [("GBPUSD",), ("ETHUSDC",)]
+    open_db.query.return_value = oq
+    with patch("backend.services.trading_loop.SessionLocal", return_value=open_db), \
+         patch(
+             "backend.services.trading_loop.binance_futures_broker.futures_listing_status",
+             side_effect=lambda s: str(s).upper().endswith(("USDT", "USDC")),
+         ):
+        result = _filter_symbols_sync(loop, ["ETHUSDC", "GBPUSD"])
+    assert "ETHUSDC" in result
+    assert "GBPUSD" not in result
 
 
 # --------------------------------------------------------------------------- #

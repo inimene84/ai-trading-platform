@@ -48,6 +48,44 @@ def test_upsert_creates_open_trade_for_live_ctrader_position():
     assert db.query(Trade).count() == 1
 
 
+def test_reconcile_does_not_create_twin_when_pid_already_set():
+    """Persist wrote a row with a PID; live snapshot uses a different id for
+    the same symbol+side. Attach instead of inserting a second open row."""
+    from backend.services.ctrader_trade_sync import reconcile_ctrader_positions
+
+    db = _session()
+    db.add(
+        Trade(
+            symbol="GBPUSD",
+            direction="SELL",
+            quantity=0.1,
+            entry_price=1.35,
+            status="open",
+            broker="ctrader",
+            exchange="ctrader",
+            strategy="signal_candidate",
+            broker_position_id="persist-temp",
+        )
+    )
+    db.commit()
+    res = reconcile_ctrader_positions(
+        db,
+        live_positions=[
+            {
+                "symbol": "GBPUSD",
+                "side": "SELL",
+                "quantity": 0.1,
+                "entry_price": 1.35484,
+                "position_id": "667118037",
+            }
+        ],
+        broker=None,
+    )
+    assert res["created"] == 0
+    assert db.query(Trade).count() == 1
+    assert db.query(Trade).one().broker_position_id == "667118037"
+
+
 def test_upsert_attaches_position_id_to_pending_execution_row():
     db = _session()
     db.add(

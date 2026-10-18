@@ -176,6 +176,27 @@ async def _try_auto_resume(
     logger.warning("Auto-resume not completed: %s", reason)
 
 
+def in_failure_grace(
+    *,
+    now: datetime,
+    started_at: datetime,
+    last_healthy_at: datetime | None,
+    startup_grace_sec: int,
+) -> bool:
+    """True while a backend boot or rolling restart should not count as a fail.
+
+    The previous grace only applied before the first healthy check, so a
+    compose restart of backend (watchdog already up) halted in ~60s.
+    """
+    if startup_grace_sec <= 0:
+        return False
+    if (now - started_at).total_seconds() < startup_grace_sec:
+        return True
+    if last_healthy_at is not None and (now - last_healthy_at).total_seconds() < startup_grace_sec:
+        return True
+    return False
+
+
 async def run() -> None:
     base_url = os.getenv("BACKEND_URL", "http://backend:8000")
     token = os.getenv("SENTRY_WATCHDOG_TOKEN", "").strip()
@@ -201,12 +222,15 @@ async def run() -> None:
     consecutive_healthy = 0
     last_emergency_at: datetime | None = None
     started_at = datetime.now(timezone.utc)
+    last_healthy_at: datetime | None = None
     seen_healthy = False
 
     while True:
+        now = datetime.now(timezone.utc)
         healthy = await _check_health(base_url)
         if healthy:
             seen_healthy = True
+            last_healthy_at = now
             consecutive_failures = 0
             consecutive_healthy += 1
             if _auto_resume_enabled():
@@ -222,14 +246,21 @@ async def run() -> None:
                     consecutive_healthy = 0
         else:
             consecutive_healthy = 0
-            in_grace = (datetime.now(timezone.utc) - started_at).total_seconds() < startup_grace_sec
-            if not seen_healthy and in_grace:
-                logger.info("Startup grace: backend not ready yet — not counting failures")
+            if in_failure_grace(
+                now=now,
+                started_at=started_at,
+                last_healthy_at=last_healthy_at,
+                startup_grace_sec=startup_grace_sec,
+            ):
+                why = "startup" if not seen_healthy else "backend-restart"
+                logger.info(
+                    "Sentry grace (%s): backend not ready — not counting failures",
+                    why,
+                )
             else:
                 consecutive_failures += 1
                 logger.warning("Unhealthy backend (%s/%s)", consecutive_failures, fail_threshold)
                 if consecutive_failures >= fail_threshold:
-                    now = datetime.now(timezone.utc)
                     if last_emergency_at and (now - last_emergency_at).total_seconds() < cooldown_sec:
                         logger.info("Emergency cooldown active — skipping duplicate halt")
                     else:

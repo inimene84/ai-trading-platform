@@ -27,7 +27,8 @@ from backend.services.multi_asset_bars import classify_symbol
 from backend.services.unified_trading import UnifiedTrading, UnifiedOrder, OrderSide, OrderType
 from backend.services.trading_mode import binance_order_session_id, live_binance_orders_allowed
 from backend.services.position_manager import get_position_manager
-from backend.services.symbol_aliases import stop_on_correct_side
+from backend.services.symbol_aliases import perp_alias_set, stop_on_correct_side
+from backend.services.trade_dedupe import find_open_leg
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,65 @@ def trades_for_direction_cap(all_open: list, broker_name: str) -> list:
     if name == "ctrader":
         return [t for t in all_open if getattr(t, "broker", None) == "ctrader"]
     return list(all_open)
+
+
+def _row_on_live_book(trade, broker_symbols: set) -> bool:
+    """True when the row's symbol or its USDT/USDC twin is on the live book."""
+    symbol = str(getattr(trade, "symbol", "") or "").upper()
+    live = {str(s or "").upper() for s in broker_symbols}
+    if symbol in live:
+        return True
+    return bool((perp_alias_set(symbol) or set()) & live)
+
+
+async def _resolve_exit_fill(broker, symbol: str, cache: dict) -> dict:
+    """One fill lookup per symbol per sync pass (price + exchange realized)."""
+    if symbol in cache:
+        fill = cache[symbol]
+        if isinstance(fill, dict):
+            return fill
+        return {"price": fill, "realized_pnl": None, "commission": None}
+    fill = None
+    getter = getattr(broker, "get_exit_fill", None)
+    if callable(getter):
+        raw = await asyncio.get_event_loop().run_in_executor(None, getter, symbol)
+        # MagicMock brokers auto-create get_exit_fill; only accept a real mapping.
+        if isinstance(raw, dict):
+            fill = {
+                "price": raw.get("price"),
+                "realized_pnl": raw.get("realized_pnl"),
+                "commission": raw.get("commission"),
+            }
+    if fill is None:
+        px = await asyncio.get_event_loop().run_in_executor(None, broker.get_exit_price, symbol)
+        fill = {"price": px, "realized_pnl": None, "commission": None}
+    cache[symbol] = fill
+    return fill
+
+
+def _apply_external_close(trade, fill: dict, *, note: str) -> None:
+    """Stamp a DB row closed using exchange realized P&L when the fill has it."""
+    exit_px = fill.get("price")
+    realized = fill.get("realized_pnl")
+    commission = fill.get("commission") or 0.0
+    if realized is not None:
+        trade.exit_price = (
+            exit_px if exit_px and is_plausible_exit_price(trade.entry_price, exit_px) else None
+        )
+        trade.pnl = round(float(realized) - float(commission or 0.0), 4)
+        trade.notes = (trade.notes or "") + f" | {note}; exchange realized"
+        return
+    if exit_px and trade.entry_price and trade.quantity and is_plausible_exit_price(trade.entry_price, exit_px):
+        trade.exit_price = exit_px
+        if str(trade.direction).upper() == "BUY":
+            trade.pnl = round((exit_px - trade.entry_price) * trade.quantity, 4)
+        else:
+            trade.pnl = round((trade.entry_price - exit_px) * trade.quantity, 4)
+        trade.notes = (trade.notes or "") + f" | {note}"
+        return
+    trade.exit_price = None
+    trade.pnl = None
+    trade.notes = (trade.notes or "") + f" | {note}; exit unavailable/implausible raw={exit_px}"
 
 
 def remove_closed_pyramid_layer(pyramid_layers: dict, trade) -> None:
@@ -241,6 +301,7 @@ class BrokerPositionSyncService:
         broker_name: str = "binance_futures",
     ) -> int:
         updated = 0
+        adopted = 0
         try:
             broker_raw = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: broker.get_positions(raise_on_error=True)
@@ -308,26 +369,10 @@ class BrokerPositionSyncService:
                         f"  [ {t.symbol} ] Synthetic-key ghost absent from flat "
                         "exchange book — marking closed in DB"
                     )
-                    if t.symbol not in exit_price_cache:
-                        exit_price_cache[t.symbol] = await asyncio.get_event_loop().run_in_executor(
-                            None, broker.get_exit_price, t.symbol
-                        )
-                    exit_px = exit_price_cache[t.symbol]
+                    fill = await _resolve_exit_fill(broker, t.symbol, exit_price_cache)
                     t.status = "closed"
                     t.closed_at = now
-                    if exit_px and t.entry_price and t.quantity and is_plausible_exit_price(t.entry_price, exit_px):
-                        t.exit_price = exit_px
-                        if str(t.direction).upper() == "BUY":
-                            t.pnl = round((exit_px - t.entry_price) * t.quantity, 4)
-                        else:
-                            t.pnl = round((t.entry_price - exit_px) * t.quantity, 4)
-                        t.notes = (t.notes or "") + " | Closed externally (flat book sync)"
-                    else:
-                        t.exit_price = None
-                        t.pnl = None
-                        t.notes = (t.notes or "") + (
-                            f" | Closed externally (flat book sync; exit unavailable raw={exit_px})"
-                        )
+                    _apply_external_close(t, fill, note="Closed externally (flat book sync)")
                     remove_closed_pyramid_layer(pyramid_layers, t)
                     sl_cooldown[t.symbol] = now
                     closed += 1
@@ -355,6 +400,42 @@ class BrokerPositionSyncService:
                 direction_hint = (bp.get("side") or "BUY").upper()
                 live_key = binance_position_key(symbol or "", direction_hint)
                 if not symbol or qty <= 0 or live_key in db_keys:
+                    continue
+                # Strategy rows often predate broker_position_id. Adopting a
+                # second exchange_reconciliation twin for the same leg is what
+                # doubled closed-row P&L on the live USDC book.
+                existing_leg = find_open_leg(
+                    [t for t in db_trades if not is_binance_paper_fill(t)],
+                    symbol=symbol,
+                    direction=direction_hint,
+                    broker="binance_futures",
+                )
+                if existing_leg is None:
+                    aliases = perp_alias_set(symbol) or {symbol}
+                    existing_leg = next(
+                        (
+                            t for t in db_trades
+                            if not is_binance_paper_fill(t)
+                            and str(t.symbol or "").upper() in aliases
+                            and str(t.direction or "").upper() in {
+                                direction_hint, "BUY" if direction_hint in {"BUY", "LONG"} else "SELL",
+                                "LONG" if direction_hint in {"BUY", "LONG"} else "SHORT",
+                            }
+                        ),
+                        None,
+                    )
+                if existing_leg is not None:
+                    existing_leg.broker = "binance_futures"
+                    existing_leg.exchange = "binance_futures"
+                    existing_leg.broker_position_id = live_key
+                    existing_leg.quantity = qty
+                    # Align the DB ticker with the live book so an ETHUSDC
+                    # strategy row attached to a live ETHUSDT leg is not
+                    # immediately closed as "absent from broker_symbols".
+                    if symbol:
+                        existing_leg.symbol = symbol
+                    db_keys.add(live_key)
+                    updated += 1
                     continue
                 entry = float(bp.get("entry_price") or bp.get("entryPrice") or 0)
                 if entry <= 0:
@@ -451,7 +532,7 @@ class BrokerPositionSyncService:
             cancelled_orphans: set = set()
 
             for t in db_trades:
-                if t.symbol in broker_symbols:
+                if _row_on_live_book(t, broker_symbols):
                     continue
                 if is_binance_paper_fill(t):
                     t.status = ORPHAN_STATUS
@@ -468,35 +549,15 @@ class BrokerPositionSyncService:
 
                 logger.info(f"  [ {t.symbol} ] Position not found in broker, marking as closed in DB.")
 
-                if t.symbol not in exit_price_cache:
-                    exit_price_cache[t.symbol] = await asyncio.get_event_loop().run_in_executor(
-                        None, broker.get_exit_price, t.symbol
-                    )
-                exit_px = exit_price_cache[t.symbol]
-
+                fill = await _resolve_exit_fill(broker, t.symbol, exit_price_cache)
                 t.status = "closed"
                 t.closed_at = datetime.now(timezone.utc)
-                if exit_px and t.entry_price and t.quantity and is_plausible_exit_price(t.entry_price, exit_px):
-                    t.exit_price = exit_px
-                    if str(t.direction).upper() == "BUY":
-                        t.pnl = round((exit_px - t.entry_price) * t.quantity, 4)
-                    else:
-                        t.pnl = round((t.entry_price - exit_px) * t.quantity, 4)
-                    t.notes = (t.notes or "") + " | Closed externally (sync)"
-                else:
-                    # Bad or missing exit price: record the close honestly as
-                    # unknown P&L rather than fabricating a number from a
-                    # corrupt price (which previously produced phantom gains).
-                    if exit_px:
-                        logger.error(
-                            f"  [ {t.symbol} ] implausible exit price {exit_px} "
-                            f"vs entry {t.entry_price} — recording close with unknown P&L"
-                        )
-                    t.exit_price = None
-                    t.pnl = None
-                    t.notes = (t.notes or "") + (
-                        f" | Closed externally (sync; exit price unavailable/implausible raw={exit_px})"
+                if fill.get("price") and not is_plausible_exit_price(t.entry_price, fill.get("price")) and fill.get("realized_pnl") is None:
+                    logger.error(
+                        f"  [ {t.symbol} ] implausible exit price {fill.get('price')} "
+                        f"vs entry {t.entry_price} — recording close with unknown P&L"
                     )
+                _apply_external_close(t, fill, note="Closed externally (sync)")
 
                 if t.symbol not in cancelled_orphans:
                     try:

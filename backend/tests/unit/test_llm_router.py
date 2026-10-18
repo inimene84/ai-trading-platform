@@ -340,6 +340,35 @@ async def test_connect_error_fails_over_immediately(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_http_402_trips_credit_circuit_and_skips_provider(monkeypatch):
+    from backend.services.provider_credit_circuit import credit_circuit
+
+    credit_circuit.reset()
+    monkeypatch.setenv("LLM_CREDIT_CIRCUIT_SECONDS", "1800")
+    openrouter = _cfg("openrouter", "openai/gpt-4o-mini")
+    openai = _cfg("openai", "gpt-4o-mini")
+    _patch_chain(monkeypatch, ("Fallback 2 (OpenRouter)", openrouter), ("Fallback 4 (OpenAI)", openai))
+
+    calls: list[str] = []
+
+    async def fake_invoke(cfg, *args, **kwargs):
+        calls.append(cfg.provider)
+        if cfg.provider == "openrouter":
+            raise _status_error(402, "insufficient credits")
+        return "openai-ok"
+
+    with patch("backend.llm.router._invoke_provider", new=fake_invoke):
+        first = await call_llm_resilient("general", prompt="hi")
+        second = await call_llm_resilient("general", prompt="hi")
+
+    assert first == "openai-ok"
+    assert second == "openai-ok"
+    assert calls.count("openrouter") == 1
+    assert calls.count("openai") == 2
+    credit_circuit.reset()
+
+
+@pytest.mark.asyncio
 async def test_http_400_fails_over_without_retry(monkeypatch):
     kie = _cfg("kie", "gpt-5-6-terra")
     openrouter = _cfg("openrouter", "anthropic/claude-sonnet-5")

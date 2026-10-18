@@ -142,6 +142,15 @@ class BinanceClientProxy:
                     self._service._check_ban_status()
                     return attr(*args, **kwargs)
                 except Exception as e:
+                    err = str(e)
+                    if "-1021" in err or "recvWindow" in err:
+                        logger.warning("Binance -1021 recvWindow — resyncing timestamp and retrying once")
+                        try:
+                            self._service._sync_timestamp_offset(self._client)
+                            return attr(*args, **kwargs)
+                        except Exception as retry_err:
+                            self._service._handle_api_exception(retry_err)
+                            raise retry_err
                     self._service._handle_api_exception(e)
                     raise
             return wrapper
@@ -282,15 +291,35 @@ class BinanceFuturesService:
                     f"Cooldown remaining: {remaining:.1f}s (until {BinanceFuturesService._banned_until} UTC)"
                 )
 
+    def _sync_timestamp_offset(self, client) -> None:
+        """Align local clock to Binance so signed requests survive -1021 recvWindow."""
+        try:
+            server_ms = int(client.futures_time().get("serverTime") or 0)
+            if server_ms > 0:
+                client.timestamp_offset = server_ms - int(time.time() * 1000)
+                logger.info(
+                    "Binance timestamp_offset=%sms recvWindow=%sms",
+                    client.timestamp_offset,
+                    getattr(client, "recvWindow", None),
+                )
+        except Exception as exc:
+            logger.warning("Binance time sync failed: %s", exc)
+
     def _get_client(self):
         self._check_ban_status()
         if not self._client:
             from binance.client import Client
+            recv_window = int(os.getenv("BINANCE_RECV_WINDOW_MS", "10000") or 10000)
+            timeout_sec = float(os.getenv("BINANCE_HTTP_TIMEOUT_SEC", "20") or 20)
             self._client = Client(
                 api_key=self.api_key,
                 api_secret=self.api_secret,
                 testnet=self.testnet,
+                requests_params={"timeout": timeout_sec},
             )
+            if hasattr(self._client, "recvWindow"):
+                self._client.recvWindow = recv_window
+            self._sync_timestamp_offset(self._client)
             logger.info(f"Binance Futures client connected (testnet={self.testnet})")
         return BinanceClientProxy(self._client, self)
 
@@ -488,44 +517,69 @@ class BinanceFuturesService:
                 raise
             return []
 
-    def get_exit_price(self, symbol: str) -> Optional[float]:
-        """Best-effort exit price for a just-closed position.
+    def get_exit_fill(self, symbol: str) -> Dict[str, Optional[float]]:
+        """Best-effort close fill: price plus exchange realized P&L when fresh.
 
-        Prefers the most recent actual fill price (accurate when SL/TP filled
-        on the exchange), and falls back to the current mark price.
+        Income history is the cash truth. A mark-price estimate on sync was
+        what made per-trade DB P&L diverge from Binance income on the live
+        USDC week. Only trust a fill that is less than 24h old.
         """
+        out: Dict[str, Optional[float]] = {"price": None, "realized_pnl": None, "commission": None}
         sym = self._to_futures_symbol(symbol)
         if not sym:
-            return None
+            return out
         client = self._get_client()
         try:
-            trades = client.futures_account_trades(symbol=sym, limit=1)
-            if trades:
-                # futures_account_trades returns the most recent fill EVER for
-                # the symbol — it may be days old and unrelated to the close we
-                # are reconciling. Only trust it when it's recent; otherwise
-                # fall through to the live mark price.
-                fill = trades[-1]
-                px = float(fill.get('price', 0) or 0)
-                fill_time_ms = float(fill.get('time', 0) or 0)
-                age_sec = (datetime.now(timezone.utc).timestamp() - fill_time_ms / 1000.0) if fill_time_ms else None
-                if px > 0 and age_sec is not None and age_sec < 24 * 3600:
-                    return px
-                if px > 0:
-                    logger.warning(
-                        f"[{sym}] get_exit_price: last fill is stale "
-                        f"(age={age_sec if age_sec is not None else 'unknown'}s) — using mark price instead"
+            trades = client.futures_account_trades(symbol=sym, limit=5)
+            now_s = datetime.now(timezone.utc).timestamp()
+            fresh = []
+            for fill in trades or []:
+                px = float(fill.get("price", 0) or 0)
+                fill_time_ms = float(fill.get("time", 0) or 0)
+                if px <= 0 or not fill_time_ms:
+                    continue
+                age_sec = now_s - fill_time_ms / 1000.0
+                if age_sec < 24 * 3600:
+                    fresh.append(fill)
+            if fresh:
+                realized_fills = [
+                    f for f in fresh
+                    if f.get("realizedPnl") is not None
+                    and abs(float(f.get("realizedPnl") or 0)) > 1e-12
+                ]
+                use = realized_fills or fresh
+                out["price"] = float(use[-1].get("price", 0) or 0) or None
+                if realized_fills:
+                    out["realized_pnl"] = sum(
+                        float(f.get("realizedPnl") or 0) for f in realized_fills
                     )
+                    comms = [
+                        float(f.get("commission") or 0)
+                        for f in realized_fills
+                        if f.get("commission") is not None
+                    ]
+                    if comms:
+                        out["commission"] = sum(comms)
+            elif trades:
+                logger.warning(
+                    "[%s] get_exit_fill: last fill is stale — using mark price instead",
+                    sym,
+                )
         except Exception as e:
-            logger.warning(f"[{sym}] get_exit_price (fills) failed: {e}")
-        try:
-            data = client.futures_mark_price(symbol=sym)
-            px = float(data.get('markPrice', 0) or 0)
-            if px > 0:
-                return px
-        except Exception as e:
-            logger.warning(f"[{sym}] get_exit_price (mark) failed: {e}")
-        return None
+            logger.warning(f"[{sym}] get_exit_fill (fills) failed: {e}")
+        if out["price"] is None:
+            try:
+                data = client.futures_mark_price(symbol=sym)
+                px = float(data.get("markPrice", 0) or 0)
+                if px > 0:
+                    out["price"] = px
+            except Exception as e:
+                logger.warning(f"[{sym}] get_exit_fill (mark) failed: {e}")
+        return out
+
+    def get_exit_price(self, symbol: str) -> Optional[float]:
+        """Best-effort exit price for a just-closed position."""
+        return self.get_exit_fill(symbol).get("price")
 
     def get_open_orders(self, raise_on_error: bool = False) -> list:
         """Return all open futures orders, INCLUDING conditional/algo orders.

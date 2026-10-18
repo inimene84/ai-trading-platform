@@ -23,6 +23,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Literal, Never, Optional
 
+from backend.services.provider_credit_circuit import credit_circuit, looks_like_credit_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -1158,6 +1160,13 @@ async def call_llm_resilient(
 
     async with _LLM_SEMAPHORE:
         for attempt_name, cfg in configs_to_try:
+            if credit_circuit.is_open(cfg.provider):
+                logger.warning(
+                    "LLM Router: skipping %s — credit circuit open (%.0fs left)",
+                    attempt_name,
+                    credit_circuit.remaining_seconds(cfg.provider),
+                )
+                continue
             remaining = budget - (time.monotonic() - started)
             if remaining <= 1.0:
                 logger.error(
@@ -1209,10 +1218,13 @@ async def call_llm_resilient(
                         text = json.dumps(parsed)
                     logger.info("LLM Router: Success using %s", attempt_name)
                     _record_llm_success(task_type, cfg.provider, cfg.name)
+                    credit_circuit.note_success(cfg.provider)
                     return text
                 except Exception as e:
                     last_error = e
                     last_provider = cfg.provider
+                    if looks_like_credit_error(e):
+                        credit_circuit.note_failure(cfg.provider, _error_summary(e))
                     action = classify_llm_error(e)
                     summary = _error_summary(e)
                     _record_llm_failure(task_type, cfg.provider, summary)

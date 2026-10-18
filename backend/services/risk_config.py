@@ -341,6 +341,22 @@ class RiskConfig(BaseSettings):
         default=20,
         validation_alias=AliasChoices("symbol_expectancy_min_trades", "SYMBOL_EXPECTANCY_MIN_TRADES"),
     )
+    # After this many hours blocked with no new close, allow one probe entry so
+    # a 15-trade loser sample cannot lock a symbol for the whole lookback.
+    # Oct 7–14: every USDC pair sat at exactly min_trades net-negative and
+    # could not recover because the gate blocked the only way to add a trade.
+    symbol_expectancy_probe_after_hours: float = PydanticField(
+        default=72.0,
+        validation_alias=AliasChoices(
+            "symbol_expectancy_probe_after_hours", "SYMBOL_EXPECTANCY_PROBE_AFTER_HOURS"
+        ),
+    )
+    symbol_expectancy_probe_cooldown_hours: float = PydanticField(
+        default=24.0,
+        validation_alias=AliasChoices(
+            "symbol_expectancy_probe_cooldown_hours", "SYMBOL_EXPECTANCY_PROBE_COOLDOWN_HOURS"
+        ),
+    )
 
     # ── RANGING entries (config-gated; OFF by default) ──
     # Skill miner edges include Ranging→Bullish/Bearish and CombinedStrategy
