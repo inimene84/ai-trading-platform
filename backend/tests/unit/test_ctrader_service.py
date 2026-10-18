@@ -292,6 +292,8 @@ def test_status_report():
     assert "authenticated" in st
     assert "env" in st
     assert "dry_run" in st
+    assert "executing" in st
+    assert "host" in st
     assert "symbols_supported" in st
     assert "balance" in st
     assert "equity" in st
@@ -511,6 +513,73 @@ def test_pick_trader_account_falls_back_to_live_flag():
     ]
     assert CTraderService.pick_trader_account_id(rows, 999, True) == 22
     assert CTraderService.pick_trader_account_id(rows, 999, False) == 11
+
+
+def test_should_force_token_refresh_on_invalid_or_cant_route():
+    assert CTraderService.should_force_token_refresh("CANT_ROUTE_REQUEST") is True
+    assert CTraderService.should_force_token_refresh("CH_ACCESS_TOKEN_INVALID — Invalid access token") is True
+    assert CTraderService.should_force_token_refresh("authentication timed out") is False
+
+
+def test_stale_demo_override_cleared_when_live_confirmed():
+    assert CTraderService.sanitized_host_override("live.ctraderapi.com", True) == "live.ctraderapi.com"
+    assert CTraderService.sanitized_host_override("live.ctraderapi.com", False) is None
+    assert CTraderService.sanitized_host_override("demo.ctraderapi.com", True) == "demo.ctraderapi.com"
+
+
+def test_demo_env_stays_on_demo_host_when_executing(monkeypatch):
+    """QT live mode must not select live.ctraderapi.com for a demo account."""
+    monkeypatch.setenv("CTRADER_ENV", "demo")
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("PAPER_TRADING", "false")
+    monkeypatch.setenv("DRY_RUN_ALL", "false")
+    monkeypatch.setenv("CTRADER_PAPER_MODE", "false")
+    monkeypatch.setenv("CTRADER_LIVE_CONFIRM", "I_UNDERSTAND")
+    from backend.services.ctrader_oauth import account_uses_live_host, protobuf_host
+
+    assert account_uses_live_host() is False
+    assert protobuf_host() == "demo.ctraderapi.com"
+    assert CTraderService.sanitized_host_override("live.ctraderapi.com", False) is None
+    assert CTraderService.alt_host_after_token_invalid(
+        "demo.ctraderapi.com", False, False
+    ) is None
+
+
+def test_live_env_uses_live_host_only_when_confirmed(monkeypatch):
+    monkeypatch.setenv("CTRADER_ENV", "live")
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("CTRADER_PAPER_MODE", "false")
+    monkeypatch.setenv("CTRADER_LIVE_CONFIRM", "I_UNDERSTAND")
+    from backend.services.ctrader_oauth import account_uses_live_host, protobuf_host
+
+    assert account_uses_live_host() is True
+    assert protobuf_host() == "live.ctraderapi.com"
+
+    monkeypatch.delenv("CTRADER_LIVE_CONFIRM", raising=False)
+    assert account_uses_live_host() is False
+    assert protobuf_host() == "demo.ctraderapi.com"
+
+
+def test_alt_host_after_token_invalid_flips_once():
+    assert CTraderService.alt_host_after_token_invalid(
+        "live.ctraderapi.com", True, False
+    ) == "demo.ctraderapi.com"
+    assert CTraderService.alt_host_after_token_invalid(
+        "demo.ctraderapi.com", True, False
+    ) == "live.ctraderapi.com"
+    # Substring lookalikes are not the live protobuf host.
+    assert CTraderService.alt_host_after_token_invalid(
+        "live.ctraderapi.com.evil.example", False, False
+    ) is None
+    assert CTraderService.alt_host_after_token_invalid(
+        "not-live.ctraderapi.com", False, False
+    ) is None
+    assert CTraderService.alt_host_after_token_invalid(
+        "demo.ctraderapi.com", False, False
+    ) is None
+    assert CTraderService.alt_host_after_token_invalid(
+        "live.ctraderapi.com", True, True
+    ) is None
 
 
 def test_failed_auth_connection_lost_does_not_reconnect():

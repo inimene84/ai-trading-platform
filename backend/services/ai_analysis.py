@@ -66,7 +66,7 @@ class AIAnalysisService:
 
         # Fallback: Anthropic (Gemini runs via OpenRouter in the router chain)
         self.anthropic_api_key = _env("ANTHROPIC_API_KEY", "")
-        self.anthropic_model = _env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+        self.anthropic_model = _env("ANTHROPIC_MODEL", "claude-sonnet-5")
         self.gemini_model = _env("GEMINI_MODEL", "google/gemini-2.5-flash")
         self.openrouter_api_key = _env("OPENROUTER_API_KEY", "")
 

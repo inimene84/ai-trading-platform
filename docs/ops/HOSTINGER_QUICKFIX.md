@@ -1,5 +1,16 @@
 # Hostinger VPS quick fix (<vps-ip>)
 
+## hPanel Node.js env (8192-character cap)
+
+Hostinger **website** Node.js / hPanel "Environment file" is capped at **8192 characters total**. That is not the VPS Docker limit.
+
+- **Do not** paste `/root/ai-trading-platform-v3/.env` or `.env.example` into hPanel. Those files are ~9k–23k characters and the Save/Deploy button will refuse them.
+- Live QuantumTrade stays on the VPS. Keep trading secrets, exchange keys, and `JESSE_SYNC_TO_LIVE=false` in the VPS `.env` only.
+- If you are deploying a Node/static frontend on shared/cloud hosting (`allikas.online`, `thorspark.cloud`, or a new Node site), paste only `.env.hostinger` / `.env.hostinger.example` (frontend `VITE_*` + `NODE_ENV`). That payload is a few hundred characters.
+- Existing Node sites currently have **no** panel env set. Leave them empty unless that site actually needs the Vite keys.
+
+VPS deploy path is unchanged: SSH + `scripts/hostinger_vps_apply.sh` (below). Do not use hPanel Node Save for the Docker stack.
+
 ## Canonical deploy (main branch)
 
 Run on the VPS as root (Hostinger browser terminal or SSH):

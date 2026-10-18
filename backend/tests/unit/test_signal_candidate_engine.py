@@ -293,7 +293,9 @@ async def test_execute_candidate_accepts_ctrader_sent_status():
         "sizing": {"lots": 0.01, "quantity": 0.01, "risk_usd": 50.0},
     }
 
-    with patch.object(signal_candidate_engine, "_open_ctrader_position_count", return_value=0), patch.dict(
+    with patch.object(signal_candidate_engine, "_open_ctrader_position_count", return_value=0), patch.object(
+        signal_candidate_engine, "_ctrader_invert_side_enabled", return_value=True
+    ), patch.dict(
         signal_candidate_engine.execution_config, {"max_portfolio_risk_pct": 0}
     ), patch(
         "backend.services.signal_candidate_engine.ctrader_service.ensure_connected",

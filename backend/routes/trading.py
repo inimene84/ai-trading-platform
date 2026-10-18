@@ -1615,17 +1615,26 @@ class CTraderOAuthExchangeRequest(BaseModel):
 async def get_ctrader_oauth_url():
     """Browser authorization URL for requesting new cTrader OAuth tokens."""
     from backend.brokers.auth import get_auth_url
-    from backend.services.ctrader_oauth import is_sandbox_app, ctrader_env
+    from backend.services.ctrader_oauth import ctrader_env, is_sandbox_app, protobuf_host
 
     redirect_uri = os.getenv("CTRADER_REDIRECT_URI", "https://localhost/callback")
+    account_id = os.getenv("CTRADER_ACCOUNT_ID", "").strip()
+    host = protobuf_host()
     return {
         "auth_url": get_auth_url(redirect_uri=redirect_uri),
         "redirect_uri": redirect_uri,
         "ctrader_env": ctrader_env(),
         "sandbox_app": is_sandbox_app(),
+        "protobuf_host": host,
+        "account_id": int(account_id) if account_id.isdigit() else account_id,
         "instructions": (
-            "Open auth_url in a browser, approve access, copy the `code` query param "
-            "from the redirect URL, then POST /trading/ctrader/oauth/exchange with {\"code\": \"...\"}."
+            "Open auth_url in a browser on the Spotware app already registered "
+            "(production unless sandbox_app is true). Redirect must stay "
+            f"{redirect_uri}. Approve the demo hedging account "
+            f"(CTRADER_ACCOUNT_ID={account_id or 'set in .env'}), not a live-money "
+            f"account. After exchange, Connect/enable uses {host}. "
+            "Copy the `code` query param from the redirect URL, then POST "
+            '/trading/ctrader/oauth/exchange with {"code": "..."}.'
         ),
     }
 
@@ -1847,7 +1856,10 @@ async def enable_ctrader_live():
         "message": "cTrader live mode enabled" if connected else "cTrader connection failed",
         "connected": connected,
         "dry_run": st["dry_run"],
+        "executing": st.get("executing"),
         "env": st["env"],
+        "host": st.get("host"),
+        "account_id": st.get("account_id_live") or st.get("account_id"),
     }
 
 

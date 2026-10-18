@@ -173,3 +173,22 @@ def test_active_broker_name_matches_selector(monkeypatch):
         else trading_loop.ctrader_broker
     )
     assert resolved is expected
+
+
+@pytest.mark.asyncio
+async def test_dry_run_broker_skips_reconciliation():
+    """A dry-run adapter has no real book and must never close DB rows."""
+    db = _session()
+    _seed(db)
+    broker = MagicMock()
+    broker.dry_run = True
+    broker.get_positions.return_value = []
+
+    updated = await BrokerPositionSyncService.sync_positions(
+        db, broker, {}, {}, broker_name="binance_futures"
+    )
+
+    assert updated == 0
+    broker.get_positions.assert_not_called()
+    assert db.query(Trade).filter(Trade.symbol == "ETHUSDT").one().status == "open"
+    assert db.query(Trade).filter(Trade.symbol == "EURUSD").one().status == "open"
