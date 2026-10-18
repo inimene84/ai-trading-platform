@@ -308,6 +308,15 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("ℹ Research Plane scheduler disabled (RESEARCH_INGEST_ENABLED=false)")
 
+    # 10. Postmortem poller (observational; never on the trading-loop event path)
+    if os.getenv("POSTMORTEM_ENABLED", "true").strip().lower() == "true":
+        from backend.services.postmortem import postmortem_poller
+        task = asyncio.create_task(run_supervised_task("Postmortem Poller", postmortem_poller.run_loop))
+        background_tasks.append(task)
+        logger.info("✓ Postmortem poller auto-started under supervisor")
+    else:
+        logger.info("ℹ Postmortem poller disabled (POSTMORTEM_ENABLED=false)")
+
     yield
 
 
@@ -360,6 +369,7 @@ async def require_admin_token_for_sensitive_requests(request: Request, call_next
             "/jesse", "/api/jesse",
             "/jev", "/api/jev",
             "/data", "/api/data",
+            "/control-plane", "/api/control-plane",
         ))
     )
     if trading_mutation and not admin_auth_enabled():

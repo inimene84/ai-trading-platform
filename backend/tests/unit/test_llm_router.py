@@ -13,6 +13,7 @@ from backend.llm.router import (
     build_provider_chain,
     classify_llm_error,
     call_llm_resilient,
+    call_llm_resilient_meta,
     get_llm_router_status,
     resolve_kie_route,
     sanitize_provider_config,
@@ -363,6 +364,38 @@ async def test_http_402_trips_credit_circuit_and_skips_provider(monkeypatch):
 
     assert first == "openai-ok"
     assert second == "openai-ok"
+    assert calls.count("openrouter") == 1
+    assert calls.count("openai") == 2
+    credit_circuit.reset()
+
+
+@pytest.mark.asyncio
+async def test_call_llm_resilient_meta_honours_credit_circuit(monkeypatch):
+    """The meta path must trip and skip the same OpenRouter 402 circuit."""
+    from backend.services.provider_credit_circuit import credit_circuit
+
+    credit_circuit.reset()
+    monkeypatch.setenv("LLM_CREDIT_CIRCUIT_SECONDS", "1800")
+    openrouter = _cfg("openrouter", "openai/gpt-4o-mini")
+    openai = _cfg("openai", "gpt-4o-mini")
+    _patch_chain(monkeypatch, ("Fallback 2 (OpenRouter)", openrouter), ("Fallback 4 (OpenAI)", openai))
+
+    calls: list[str] = []
+
+    async def fake_invoke(cfg, *args, **kwargs):
+        calls.append(cfg.provider)
+        if cfg.provider == "openrouter":
+            raise _status_error(402, "insufficient credits")
+        return "openai-ok"
+
+    with patch("backend.llm.router._invoke_provider", new=fake_invoke):
+        first_text, first_meta = await call_llm_resilient_meta("general", prompt="hi")
+        second_text, second_meta = await call_llm_resilient_meta("general", prompt="hi")
+
+    assert first_text == "openai-ok"
+    assert second_text == "openai-ok"
+    assert first_meta["provider"] == "openai"
+    assert second_meta["provider"] == "openai"
     assert calls.count("openrouter") == 1
     assert calls.count("openai") == 2
     credit_circuit.reset()

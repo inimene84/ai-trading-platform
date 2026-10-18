@@ -6,17 +6,37 @@ _DEFAULT_PAPER_BALANCE = 100_000.0
 
 class TradingMode(str, Enum):
     BACKTEST = "backtest"
+    SHADOW = "shadow"
     PAPER = "paper"
     LIVE = "live"
 
 
+def is_shadow_mode() -> bool:
+    return get_trading_mode() == TradingMode.SHADOW
+
+
+def is_paper_mode() -> bool:
+    return get_trading_mode() == TradingMode.PAPER
+
+
+def is_live_mode() -> bool:
+    return get_trading_mode() == TradingMode.LIVE
+
+
+def is_backtest_mode() -> bool:
+    return get_trading_mode() == TradingMode.BACKTEST
+
+
 def get_trading_mode() -> TradingMode:
-    """Resolve trading mode (backtest | paper | live) based on TRADING_MODE env var.
+    """Resolve trading mode (backtest | shadow | paper | live) based on TRADING_MODE env var.
     Falls back to PAPER_TRADING env configuration for backwards compatibility.
     """
-    raw = os.getenv("TRADING_MODE", "").lower()
+    raw = os.getenv("TRADING_MODE", "").lower().strip()
     if raw in {m.value for m in TradingMode}:
         return TradingMode(raw)
+
+    if os.getenv("SHADOW_MODE", "false").lower().strip() == "true":
+        return TradingMode.SHADOW
 
     # Check legacy PAPER_TRADING flag if TRADING_MODE is unset
     paper_trading = os.getenv("PAPER_TRADING", "true").lower() == "true"

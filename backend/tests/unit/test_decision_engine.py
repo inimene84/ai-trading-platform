@@ -1,5 +1,7 @@
+import types
+
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from backend.services.decision_engine import (
     DecisionEngine,
@@ -581,4 +583,71 @@ def test_live_entry_cannot_exceed_hard_notional_cap(risk_config, monkeypatch):
     assert decision is not None
     notional = decision.quantity * decision.entry_price
     assert notional <= 350.0 + 1e-6
+
+
+def test_default_quant_hardening_does_not_resize_entry(risk_config, monkeypatch):
+    """Default shadow/off flags must leave live entry size unchanged."""
+    monkeypatch.delenv("SIZING_OVERRIDE_MODE", raising=False)
+    monkeypatch.delenv("REGIME_CB_MODE", raising=False)
+    monkeypatch.delenv("BEAR_VETO_MODE", raising=False)
+    engine = DecisionEngine(risk_config)
+    engine.account_equity = 500.0
+    bars = _make_bars(200, base=2000.0)
+    signal = StrategySignal(
+        symbol="ETHUSDT", signal="BUY", confidence=0.8,
+        entry_price=bars[-1]["close"], strategy="trend_following",
+    )
+
+    baseline = engine._create_entry_decision(
+        "ETHUSDT", bars, signal, "BUY", is_pyramid=False, regime="TRENDING",
+    )
+
+    engine._last_regime_cb = types.SimpleNamespace(state="OPEN", mode="shadow", size_factor=1.0)
+    engine._last_regime_result = types.SimpleNamespace(confidence=0.10, regime="VOLATILE")
+    stressed = engine._create_entry_decision(
+        "ETHUSDT", bars, signal, "BUY", is_pyramid=False, regime="VOLATILE",
+    )
+
+    assert baseline is not None and stressed is not None
+    assert stressed.quantity == baseline.quantity
+    assert stressed.entry_price == baseline.entry_price
+
+
+@pytest.mark.asyncio
+async def test_default_regime_cb_open_does_not_block_evaluate_symbol(risk_config, monkeypatch):
+    monkeypatch.delenv("REGIME_CB_MODE", raising=False)
+    monkeypatch.delenv("BEAR_VETO_MODE", raising=False)
+    monkeypatch.delenv("SIZING_OVERRIDE_MODE", raising=False)
+    engine = DecisionEngine(risk_config)
+    engine.enable_kronos = False
+    engine.config.enable_personas = False
+    engine.config.use_risk_reviewer_llm = False
+    bars = _make_bars(200)
+    signal = StrategySignal(
+        symbol="ETHUSDT", signal="SELL", confidence=0.55,
+        entry_price=bars[-1]["close"], strategy="trend_following",
+    )
+    engine.strategy.generate_signal = MagicMock(return_value=signal)
+    engine.regime_detector.detect = MagicMock(return_value=MagicMock(
+        regime="TRENDING", weights=MagicMock(return_value={}),
+        confidence=0.9, adx=30.0, atr_ratio=0.02,
+    ))
+
+    from backend.services.regime_circuit_breaker import RegimeCheckResult
+    open_shadow = RegimeCheckResult(
+        symbol="ETHUSDT",
+        state="OPEN",
+        mode="shadow",
+        allow_entry=True,
+        would_block=True,
+        size_factor=1.0,
+        reason="vol_shock_shift",
+        regime="VOLATILE",
+    )
+    with patch("backend.services.regime_circuit_breaker.regime_circuit_breaker") as mock_cb:
+        mock_cb.observe.return_value = open_shadow
+        with patch("backend.agents.debate.bear_veto.schedule_shadow_bear_veto", return_value=None):
+            result = await engine.evaluate_symbol("ETHUSDT", bars, None, 0, [], False)
+    assert result is not None
+    assert "regime circuit breaker" not in (engine.last_evaluation.get("reason") or "")
 

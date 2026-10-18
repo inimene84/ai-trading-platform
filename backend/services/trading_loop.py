@@ -1218,6 +1218,11 @@ class TradingLoopService:
             ]
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
             all_results.extend(batch_results)
+        try:
+            from backend.services.regime_circuit_breaker import regime_circuit_breaker
+            regime_circuit_breaker.end_cycle()
+        except Exception as _rcb_err:
+            logger.debug(f"RegimeCircuitBreaker end_cycle skipped: {_rcb_err}")
         return all_results
 
     async def _process_symbol(self, symbol: str, min_confidence: float, ai_threshold: float, max_positions: int):

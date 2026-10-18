@@ -645,6 +645,29 @@ class DecisionEngine:
         #    paid when there's an actual directional setup (most pairs are
         #    NEUTRAL and short-circuit here).
         regime_result = self.regime_detector.detect(bars)
+        self._last_regime_result = regime_result
+        self._last_regime_cb = None
+        try:
+            from backend.services.regime_circuit_breaker import regime_circuit_breaker
+            cb_res = regime_circuit_breaker.observe(symbol, regime_result)
+            self._last_regime_cb = cb_res
+            if not cb_res.allow_entry:
+                self._record_eval(
+                    symbol,
+                    "HOLD",
+                    0.0,
+                    f"regime circuit breaker OPEN ({cb_res.reason})",
+                )
+                self.last_evaluation["regime_cb"] = {
+                    "state": cb_res.state,
+                    "mode": cb_res.mode,
+                    "reason": cb_res.reason,
+                    "would_block": cb_res.would_block,
+                }
+                return None
+        except Exception as e:
+            logger.warning(f"[{symbol}] RegimeCircuitBreaker error: {e}")
+
         signal = self.strategy.generate_signal(
             symbol,
             bars,
@@ -1061,11 +1084,70 @@ class DecisionEngine:
                     self._record_eval(symbol, decision.action, decision.confidence, "entry blocked: event risk filter errored (fail-closed in live)")
                     return None
 
+        # 9b. Bear-Veto Debate Layer (LangGraph) — shadow by default (0ms latency),
+        #     awaited in enforce mode. Fail-open if LLM chain is unavailable.
+        bear_verdict_meta: Optional[Dict[str, Any]] = None
+        if decision:
+            try:
+                from backend.agents.debate import bear_veto as _bv
+                bv_mode = (_bv.BEAR_VETO_MODE or "shadow").strip().lower()
+                proposal_payload = {
+                    "symbol": symbol,
+                    "direction": decision.action,
+                    "signal_detail": {
+                        "entry_price": decision.entry_price,
+                        "stop_loss": decision.stop_loss,
+                        "take_profit": decision.take_profit,
+                        "confidence": decision.confidence,
+                        "reasoning": decision.reasoning,
+                        "kelly_multiplier": decision.kelly_multiplier,
+                    },
+                    "market_snapshot": {
+                        "regime": getattr(regime_result, "regime", "UNKNOWN"),
+                        "regime_confidence": getattr(regime_result, "confidence", 0.0),
+                        "adx": getattr(regime_result, "adx", 0.0),
+                        "atr_ratio": getattr(regime_result, "atr_ratio", 0.0),
+                        "funding_rate": current_funding_rate,
+                    },
+                }
+                if bv_mode == "enforce":
+                    bv_res = await _bv.evaluate_bear_veto(proposal_payload)
+                    bear_verdict_meta = bv_res
+                    if bv_res.get("veto_effective"):
+                        reason_str = (bv_res.get("verdict") or {}).get("reason", "bear_veto")
+                        logger.warning(f"[{symbol}] Entry VETOED by Bear Debate: {reason_str}")
+                        self._record_eval(
+                            symbol,
+                            decision.action,
+                            decision.confidence,
+                            f"vetoed by bear debate: {reason_str}",
+                        )
+                        self.last_evaluation["bear_veto"] = bv_res
+                        return None
+                elif bv_mode == "shadow":
+                    _bv.schedule_shadow_bear_veto(proposal_payload)
+                    bear_verdict_meta = {"mode": "shadow", "scheduled": True}
+            except Exception as e:
+                logger.warning(f"[{symbol}] Bear-Veto gate error (fail-open): {e}")
+
         if decision:
             self._record_eval(symbol, decision.action, decision.confidence, "entry decision",
                               entry=decision.entry_price, sl=decision.stop_loss,
                               tp=decision.take_profit, approved=True,
                               kelly_multiplier=decision.kelly_multiplier)
+            if bear_verdict_meta is not None:
+                self.last_evaluation["bear_veto"] = bear_verdict_meta
+            if getattr(self, "_last_regime_cb", None) is not None:
+                cb_obj = self._last_regime_cb
+                self.last_evaluation["regime_cb"] = {
+                    "state": cb_obj.state,
+                    "mode": cb_obj.mode,
+                    "would_block": cb_obj.would_block,
+                    "size_factor": cb_obj.size_factor,
+                    "reason": cb_obj.reason,
+                }
+            if getattr(self, "_last_sizing_override", None) is not None:
+                self.last_evaluation["sizing_override"] = self._last_sizing_override.to_dict()
             if self.promotion_state is not None:
                 self.last_evaluation["promotion_verdict"] = self.promotion_state.verdict
                 if self.promotion_state.shadow and self.promotion_state.logged_predictions:
@@ -1180,6 +1262,39 @@ class DecisionEngine:
             if not self._ranging_entry_allowed(symbol, signal):
                 logger.info(f"[{symbol}] RANGING regime: blocking new entry")
                 return None
+
+        # Dynamic Position-Sizing Override (scale-down only; shadow by default)
+        self._last_sizing_override = None
+        if not is_pyramid:
+            try:
+                from backend.services.sizing_override import (
+                    compute_sizing_override,
+                    query_recent_streak_and_drawdown,
+                )
+                reg_obj = getattr(self, "_last_regime_result", None)
+                cb_obj = getattr(self, "_last_regime_cb", None)
+                streak, dd_pct = query_recent_streak_and_drawdown(self.account_equity)
+                sz_res = compute_sizing_override(
+                    notional,
+                    regime=regime,
+                    regime_confidence=float(getattr(reg_obj, "confidence", 1.0) or 1.0),
+                    cb_state=str(getattr(cb_obj, "state", "CLOSED") or "CLOSED"),
+                    cb_mode=str(getattr(cb_obj, "mode", None) or os.getenv("REGIME_CB_MODE", "shadow")),
+                    drawdown_pct=dd_pct,
+                    losing_streak=streak,
+                )
+                self._last_sizing_override = sz_res
+                if sz_res.mode == "enforce":
+                    if sz_res.effective_multiplier <= 0.0:
+                        self._record_eval(
+                            symbol, direction, getattr(signal, "confidence", 0.0),
+                            f"SKIP (sizing override 0x): {sz_res.reason}",
+                            entry=entry_price, sl=sl, tp=tp,
+                        )
+                        return None
+                    notional = sz_res.adjusted_notional
+            except Exception as e:
+                logger.debug(f"[{symbol}] sizing_override skipped: {e}")
 
         # Floor at Binance MIN_NOTIONAL ($20 for most symbols, $100 for BTC)
         # BTC uses $100 flat to match Binance min notional requirement.

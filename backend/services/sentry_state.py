@@ -123,14 +123,124 @@ def get_trading_status() -> TradingStatus:
     return TradingStatus(raw)
 
 
-def is_trading_allowed() -> bool:
-    return get_trading_status() == TradingStatus.ACTIVE
+def is_kill_switch_engaged(db=None) -> bool:
+    """Return True if kill switch is engaged via sentry file or DB record."""
+    status = get_trading_status()
+    if status in (TradingStatus.HALTED_MANUAL, TradingStatus.HALTED_BY_SENTRY):
+        return True
+
+    # Check DB if available
+    try:
+        from backend.database.connection import SessionLocal
+        from backend.database.models import ControlPlaneState
+
+        def _check(s):
+            latest = (
+                s.query(ControlPlaneState)
+                .order_by(ControlPlaneState.id.desc())
+                .first()
+            )
+            return bool(latest and latest.kill_switch_engaged)
+
+        if db is not None:
+            return _check(db)
+        with SessionLocal() as session:
+            return _check(session)
+    except Exception as exc:
+        logger.debug("Could not check ControlPlaneState table for kill switch", error=str(exc))
+        return False
 
 
-def halt_trading(*, reason: str, halted_by: str, manual: bool = False) -> dict[str, Any]:
+def is_trading_allowed(db=None) -> bool:
+    if get_trading_status() != TradingStatus.ACTIVE:
+        return False
+    if is_kill_switch_engaged(db=db):
+        return False
+    return True
+
+
+def halt_trading(*, reason: str, halted_by: str, manual: bool = False, db=None) -> dict[str, Any]:
     status = TradingStatus.HALTED_MANUAL if manual else TradingStatus.HALTED_BY_SENTRY
-    return write_state(status, reason=reason, halted_by=halted_by)
+    res = write_state(status, reason=reason, halted_by=halted_by)
+
+    # Persist in DB if manual kill switch or sentry halt
+    try:
+        from backend.database.connection import SessionLocal
+        from backend.database.models import ControlPlaneState
+        now_dt = datetime.now(timezone.utc)
+
+        def _persist(s):
+            record = ControlPlaneState(
+                kill_switch_engaged=True,
+                actor=halted_by,
+                reason=reason,
+                details={"status": status.value, "manual": manual},
+                engaged_at=now_dt,
+            )
+            s.add(record)
+            s.commit()
+
+        if db is not None:
+            _persist(db)
+        else:
+            with SessionLocal() as session:
+                _persist(session)
+    except Exception as exc:
+        logger.warning("Could not persist ControlPlaneState on halt", error=str(exc))
+
+    return res
 
 
-def resume_trading(*, resumed_by: str) -> dict[str, Any]:
-    return write_state(TradingStatus.ACTIVE, resumed_by=resumed_by)
+def resume_trading(*, resumed_by: str, reason: str = "Trading resumed", db=None) -> dict[str, Any]:
+    res = write_state(TradingStatus.ACTIVE, resumed_by=resumed_by)
+
+    # Persist in DB
+    try:
+        from backend.database.connection import SessionLocal
+        from backend.database.models import ControlPlaneState
+        now_dt = datetime.now(timezone.utc)
+
+        def _persist(s):
+            latest = (
+                s.query(ControlPlaneState)
+                .filter(ControlPlaneState.kill_switch_engaged.is_(True))
+                .order_by(ControlPlaneState.id.desc())
+                .first()
+            )
+            if latest:
+                latest.kill_switch_engaged = False
+                latest.released_at = now_dt
+                if latest.details:
+                    details = dict(latest.details)
+                    details["released_by"] = resumed_by
+                    details["release_reason"] = reason
+                    latest.details = details
+            else:
+                record = ControlPlaneState(
+                    kill_switch_engaged=False,
+                    actor=resumed_by,
+                    reason=reason,
+                    details={"released_by": resumed_by, "action": "resume"},
+                    released_at=now_dt,
+                )
+                s.add(record)
+            s.commit()
+
+        if db is not None:
+            _persist(db)
+        else:
+            with SessionLocal() as session:
+                _persist(session)
+    except Exception as exc:
+        logger.warning("Could not persist ControlPlaneState on resume", error=str(exc))
+
+    return res
+
+
+def engage_kill_switch(*, reason: str, actor: str = "admin", details: dict[str, Any] | None = None, db=None) -> dict[str, Any]:
+    return halt_trading(reason=reason, halted_by=actor, manual=True, db=db)
+
+
+def release_kill_switch(*, actor: str = "admin", reason: str = "Kill switch released", db=None) -> dict[str, Any]:
+    return resume_trading(resumed_by=actor, reason=reason, db=db)
+
