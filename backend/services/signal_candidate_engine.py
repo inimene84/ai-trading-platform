@@ -1110,11 +1110,11 @@ class SignalCandidateEngine:
         atr = self.stop_atr(features)
 
         if direction == "BUY":
-            sl = round(price - (1.5 * atr), 5)
-            tp = round(price + (2.5 * atr), 5)
+            sl = round(price - (1.2 * atr), 5)
+            tp = round(price + (3.0 * atr), 5)
         else:
-            sl = round(price + (1.5 * atr), 5)
-            tp = round(price - (2.5 * atr), 5)
+            sl = round(price + (1.2 * atr), 5)
+            tp = round(price - (3.0 * atr), 5)
 
         return {
             "strategy": "MOMENTUM_TREND_PULSE",
@@ -1214,24 +1214,30 @@ class SignalCandidateEngine:
         atr = self.stop_atr(features)
         if features["trend"] == "BULLISH" and features["rsi"] < 42:
             # Bullish trend pulling back deeply, potential spring / slingshot long
+            sl = round(features["recent_low"] - (0.3 * atr), 5)
+            risk = max(price - sl, 0.5 * atr)
+            tp = round(price + (2.5 * risk), 5)
             return {
                 "strategy": "SLINGSHOT_PULLBACK_REENTRY",
                 "direction": "BUY",
                 "entry_price": price,
-                "stop_loss": round(features["recent_low"] - (0.3 * atr), 5),
-                "take_profit": round(features["recent_high"] + (1.0 * atr), 5),
+                "stop_loss": sl,
+                "take_profit": tp,
                 "timing_mode": TimingMode.BAR_CLOSE,
                 "confidence": 0.80,
                 "reason": f"Slingshot pullback in bullish trend. Discounted entry near {price}.",
             }
         elif features["trend"] == "BEARISH" and features["rsi"] > 58:
             # Bearish trend rallying into resistance, slingshot short
+            sl = round(features["recent_high"] + (0.3 * atr), 5)
+            risk = max(sl - price, 0.5 * atr)
+            tp = round(price - (2.5 * risk), 5)
             return {
                 "strategy": "SLINGSHOT_PULLBACK_REENTRY",
                 "direction": "SELL",
                 "entry_price": price,
-                "stop_loss": round(features["recent_high"] + (0.3 * atr), 5),
-                "take_profit": round(features["recent_low"] - (1.0 * atr), 5),
+                "stop_loss": sl,
+                "take_profit": tp,
                 "timing_mode": TimingMode.BAR_CLOSE,
                 "confidence": 0.80,
                 "reason": f"Slingshot bounce into resistance in bearish trend. Entry near {price}.",

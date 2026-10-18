@@ -39,8 +39,10 @@ _BROKER_ALIASES: dict[str, set[str]] = {
 SPLIT_BOOK_WARNING = (
     "ACTIVE_BROKER is cTrader demo/sandbox while Binance is live cash. "
     "Kill and drawdown use the Binance live book only. "
-    "cTrader will not be auto-switched to live — that needs an explicit "
-    "Toomas money confirmation (CTRADER_ENV=live + CTRADER_LIVE_CONFIRM)."
+    "cTrader host follows CTRADER_ENV (demo account → demo.ctraderapi.com). "
+    "Do not set CTRADER_ENV=live for a demo hedging account. "
+    "Live-money host needs explicit Toomas confirmation "
+    "(CTRADER_ENV=live + CTRADER_LIVE_CONFIRM)."
 )
 
 

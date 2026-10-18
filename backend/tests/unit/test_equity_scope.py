@@ -170,3 +170,25 @@ def test_union_scope_sums_same_mode_books(monkeypatch):
     assert payload["informational_union_is_risk_equity"] is True
     assert payload["union_label"] == "union = cTrader + Binance"
     assert payload.get("error") is None
+
+
+def test_union_unverified_when_ctrader_disconnected(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("PAPER_TRADING", "false")
+    monkeypatch.setenv("DRY_RUN_ALL", "false")
+    monkeypatch.setenv("ACTIVE_BROKER", "ctrader")
+    monkeypatch.setenv("CTRADER_ENV", "live")
+    monkeypatch.setenv("CTRADER_PAPER_MODE", "false")
+    monkeypatch.setenv("CTRADER_LIVE_CONFIRM", "I_UNDERSTAND")
+    monkeypatch.setenv("BINANCE_TESTNET", "false")
+    monkeypatch.setenv("BINANCE_PAPER_PARALLEL", "false")
+    monkeypatch.setenv("EQUITY_RISK_SCOPE", "union")
+
+    payload = compose_balance_payload(
+        [
+            {"broker": "ctrader", "error": "not_connected"},
+            {"broker": "binance_futures", "equity": 0.0, "balance": 0.0, "available": 0.0},
+        ]
+    )
+    assert payload.get("error") == "union_book_unverified"
+    assert payload["equity"] == 0.0
