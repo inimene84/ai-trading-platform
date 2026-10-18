@@ -1,4 +1,6 @@
 -- Shadow Model Replay schema (idempotent)
+-- Writes are service_role only. RLS stays enabled with no anon/authenticated
+-- policies so the PostgREST anon key cannot INSERT/UPDATE/SELECT.
 
 create table if not exists public.shadow_replays (
   id                  bigint generated always as identity primary key,
@@ -31,10 +33,9 @@ alter table public.shadow_replays enable row level security;
 
 drop policy if exists "service role only" on public.shadow_replays;
 drop policy if exists "shadow_replays_service_or_anon_write" on public.shadow_replays;
-create policy "shadow_replays_service_or_anon_write" on public.shadow_replays
-  for all
-  using (auth.role() in ('service_role', 'anon', 'authenticated'))
-  with check (auth.role() in ('service_role', 'anon', 'authenticated'));
+-- Intentionally no policies: service_role bypasses RLS. Anon/authenticated have no access.
+
+revoke all on table public.shadow_replays from anon, authenticated, public;
 
 create or replace view public.shadow_replay_leaderboard as
 select
@@ -54,3 +55,5 @@ from public.shadow_replays
 where settled = true
 group by preset, shadow_model
 order by shadow_hit_rate_pct desc nulls last;
+
+revoke all on table public.shadow_replay_leaderboard from anon, authenticated, public;

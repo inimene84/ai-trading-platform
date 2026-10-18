@@ -83,3 +83,57 @@ def test_llm_failure_abstains_and_fails_open():
         assert out["abstain"] is True
         assert out["veto"] is False
         assert out["veto_effective"] is False
+
+
+def test_default_mode_is_shadow_and_never_blocks(monkeypatch):
+    monkeypatch.delenv("BEAR_VETO_MODE", raising=False)
+    monkeypatch.setattr(bear_veto, "BEAR_VETO_MODE", "shadow")
+    with (
+        patch.object(bear_veto, "call_llm_resilient_meta", _fake_call_meta),
+        patch.object(bear_veto, "_persist_verdict", _noop_persist),
+        patch.object(bear_veto, "BEAR_VETO_MODE", "shadow"),
+    ):
+        out = asyncio.run(
+            bear_veto.evaluate_bear_veto(
+                {"symbol": "BTCUSDC", "direction": "BUY", "signal_detail": {}, "market_snapshot": {}}
+            )
+        )
+        assert out["mode"] == "shadow"
+        assert out["veto"] is True
+        assert out["veto_effective"] is False
+
+
+def test_persist_never_posts_with_anon_key(monkeypatch):
+    anon_jwt = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+        "eyJyb2xlIjoiYW5vbiJ9."
+        "sig"
+    )
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", anon_jwt)
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+
+    with patch("backend.agents.debate.bear_veto.httpx.AsyncClient") as client_cls:
+        ok = asyncio.run(bear_veto._persist_verdict({"symbol": "BTCUSDC", "mode": "shadow"}))
+    assert ok is False
+    client_cls.assert_not_called()
+
+
+def test_persist_exception_is_swallowed():
+    async def _boom(_row):
+        raise RuntimeError("supabase down")
+
+    with (
+        patch.object(bear_veto, "call_llm_resilient_meta", _fake_call_meta),
+        patch.object(bear_veto, "_persist_verdict", _boom),
+        patch.object(bear_veto, "BEAR_VETO_MODE", "shadow"),
+    ):
+        out = asyncio.run(
+            bear_veto.evaluate_bear_veto(
+                {"symbol": "BTCUSDC", "direction": "BUY", "signal_detail": {}, "market_snapshot": {}}
+            )
+        )
+        assert out["veto_effective"] is False
+        assert out["veto"] is True

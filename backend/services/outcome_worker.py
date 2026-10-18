@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from sqlalchemy.orm import Session
 

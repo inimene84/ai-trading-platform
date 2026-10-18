@@ -30,6 +30,7 @@ import httpx
 from langgraph.graph import END, StateGraph
 
 from backend.llm.router import call_llm_resilient_meta
+from backend.services.supabase_admin import service_role_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -166,26 +167,28 @@ async def judge_node(state: DebateState) -> DebateState:
     return state
 
 
-_graph = StateGraph(DebateState)
-_graph.add_node("bull", bull_node)
-_graph.add_node("bear", bear_node)
-_graph.add_node("judge", judge_node)
-_graph.set_entry_point("bull")
-_graph.add_edge("bull", "bear")
-_graph.add_edge("bear", "judge")
-_graph.add_edge("judge", END)
-bear_veto_app = _graph.compile()
+try:
+    _graph = StateGraph(DebateState)
+    _graph.add_node("bull", bull_node)
+    _graph.add_node("bear", bear_node)
+    _graph.add_node("judge", judge_node)
+    _graph.set_entry_point("bull")
+    _graph.add_edge("bull", "bear")
+    _graph.add_edge("bear", "judge")
+    _graph.add_edge("judge", END)
+    bear_veto_app = _graph.compile()
+except Exception as _graph_err:  # pragma: no cover - import-time fail-open
+    logger.warning("bear_veto graph compile failed (fail-open): %s", _graph_err)
+    bear_veto_app = None
+
+
+def _current_mode() -> str:
+    return (BEAR_VETO_MODE or os.getenv("BEAR_VETO_MODE", "shadow") or "shadow").strip().lower()
 
 
 def _supabase_credentials() -> tuple[str, str]:
-    url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
-    key = (
-        os.getenv("SUPABASE_SERVICE_KEY")
-        or os.getenv("SUPABASE_KEY")
-        or os.getenv("SUPABASE_ANON_KEY")
-        or ""
-    ).strip()
-    return url, key
+    """Service-role only. Never falls back to the anon key."""
+    return service_role_credentials()
 
 
 async def _persist_verdict(row: dict[str, Any]) -> bool:
@@ -209,6 +212,8 @@ async def _persist_verdict(row: dict[str, Any]) -> bool:
                 logger.debug("bear_verdicts supabase post HTTP %s: %s", r.status_code, r.text[:200])
         except Exception as e:
             logger.debug("bear_verdicts supabase post failed: %s", e)
+    elif url and not key:
+        logger.debug("bear_verdicts supabase post skipped: service-role credentials not configured")
 
     try:
         fallback_path = Path(os.getenv("BEAR_VETO_LOG_PATH", "scratch/bear_verdicts.jsonl"))
@@ -225,7 +230,7 @@ async def evaluate_bear_veto(trade_proposal: dict[str, Any], persist: bool = Tru
 
     Returns ``{veto, veto_effective, abstain, verdict, model, provider, latency_ms, mode}``.
     """
-    mode = (BEAR_VETO_MODE or "shadow").strip().lower()
+    mode = _current_mode()
     if mode == "off":
         return {"veto": False, "veto_effective": False, "abstain": False, "mode": "off"}
 
@@ -237,6 +242,8 @@ async def evaluate_bear_veto(trade_proposal: dict[str, Any], persist: bool = Tru
         "market_snapshot": dict(trade_proposal.get("market_snapshot") or {}),
     }
     try:
+        if bear_veto_app is None:
+            raise RuntimeError("bear_veto graph unavailable")
         out = await asyncio.wait_for(bear_veto_app.ainvoke(state), timeout=BEAR_VETO_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         logger.warning(
@@ -310,18 +317,29 @@ async def evaluate_bear_veto(trade_proposal: dict[str, Any], persist: bool = Tru
             "bear_case": (out.get("bear_case") or "")[:1500],
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        await _persist_verdict(row)
+        try:
+            await asyncio.wait_for(_persist_verdict(row), timeout=8.0)
+        except Exception as e:
+            logger.debug("bear_veto persist skipped: %s", e)
 
     return result
 
 
+async def _safe_evaluate_bear_veto(trade_proposal: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return await evaluate_bear_veto(trade_proposal, persist=True)
+    except Exception as e:
+        logger.warning("shadow bear veto failed open: %s", e)
+        return {"veto": False, "veto_effective": False, "abstain": True, "error": str(e), "mode": _current_mode()}
+
+
 def schedule_shadow_bear_veto(trade_proposal: dict[str, Any]) -> asyncio.Task[dict[str, Any]] | None:
     """Fire-and-forget background task for SHADOW mode so live/paper entry latency is 0ms."""
-    if (BEAR_VETO_MODE or "shadow").strip().lower() == "off":
+    if _current_mode() == "off":
         return None
     try:
         loop = asyncio.get_running_loop()
-        return loop.create_task(evaluate_bear_veto(trade_proposal, persist=True))
+        return loop.create_task(_safe_evaluate_bear_veto(trade_proposal))
     except RuntimeError:
         return None
 

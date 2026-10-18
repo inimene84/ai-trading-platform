@@ -27,10 +27,13 @@ import asyncio
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
+
+from backend.services.supabase_admin import service_role_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -48,14 +51,8 @@ CAUSES = (
 
 
 def _supabase_credentials() -> tuple[str, str]:
-    url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
-    key = (
-        os.getenv("SUPABASE_SERVICE_KEY")
-        or os.getenv("SUPABASE_KEY")
-        or os.getenv("SUPABASE_ANON_KEY")
-        or ""
-    ).strip()
-    return url, key
+    """Service-role only. Never falls back to the anon key."""
+    return service_role_credentials()
 
 
 def _iso(dt: Any) -> Optional[str]:
@@ -225,7 +222,11 @@ async def build_postmortem(trade: Any) -> dict[str, Any]:
                 "State why it likely won or lost and one concrete rule for future setups.\n"
                 + json.dumps(pm, default=str)[:2000]
             )
-            txt, meta = await call_llm_resilient_meta("general", prompt, response_json=False)
+            timeout_sec = max(1.0, float(os.getenv("POSTMORTEM_LLM_TIMEOUT_SEC", "20")))
+            txt, meta = await asyncio.wait_for(
+                call_llm_resilient_meta("general", prompt, response_json=False),
+                timeout=timeout_sec,
+            )
             pm["reflection"] = (txt or "").strip()[:600]
             pm["reflection_model"] = meta.get("model")
         except Exception as e:
@@ -236,6 +237,7 @@ async def build_postmortem(trade: Any) -> dict[str, Any]:
 async def _supabase_upsert(table: str, row: dict[str, Any]) -> bool:
     url, key = _supabase_credentials()
     if not (url and key):
+        logger.debug("postmortem supabase upsert skipped: service-role credentials not configured")
         return False
     try:
         async with httpx.AsyncClient(timeout=8.0) as client:
@@ -309,71 +311,104 @@ async def on_trade_closed(trade: Any) -> Optional[dict[str, Any]]:
         return None
 
 
+def _fetch_closed_snapshots(limit: int) -> list[dict[str, Any]]:
+    """Blocking SQLAlchemy read — always call from a worker thread."""
+    import sqlalchemy as sa
+    from backend.database.connection import SessionLocal
+    from backend.database.models import Trade
+
+    with SessionLocal() as db:
+        rows = (
+            db.query(Trade)
+            .filter(
+                sa.and_(
+                    Trade.status.in_(["closed", "exit"]),
+                    Trade.pnl.isnot(None),
+                )
+            )
+            .order_by(Trade.closed_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return [normalize_trade(r) for r in rows]
+
+
 class PostmortemPoller:
     """Background poller that sweeps recently closed SQL Trade rows idempotently."""
 
     def __init__(self) -> None:
         self._seen_ids: set[str] = set()
         self._task: Optional[asyncio.Task[None]] = None
+        self._start_lock = threading.Lock()
+        self._loop_running = False
+        self._sweep_lock: Optional[asyncio.Lock] = None
+
+    def _get_sweep_lock(self) -> asyncio.Lock:
+        if self._sweep_lock is None:
+            self._sweep_lock = asyncio.Lock()
+        return self._sweep_lock
 
     async def sweep_recent_closed(self, limit: int = 50) -> dict[str, int]:
         processed = 0
         skipped = 0
-        try:
-            import sqlalchemy as sa
-            from backend.database.connection import SessionLocal
-            from backend.database.models import Trade
-
-            with SessionLocal() as db:
-                rows = (
-                    db.query(Trade)
-                    .filter(
-                        sa.and_(
-                            Trade.status.in_(["closed", "exit"]),
-                            Trade.pnl.isnot(None),
-                        )
-                    )
-                    .order_by(Trade.closed_at.desc())
-                    .limit(limit)
-                    .all()
-                )
-                snapshots = [normalize_trade(r) for r in rows]
-
+        lock = self._get_sweep_lock()
+        if lock.locked():
+            logger.debug("PostmortemPoller sweep already in progress; skipping overlap")
+            return {"processed": 0, "skipped": 0, "overlapped": 1}
+        async with lock:
+            try:
+                snapshots = await asyncio.to_thread(_fetch_closed_snapshots, limit)
+            except Exception as e:
+                logger.warning("PostmortemPoller sweep failed: %s", e)
+                return {"processed": 0, "skipped": 0}
+            per_trade_timeout = max(5.0, float(os.getenv("POSTMORTEM_TRADE_TIMEOUT_SEC", "45")))
             for snap in snapshots:
                 tid = snap["trade_id"]
                 if tid in self._seen_ids:
                     skipped += 1
                     continue
                 self._seen_ids.add(tid)
-                await on_trade_closed(snap)
-                processed += 1
-        except Exception as e:
-            logger.warning("PostmortemPoller sweep failed: %s", e)
+                try:
+                    await asyncio.wait_for(on_trade_closed(snap), timeout=per_trade_timeout)
+                    processed += 1
+                except Exception as e:
+                    logger.warning("PostmortemPoller trade %s skipped: %s", tid, e)
         return {"processed": processed, "skipped": skipped}
 
     async def run_loop(self) -> None:
         if os.getenv("POSTMORTEM_ENABLED", "true").strip().lower() != "true":
             logger.info("PostmortemPoller disabled via POSTMORTEM_ENABLED")
             return
+        if self._loop_running:
+            logger.info("PostmortemPoller already running; refusing second loop")
+            return
+        self._loop_running = True
         interval_min = max(1, int(os.getenv("POSTMORTEM_POLL_INTERVAL_MIN", "15")))
         lookback = int(os.getenv("POSTMORTEM_POLL_LOOKBACK", "50"))
         logger.info("PostmortemPoller started (every %dm, lookback=%d)", interval_min, lookback)
-        while True:
-            try:
-                await asyncio.sleep(interval_min * 60)
-                await self.sweep_recent_closed(limit=lookback)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning("PostmortemPoller loop error: %s", e)
+        try:
+            while True:
+                try:
+                    await asyncio.sleep(interval_min * 60)
+                    await self.sweep_recent_closed(limit=lookback)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning("PostmortemPoller loop error: %s", e)
+        finally:
+            self._loop_running = False
 
-    def start(self) -> None:
-        if self._task is None or self._task.done():
+    def start(self) -> Optional[asyncio.Task[None]]:
+        """Idempotent: at most one background loop per process."""
+        with self._start_lock:
+            if self._task is not None and not self._task.done():
+                return self._task
             try:
                 loop = asyncio.get_running_loop()
                 self._task = loop.create_task(self.run_loop())
+                return self._task
             except RuntimeError:
-                pass
+                return None
 
 
 postmortem_poller = PostmortemPoller()

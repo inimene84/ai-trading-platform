@@ -1262,6 +1262,7 @@ class DecisionEngine:
                     regime=regime,
                     regime_confidence=float(getattr(reg_obj, "confidence", 1.0) or 1.0),
                     cb_state=str(getattr(cb_obj, "state", "CLOSED") or "CLOSED"),
+                    cb_mode=str(getattr(cb_obj, "mode", None) or os.getenv("REGIME_CB_MODE", "shadow")),
                     drawdown_pct=dd_pct,
                     losing_streak=streak,
                 )

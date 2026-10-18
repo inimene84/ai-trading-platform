@@ -1195,11 +1195,6 @@ class TradingLoopService:
             regime_circuit_breaker.end_cycle()
         except Exception as _rcb_err:
             logger.debug(f"RegimeCircuitBreaker end_cycle skipped: {_rcb_err}")
-        try:
-            from backend.services.postmortem import postmortem_poller
-            postmortem_poller.start()
-        except Exception as _pm_err:
-            logger.debug(f"PostmortemPoller start skipped: {_pm_err}")
         return all_results
 
     async def _process_symbol(self, symbol: str, min_confidence: float, ai_threshold: float, max_positions: int):

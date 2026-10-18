@@ -31,21 +31,23 @@ from typing import Any
 
 import httpx
 
+from backend.services.supabase_admin import service_role_credentials
 from backend.utils.rate_limit import acquire
 
 logger = logging.getLogger("shadow_replay")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
-SUPABASE_KEY = (
-    os.getenv("SUPABASE_SERVICE_KEY")
-    or os.getenv("SUPABASE_KEY")
-    or os.getenv("SUPABASE_ANON_KEY")
-    or ""
-).strip()
 HOLDING_HOURS = int(os.getenv("SHADOW_HOLDING_HOURS", "24"))
 OMNI_URL = (os.getenv("OMNIROUTE_BASE_URL") or "https://omni.allikas.online/v1").strip().rstrip("/")
 OMNI_KEY = (os.getenv("OMNIROUTE_API_KEY") or "").strip()
+
+
+def _service_creds() -> tuple[str, str]:
+    """Service-role only. Never falls back to the anon key."""
+    return service_role_credentials()
+
+
+SUPABASE_URL, SUPABASE_KEY = _service_creds()
 
 _JEV_SELECT_COLS = (
     "id,symbol,timeframe,decision,allowed_side,confidence,signal_strength,"
@@ -75,15 +77,21 @@ def sb(
     params: dict[str, str] | None = None,
     prefer: str = "return=minimal",
 ) -> httpx.Response:
+    url, key = _service_creds()
+    if not (url and key):
+        raise RuntimeError(
+            "shadow_replay requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY "
+            "(or SUPABASE_SERVICE_KEY). The anon key is never used for writes."
+        )
     headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         "Prefer": prefer,
     }
     return httpx.request(
         method,
-        f"{SUPABASE_URL}/rest/v1/{path}",
+        f"{url}/rest/v1/{path}",
         headers=headers,
         json=payload,
         params=params,

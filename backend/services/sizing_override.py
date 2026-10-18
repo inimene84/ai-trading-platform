@@ -79,6 +79,7 @@ def compute_sizing_override(
     regime: str = "TRENDING",
     regime_confidence: float = 1.0,
     cb_state: str = "CLOSED",
+    cb_mode: Optional[str] = None,
     drawdown_pct: float = 0.0,
     losing_streak: int = 0,
     bear_strength: float = 0.0,
@@ -112,10 +113,13 @@ def compute_sizing_override(
 
     conf_mult = cfg.low_regime_conf_mult if float(regime_confidence) < cfg.low_regime_conf_threshold else 1.0
 
+    # OPEN -> size 0.0 is gated on REGIME_CB_MODE=enforce. A shadow/off breaker
+    # must never resize a live order, even if SIZING_OVERRIDE_MODE=enforce.
+    resolved_cb_mode = (cb_mode if cb_mode is not None else os.getenv("REGIME_CB_MODE", "shadow")).strip().lower()
     cb_upper = (cb_state or "CLOSED").upper()
-    if cb_upper == "OPEN":
+    if resolved_cb_mode == "enforce" and cb_upper == "OPEN":
         cb_mult = 0.0
-    elif cb_upper == "HALF_OPEN":
+    elif resolved_cb_mode == "enforce" and cb_upper == "HALF_OPEN":
         cb_mult = 0.50
     else:
         cb_mult = 1.0

@@ -1,4 +1,6 @@
 -- Postmortem Failure Logger schema + Bear Verdict log (idempotent)
+-- Writes are service_role only. RLS stays enabled with no anon/authenticated
+-- policies so the PostgREST anon key cannot INSERT/UPDATE/SELECT.
 
 create table if not exists public.postmortems (
   trade_id          text primary key,
@@ -27,10 +29,9 @@ alter table public.postmortems enable row level security;
 
 drop policy if exists "service role only" on public.postmortems;
 drop policy if exists "postmortems_service_or_anon_write" on public.postmortems;
-create policy "postmortems_service_or_anon_write" on public.postmortems
-  for all
-  using (auth.role() in ('service_role', 'anon', 'authenticated'))
-  with check (auth.role() in ('service_role', 'anon', 'authenticated'));
+-- Intentionally no policies: service_role bypasses RLS. Anon/authenticated have no access.
+
+revoke all on table public.postmortems from anon, authenticated, public;
 
 create or replace view public.postmortem_cause_summary as
 select
@@ -43,6 +44,8 @@ select
 from public.postmortems
 group by mode, cause
 order by total_pnl asc;
+
+revoke all on table public.postmortem_cause_summary from anon, authenticated, public;
 
 -- Bear-veto debate log table so bear hit-rate is measurable in shadow & enforce modes
 create table if not exists public.bear_verdicts (
@@ -72,7 +75,6 @@ create index if not exists bear_verdicts_veto_idx   on public.bear_verdicts (vet
 alter table public.bear_verdicts enable row level security;
 
 drop policy if exists "bear_verdicts_service_or_anon_write" on public.bear_verdicts;
-create policy "bear_verdicts_service_or_anon_write" on public.bear_verdicts
-  for all
-  using (auth.role() in ('service_role', 'anon', 'authenticated'))
-  with check (auth.role() in ('service_role', 'anon', 'authenticated'));
+-- Intentionally no policies: service_role bypasses RLS. Anon/authenticated have no access.
+
+revoke all on table public.bear_verdicts from anon, authenticated, public;

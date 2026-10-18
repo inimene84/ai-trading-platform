@@ -21,13 +21,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.database.connection import get_db
-from backend.database.models import ControlPlaneState, Trade
+from backend.database.models import Trade
 from backend.security import validate_admin_request
 from backend.services.pnl_accounting import realized_windows
 from backend.services.risk_config import RiskConfig
 from backend.services.sentry_state import (
     engage_kill_switch,
-    get_trading_status,
     is_kill_switch_engaged,
     is_trading_allowed,
     read_state,
