@@ -277,7 +277,7 @@ async def embed_to_finmem(pm: dict[str, Any]) -> bool:
             if pnl > 0
             else {"positive": 0.05, "neutral": 0.20, "negative": 0.75}
         )
-        mem_id = await finmem_service.memory_store.store_memory(
+        mem_id = await finmem_service.store_memory(
             symbol=pm["symbol"],
             layer="deep",
             content=content,

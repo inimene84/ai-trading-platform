@@ -11,6 +11,7 @@ async def test_generate_text_embedding_skips_tripped_openrouter(monkeypatch):
     credit_circuit.reset()
     credit_circuit.trip("openrouter", "402")
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     async def fail_openrouter(_text, _model):
         raise AssertionError("OpenRouter should not be called while the circuit is open")
@@ -30,6 +31,7 @@ async def test_generate_text_embedding_skips_tripped_openrouter(monkeypatch):
 async def test_openrouter_402_trips_circuit(monkeypatch):
     credit_circuit.reset()
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     class _Resp:
         status_code = 402
