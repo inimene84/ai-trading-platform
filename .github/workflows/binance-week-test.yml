@@ -1,0 +1,139 @@
+name: Start Binance week test
+
+# Enables real USDC-M futures orders on the existing wallet.
+# Does not close the cTrader BTC/ETH positions.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: vps-binance-week
+  cancel-in-progress: false
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - name: Enable the small live Binance test
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          host="${SSH_HOST:-72.60.18.113}"
+          user="${SSH_USER:-root}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "${user}@${host}" 'bash -s' << 'REMOTE'
+          set -euo pipefail
+          cd /root/ai-trading-platform-v3
+          docker exec -i ai-trading-backend python - << 'PY'
+          from backend.services.binance_futures_service import binance_futures_broker
+          acct = binance_futures_broker._get_client().futures_account()
+          print("multi_asset", acct.get("multiAssetsMargin"))
+          for row in acct.get("assets") or []:
+              asset = str(row.get("asset") or "")
+              if asset not in {"USDT", "USDC", "BNFCR", "BFUSD"}:
+                  continue
+              wallet = float(row.get("walletBalance") or 0)
+              if wallet:
+                  print("asset", asset, round(wallet, 4))
+          PY
+          python3 - << 'PY'
+          from pathlib import Path
+          path = Path(".env")
+          wanted = {
+              "BINANCE_DRY_RUN": "false",
+              "CTRADER_ENV": "demo",
+              "BINANCE_MARGIN_TYPE": "ISOLATED",
+              "BINANCE_MAX_OPEN_POSITIONS": "2",
+              "BINANCE_FALLBACK_EQUITY": "101",
+              "TRADING_SYMBOLS": "ETHUSDC,SOLUSDC,XRPUSDC,BNBUSDC,AVAXUSDC,LINKUSDC,ADAUSDC",
+          }
+          lines = path.read_text(encoding="utf-8").splitlines()
+          seen = set()
+          out = []
+          for line in lines:
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  out.append(line)
+                  continue
+              key = line.split("=", 1)[0]
+              if key in wanted:
+                  out.append(f"{key}={wanted[key]}")
+                  seen.add(key)
+              else:
+                  out.append(line)
+          for key, value in wanted.items():
+              if key not in seen:
+                  out.append(f"{key}={value}")
+          path.write_text("\n".join(out) + "\n", encoding="utf-8")
+          print("updated", ",".join(sorted(wanted)))
+          PY
+          docker compose -f docker-compose.prod.yml up -d backend
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8001/health >/dev/null; then
+              echo backend_healthy
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          test "$ok" = 1
+          sleep 18
+          docker exec -i ai-trading-backend python - << 'PY'
+          from backend.services.binance_futures_service import binance_futures_broker
+          from backend.services.equity_scope import describe_equity_books
+          from backend.services.trading_mode import live_binance_orders_allowed
+          from backend.database.connection import SessionLocal
+          from backend.database.models import Trade
+          print("adapter_dry_run", binance_futures_broker.dry_run)
+          print("adapter_leverage", binance_futures_broker.leverage)
+          print("adapter_margin", binance_futures_broker.margin_type)
+          print("orders_allowed", live_binance_orders_allowed())
+          books = describe_equity_books()
+          for key in ("binance_money_mode", "ctrader_money_mode", "split_book", "risk_broker", "equity_scope"):
+              print("scope", key, books.get(key))
+          bal = binance_futures_broker.get_balance(raise_on_error=True)
+          print("futures_equity", round(float(bal.get("equity") or 0), 4))
+          print("futures_available", round(float(bal.get("available") or 0), 4))
+          print("futures_open", len(binance_futures_broker.get_positions(raise_on_error=True)))
+          db = SessionLocal()
+          try:
+              rows = db.query(Trade).filter(Trade.status.in_(["open", "filled"])).all()
+              print("db_open", len(rows))
+              for row in rows:
+                  print("db", row.symbol, row.direction, row.quantity, row.mode, row.broker, row.status)
+          finally:
+              db.close()
+          PY
+          python3 - << 'PY'
+          import json, urllib.request
+          from pathlib import Path
+          env = {}
+          for line in Path(".env").read_text(encoding="utf-8").splitlines():
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  continue
+              k, v = line.split("=", 1)
+              env[k] = v.strip().strip('"').strip("'")
+          admin = env.get("ADMIN_API_KEY", "")
+          def call(path):
+              req = urllib.request.Request("http://127.0.0.1:8001" + path, headers={"X-API-Key": admin})
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.loads(response.read().decode())
+          broker = call("/trading/ctrader/status")
+          loop = call("/trading/loop/status")
+          print("ctrader_connected", broker.get("connected"), "equity", broker.get("equity"), "open", broker.get("open_positions"))
+          print("loop_running", loop.get("running"), "symbols", loop.get("symbols"), "error", loop.get("error"))
+          PY
+          echo "--- order log ---"
+          docker logs --since 3m ai-trading-backend 2>&1 \
+            | grep -Ei 'DRY-RUN|place_order|New order|order sent|insufficient|code=-|Binance live session|refusing' \
+            | grep -viE 'api.key|secret|signature' \
+            | sed -E 's/[A-Za-z0-9]{32,}/[redacted]/g' \
+            | tail -30
+          REMOTE

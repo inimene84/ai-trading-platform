@@ -1,0 +1,139 @@
+name: Sync cTrader env tokens
+
+# If .env has newer cTrader tokens than the token file, copy them in.
+# The running app reads the token file first and ignores .env.
+# Does not print token values and does not switch to live trading.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: vps-ctrader-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Compare env and token file
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_PRIVATE_KEY}" ]; then
+            echo "::error::SSH_PRIVATE_KEY is not available to this workflow."
+            exit 1
+          fi
+          host="${SSH_HOST:-72.60.18.113}"
+          user="${SSH_USER:-root}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "${user}@${host}" 'bash -s' << 'REMOTE'
+          set -euo pipefail
+          cd /root/ai-trading-platform-v3
+          echo "env_mtime $(stat -c %y .env)"
+          echo "backend $(docker inspect -f '{{.State.Status}} started {{.State.StartedAt}}' ai-trading-backend)"
+          docker exec -i ai-trading-backend python - << 'PY'
+          import os
+          import time
+          from pathlib import Path
+          from backend.services.ctrader_tokens import ctrader_token_store
+
+          def clean(value: str) -> str:
+              return value.strip().strip('"').strip("'").strip()
+
+          env = {}
+          for line in Path("/app/.env").read_text(encoding="utf-8").splitlines():
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              env[key] = value
+          access = clean(env.get("CTRADER_ACCESS_TOKEN", ""))
+          refresh = clean(env.get("CTRADER_REFRESH_TOKEN", ""))
+          account = clean(env.get("CTRADER_ACCOUNT_ID", ""))
+          raw_access = env.get("CTRADER_ACCESS_TOKEN", "")
+          print("trading_mode", clean(env.get("TRADING_MODE", "unset")))
+          print("ctrader_env", clean(env.get("CTRADER_ENV", "unset")))
+          print("env_access_len", len(access))
+          print("env_refresh_len", len(refresh))
+          print("env_account_set", bool(account))
+          print("access_wrapped_in_quotes", raw_access.strip()[:1] in {'"', "'"})
+          stored = {}
+          token_path = Path("/app/data/ctrader_tokens.json")
+          if token_path.exists():
+              import json
+              stored = json.loads(token_path.read_text(encoding="utf-8"))
+          file_access = str(stored.get("access_token") or stored.get("accessToken") or "")
+          file_refresh = str(stored.get("refresh_token") or stored.get("refreshToken") or "")
+          print("token_file_exists", token_path.exists())
+          print("file_access_len", len(file_access))
+          print("file_refresh_len", len(file_refresh))
+          print("env_file_access_same", access == file_access)
+          print("env_file_refresh_same", refresh == file_refresh)
+          proc_access = clean(os.getenv("CTRADER_ACCESS_TOKEN", ""))
+          print("process_access_len", len(proc_access))
+          print("process_matches_env", proc_access == access)
+          changed = bool(access and refresh and (access != file_access or refresh != file_refresh))
+          print("will_sync", changed)
+          if not changed:
+              raise SystemExit(0)
+          stored["access_token"] = access
+          stored["refresh_token"] = refresh
+          stored["client_id"] = stored.get("client_id") or clean(env.get("CTRADER_CLIENT_ID", ""))
+          stored["client_secret"] = stored.get("client_secret") or clean(env.get("CTRADER_CLIENT_SECRET", ""))
+          if account.isdigit() and int(account) > 0:
+              stored["account_id"] = int(account)
+          stored["updated_at"] = int(time.time())
+          stored["expires_in"] = int(stored.get("expires_in") or 2592000)
+          ctrader_token_store.save_tokens(stored)
+          Path("/tmp/ctrader_synced").write_text("1", encoding="utf-8")
+          print("token_file_updated")
+          PY
+          if docker exec ai-trading-backend test -f /tmp/ctrader_synced; then
+            docker compose -f docker-compose.prod.yml up -d backend
+            ok=0
+            for i in $(seq 1 24); do
+              if curl -sf http://127.0.0.1:8001/health >/dev/null; then
+                echo backend_healthy
+                ok=1
+                break
+              fi
+              sleep 5
+            done
+            test "$ok" = 1
+            sleep 18
+          else
+            echo "no_token_file_change"
+          fi
+          python3 - << 'PY'
+          import json
+          import urllib.request
+          from pathlib import Path
+          env = {}
+          for line in Path(".env").read_text(encoding="utf-8").splitlines():
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              env[key] = value
+          request = urllib.request.Request(
+              "http://127.0.0.1:8001/trading/ctrader/status",
+              headers={"X-API-Key": env.get("ADMIN_API_KEY", "")},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              body = json.loads(response.read().decode())
+          info_req = urllib.request.Request(
+              "http://127.0.0.1:8001/trading/ctrader/tokens",
+              headers={"X-API-Key": env.get("ADMIN_API_KEY", "")},
+          )
+          with urllib.request.urlopen(info_req, timeout=30) as response:
+              info = json.loads(response.read().decode())
+          print("configured", info.get("configured"), "expired", info.get("is_expired"), "days_left", info.get("days_until_expiration"))
+          for field in ("connected", "authenticated", "dry_run", "host", "last_error", "connect_cooldown_s", "open_positions"):
+              print("ctrader", field, body.get(field))
+          PY
+          REMOTE

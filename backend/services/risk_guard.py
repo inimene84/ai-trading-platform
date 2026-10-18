@@ -409,7 +409,8 @@ def enforce_risk_limits(
         try:
             # Demo cTrader equity must not replace a live Binance snapshot.
             if (
-                _active_broker_name().startswith("ctrader")
+                get_trading_mode() != TradingMode.PAPER
+                and _active_broker_name().startswith("ctrader")
                 and ctrader_money_mode() == "live_cash"
                 and not is_split_book()
             ):
@@ -461,7 +462,13 @@ def enforce_risk_limits(
             if start_value and current_value < start_value:
                 daily_loss_pct = ((start_value - current_value) / start_value) * 100
                 if daily_loss_pct > cfg.max_daily_loss_pct:
-                    raise RiskBreach(
+                    msg = (
                         f"Max daily loss exceeded: {daily_loss_pct:.2f}% > {cfg.max_daily_loss_pct}% "
                         f"(Daily Start: ${start_value:.2f}, Current: ${current_value:.2f})"
                     )
+                    # Same paper exemption as the drawdown gate. A cTrader
+                    # demo day must not freeze the simulated book.
+                    if is_drawdown_suppressed_in_testing():
+                        logger.warning("[RISK GUARD] %s — paper/testing: daily-loss halt suppressed", msg)
+                    else:
+                        raise RiskBreach(msg)

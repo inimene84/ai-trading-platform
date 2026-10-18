@@ -1,0 +1,125 @@
+name: Go live cTrader
+
+# Switches the trading process to live and keeps Binance crypto on the paper book.
+# Does not close open positions. Does not print tokens.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: vps-go-live
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - name: Set live mode and reload
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_PRIVATE_KEY}" ]; then
+            echo "::error::SSH_PRIVATE_KEY is not available to this workflow."
+            exit 1
+          fi
+          host="${SSH_HOST:-72.60.18.113}"
+          user="${SSH_USER:-root}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "${user}@${host}" 'bash -s' << 'REMOTE'
+          set -euo pipefail
+          cd /root/ai-trading-platform-v3
+          git pull --ff-only origin main || echo "git_pull_failed"
+          python3 - << 'PY'
+          from pathlib import Path
+          path = Path(".env")
+          wanted = {
+              "TRADING_MODE": "live",
+              "PAPER_TRADING": "false",
+              "DRY_RUN_ALL": "false",
+              "CTRADER_ENV": "live",
+              "CTRADER_PAPER_MODE": "false",
+              "CTRADER_LIVE_CONFIRM": "I_UNDERSTAND",
+              "BINANCE_PAPER_PARALLEL": "true",
+          }
+          lines = path.read_text(encoding="utf-8").splitlines()
+          seen = set()
+          out = []
+          for line in lines:
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  out.append(line)
+                  continue
+              key = line.split("=", 1)[0]
+              if key in wanted:
+                  out.append(f"{key}={wanted[key]}")
+                  seen.add(key)
+              else:
+                  out.append(line)
+          for key, value in wanted.items():
+              if key not in seen:
+                  out.append(f"{key}={value}")
+          path.write_text("\n".join(out) + "\n", encoding="utf-8")
+          print("env_updated", ",".join(sorted(wanted)))
+          PY
+          docker compose -f docker-compose.prod.yml up -d backend
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8001/health >/dev/null; then
+              echo backend_healthy
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          test "$ok" = 1
+          sleep 20
+          python3 - << 'PY'
+          import json
+          import urllib.request
+          from pathlib import Path
+          env = {}
+          for line in Path(".env").read_text(encoding="utf-8").splitlines():
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              env[key] = value.strip().strip('"').strip("'")
+          for key in (
+              "TRADING_MODE", "PAPER_TRADING", "DRY_RUN_ALL", "CTRADER_ENV",
+              "CTRADER_PAPER_MODE", "BINANCE_PAPER_PARALLEL", "BINANCE_TESTNET",
+          ):
+              print("flag", key, env.get(key, "unset"))
+          print("flag CTRADER_LIVE_CONFIRM", "I_UNDERSTAND" if env.get("CTRADER_LIVE_CONFIRM") == "I_UNDERSTAND" else "WRONG")
+          admin = env.get("ADMIN_API_KEY", "")
+          def call(path):
+              request = urllib.request.Request(
+                  "http://127.0.0.1:8001" + path,
+                  headers={"X-API-Key": admin},
+              )
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.loads(response.read().decode())
+          health = call("/health")
+          status = call("/trading/status")
+          loop = call("/trading/loop/status")
+          broker = call("/trading/ctrader/status")
+          print("trading_allowed", health.get("trading_allowed"), "trading_status", health.get("trading_status"))
+          print("api_mode", status.get("mode"), "api_dry_run", status.get("dry_run"), "broker", status.get("active_broker"))
+          print("loop_running", loop.get("running"), "cycles", loop.get("cycle_count"), "error", loop.get("error"))
+          for field in (
+              "connected", "authenticated", "dry_run", "host", "last_error",
+              "open_positions", "balance", "equity", "margin", "connect_cooldown_s",
+          ):
+              print("ctrader", field, broker.get(field))
+          PY
+          echo "--- live switch logs ---"
+          docker logs --since 3m ai-trading-backend 2>&1 \
+            | grep -E 'cTrader|TRADING_MODE|refusing non-positive|order' \
+            | grep -viE 'access_token|refresh_token|client_secret|authorization' \
+            | sed -E 's/[A-Za-z0-9_\-]{32,}/[redacted]/g' \
+            | tail -40
+          REMOTE

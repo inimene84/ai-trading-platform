@@ -1,0 +1,133 @@
+name: Paper mode
+
+# Start the trading loop against live market data with simulated fills.
+# Refuses to set TRADING_MODE=live. Does not close exchange positions.
+# Does not stop a running loop: stop() cancels the supervisor permanently.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type PAPER to start paper mode"
+        required: true
+        default: "no"
+
+concurrency:
+  group: vps-paper
+  cancel-in-progress: false
+
+jobs:
+  paper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: production
+    if: ${{ github.event.inputs.confirm == 'PAPER' }}
+    steps:
+      - name: Start paper loop on the VPS
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_PRIVATE_KEY}" ]; then
+            echo "::error::SSH_PRIVATE_KEY is not available to this workflow."
+            exit 1
+          fi
+          host="${SSH_HOST:-72.60.18.113}"
+          user="${SSH_USER:-root}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "${user}@${host}" 'bash -s' << 'REMOTE'
+          set -euo pipefail
+          cd /root/ai-trading-platform-v3
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+          git log -1 --oneline
+          docker compose -f docker-compose.prod.yml up -d --build backend
+          ok=0
+          for i in $(seq 1 36); do
+            if curl -sf http://127.0.0.1:8001/health >/dev/null; then
+              echo backend_healthy
+              ok=1
+              break
+            fi
+            echo "waiting_backend=$i"
+            sleep 5
+          done
+          test "$ok" = 1
+          python3 - << 'PY'
+          import json
+          import time
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          env = {}
+          for line in Path(".env").read_text(encoding="utf-8").splitlines():
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              env[key] = value
+          admin = env.get("ADMIN_API_KEY", "")
+          symbols = [item.strip() for item in env.get("TRADING_SYMBOLS", "").split(",") if item.strip()]
+
+          def call(method, path, body=None):
+              data = None if body is None else json.dumps(body).encode()
+              request = urllib.request.Request(
+                  "http://127.0.0.1:8001" + path,
+                  data=data,
+                  method=method,
+                  headers={"X-API-Key": admin, "Content-Type": "application/json"},
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=90) as response:
+                      raw = response.read().decode()
+              except urllib.error.HTTPError as exc:
+                  detail = exc.read().decode()[:300]
+                  raise SystemExit(f"{method} {path} http={exc.code} {detail}")
+              return json.loads(raw) if raw else {}
+
+          def report(label):
+              health = json.load(urllib.request.urlopen("http://127.0.0.1:8001/health", timeout=20))
+              loop = call("GET", "/trading/loop/status")
+              status = call("GET", "/trading/status")
+              print(
+                  label,
+                  "mode", status.get("mode"),
+                  "dry_run", status.get("dry_run"),
+                  "broker", status.get("active_broker"),
+                  "trading_allowed", health.get("trading_allowed"),
+                  "trading_status", health.get("trading_status"),
+              )
+              print(
+                  label,
+                  "loop_running", loop.get("running"),
+                  "state", loop.get("state"),
+                  "cycles", loop.get("cycle_count"),
+                  "symbols", len(loop.get("symbols") or []),
+                  "cash", loop.get("cash"),
+                  "equity", loop.get("equity"),
+                  "error", loop.get("error"),
+              )
+              return status, loop
+
+          status, loop = report("before")
+          if status.get("mode") != "paper":
+              raise SystemExit("refusing: process is not in paper mode")
+          if loop.get("running") is not True:
+              payload = {"interval_minutes": 15, "strategy": "combined"}
+              if symbols:
+                  payload["symbols"] = symbols
+              call("POST", "/trading/loop/start", payload)
+              time.sleep(20)
+          status, loop = report("after")
+          if status.get("mode") != "paper" or status.get("dry_run") is not True:
+              raise SystemExit("refusing: process is not in paper mode")
+          if loop.get("running") is not True:
+              raise SystemExit("paper loop stopped: " + str(loop.get("error")))
+          print("paper_loop=running")
+          PY
+          REMOTE

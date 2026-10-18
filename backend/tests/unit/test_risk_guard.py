@@ -238,6 +238,27 @@ def test_risk_guard_blocks_excessive_daily_loss(db_session):
         enforce_risk_limits(db_session, cfg, [], snap_now)
 
 
+def test_paper_daily_loss_does_not_halt_the_loop(db_session, monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("ENFORCE_TESTING_DRAWDOWN", "false")
+    cfg = RiskConfig(
+        max_portfolio_drawdown_pct=20.0,
+        max_daily_loss_pct=5.0,
+        max_open_positions=10,
+    )
+    today = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    db_session.add(PortfolioSnapshot(total_value=919.14, cash=919.14, timestamp=today))
+    snap_now = PortfolioSnapshot(
+        total_value=477.60,
+        cash=477.60,
+        timestamp=today + timedelta(hours=2),
+    )
+    db_session.add(snap_now)
+    db_session.commit()
+
+    enforce_risk_limits(db_session, cfg, [], snap_now)
+
+
 def test_risk_guard_blocks_excessive_directional_exposure(db_session):
     # Hard USDT cap applies when equity sizing is off (no dynamic equity multiplier).
     # Default equity_sizing_enabled=True would raise the cap to equity * 4 in paper

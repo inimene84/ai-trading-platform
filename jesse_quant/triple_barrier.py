@@ -7,9 +7,11 @@ Implements Marcos López de Prado's path-dependent labeling framework:
 3. Meta-Labeling: Secondary binary labels determining if a primary model signal hits profit before stop
 """
 
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Union
 import numpy as np
 import pandas as pd
+
+from barrier_config import ATR_PERIOD, MAX_HOLDING_BARS, SL_ATR_MULT, TP_ATR_MULT
 
 
 def get_daily_volatility(close: pd.Series, lookback: int = 50) -> pd.Series:
@@ -22,122 +24,194 @@ def get_daily_volatility(close: pd.Series, lookback: int = 50) -> pd.Series:
     return df0.bfill()
 
 
-def get_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """Calculates Average True Range."""
-    h, l, c = df["high"], df["low"], df["close"]
-    tr1 = h - l
-    tr2 = (h - c.shift(1)).abs()
-    tr3 = (l - c.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return tr.ewm(span=period, adjust=False).mean()
+def true_range(df: pd.DataFrame) -> pd.Series:
+    """True range. The first bar has no previous close, so it is high minus low."""
+    high, low, close = df["high"], df["low"], df["close"]
+    previous = close.shift(1)
+    parts = pd.concat(
+        [high - low, (high - previous).abs(), (low - previous).abs()],
+        axis=1,
+    )
+    return parts.max(axis=1)
+
+
+def get_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.Series:
+    """Mean of the last `period` true ranges, including the current bar.
+
+    Bars before a full window are NaN. This is not an exponential average:
+    `ewm(span=period)` depends on where the file started and is not Wilder ATR.
+    """
+    if period < 1:
+        raise ValueError("ATR period must be positive")
+    ranges = true_range(df)
+    averaged = ranges.rolling(period, min_periods=period).mean()
+    # Index `period` is the first bar whose window starts at index 1, so every
+    # range in that window had a previous close. The bar at index 0 does not.
+    averaged.iloc[:period] = np.nan
+    return averaged
+
+
+def _median_step(index: pd.Index) -> Optional[pd.Timedelta]:
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
+        return None
+    deltas = index.to_series().diff().dropna()
+    deltas = deltas[deltas > pd.Timedelta(0)]
+    if deltas.empty:
+        return None
+    return deltas.median()
+
+
+def _event_location(df: pd.DataFrame, idx) -> Optional[int]:
+    loc = df.index.get_loc(idx)
+    if isinstance(loc, slice) or not isinstance(loc, (int, np.integer)):
+        return None
+    return int(loc)
+
+
+def _resolve_side(sides: Optional[pd.Series], idx) -> Optional[int]:
+    if sides is None:
+        return 1
+    raw = sides.loc[idx]
+    if isinstance(raw, pd.Series):
+        raw = raw.iloc[-1]
+    try:
+        side = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if side not in (1, -1):
+        return None
+    return side
+
+
+def _walk_barriers(
+    df: pd.DataFrame,
+    loc: int,
+    side: int,
+    atr: float,
+    pt_multiplier: float,
+    sl_multiplier: float,
+    max_holding_bars: int,
+) -> Optional[dict]:
+    """First barrier strictly after `loc`. None means the path cannot be labeled."""
+    end = loc + 1 + max_holding_bars
+    if end > len(df):
+        return None
+    window = df.iloc[loc:end]
+    step = _median_step(df.index)
+    if step is not None:
+        deltas = window.index.to_series().diff().iloc[1:]
+        if (deltas > step * 1.5).any() or (deltas <= pd.Timedelta(0)).any():
+            return None
+
+    entry = float(df["close"].iloc[loc])
+    if side == 1:
+        profit = entry + pt_multiplier * atr
+        stop = entry - sl_multiplier * atr
+    else:
+        profit = entry - pt_multiplier * atr
+        stop = entry + sl_multiplier * atr
+
+    highs = window["high"].iloc[1:]
+    lows = window["low"].iloc[1:]
+    closes = window["close"].iloc[1:]
+    for offset in range(len(closes)):
+        bar_high = float(highs.iloc[offset])
+        bar_low = float(lows.iloc[offset])
+        if side == 1:
+            hit_profit = bar_high >= profit
+            hit_stop = bar_low <= stop
+        else:
+            hit_profit = bar_low <= profit
+            hit_stop = bar_high >= stop
+        # A bar that trades through both levels is a stop. Wick order is unknown.
+        if hit_stop:
+            return {
+                "t1": closes.index[offset],
+                "ret": (-sl_multiplier * atr / entry) * 100.0,
+                "label": -1,
+                "touch_type": "sl",
+            }
+        if hit_profit:
+            return {
+                "t1": closes.index[offset],
+                "ret": (pt_multiplier * atr / entry) * 100.0,
+                "label": 1,
+                "touch_type": "pt",
+            }
+
+    expiry = float(closes.iloc[-1])
+    favorable = (expiry - entry) if side == 1 else (entry - expiry)
+    return {
+        "t1": closes.index[-1],
+        "ret": (favorable / entry) * 100.0,
+        "label": 0,
+        "touch_type": "timeout",
+    }
 
 
 def apply_triple_barrier(
     df: pd.DataFrame,
     events_idx: Optional[pd.Index] = None,
-    pt_multiplier: float = 5.5,
-    sl_multiplier: float = 1.75,
-    max_holding_bars: int = 24,
+    pt_multiplier: float = TP_ATR_MULT,
+    sl_multiplier: float = SL_ATR_MULT,
+    max_holding_bars: int = MAX_HOLDING_BARS,
     use_atr: bool = True,
+    sides: Optional[pd.Series] = None,
+    atr_period: int = ATR_PERIOD,
 ) -> pd.DataFrame:
     """
-    Computes path-dependent triple-barrier outcomes for each observation:
-      - Upper Barrier: entry + pt_multiplier * volatility
-      - Lower Barrier: entry - sl_multiplier * volatility
-      - Vertical Barrier: entry + max_holding_bars
-    
-    Returns DataFrame with columns:
-      - t1: Timestamp when first barrier was touched (expiration)
-      - trgt: Volatility threshold applied (in price units)
-      - ret: Realized return at barrier touch
-      - label: +1 (Bullish/TP hit first), -1 (Bearish/SL hit first), 0 (Vertical barrier hit / timeout)
-      - touch_type: 'pt', 'sl', or 'timeout'
+    Path-dependent barrier outcome for each event.
+
+    `sides` is +1 for a long and -1 for a short. The default is long, which
+    matches the long-only QuantumAI event sampler. A short profit is a down
+    move of `pt_multiplier` ATR, not an up move.
+
+    label +1 means the profit barrier was touched first. label -1 means the
+    stop, including a bar that touched both. label 0 is the vertical barrier
+    and is never rewritten from the expiry return. Events without a full ATR
+    window, without a full forward window, or with a missing bar are omitted.
     """
+    if max_holding_bars < 1:
+        raise ValueError("holding period must be positive")
     if events_idx is None:
         events_idx = df.index[:-max_holding_bars]
 
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
-
     if use_atr:
-        vol = get_atr(df, period=14)
+        vol = get_atr(df, period=atr_period)
     else:
-        vol = close * close.pct_change().rolling(20).std()
+        vol = df["close"] * df["close"].pct_change().rolling(20).std()
 
-    out = []
-
+    rows = []
     for idx in events_idx:
-        loc = df.index.get_loc(idx)
-        if loc + max_holding_bars >= len(df):
-            break
-
-        entry_price = close.iloc[loc]
-        v = vol.iloc[loc]
-        if np.isnan(v) or v <= 0:
-            v = entry_price * 0.01
-
-        upper_barrier = entry_price + (pt_multiplier * v)
-        lower_barrier = entry_price - (sl_multiplier * v)
-
-        # Scan forward along the price path
-        sub_high = high.iloc[loc + 1 : loc + 1 + max_holding_bars]
-        sub_low = low.iloc[loc + 1 : loc + 1 + max_holding_bars]
-        sub_close = close.iloc[loc + 1 : loc + 1 + max_holding_bars]
-
-        touch_time = None
-        touch_type = "timeout"
-        label = 0
-        realized_ret = 0.0
-
-        for step in range(len(sub_close)):
-            bar_time = sub_close.index[step]
-            h_bar = sub_high.iloc[step]
-            l_bar = sub_low.iloc[step]
-
-            tp_hit = h_bar >= upper_barrier
-            sl_hit = l_bar <= lower_barrier
-
-            if tp_hit and not sl_hit:
-                touch_time = bar_time
-                touch_type = "pt"
-                label = 1
-                realized_ret = (upper_barrier / entry_price - 1.0) * 100.0
-                break
-            elif sl_hit and not tp_hit:
-                touch_time = bar_time
-                touch_type = "sl"
-                label = -1
-                realized_ret = (lower_barrier / entry_price - 1.0) * 100.0
-                break
-            elif tp_hit and sl_hit:
-                # Both hit in same bar (worst-case assumption: hit SL first)
-                touch_time = bar_time
-                touch_type = "sl"
-                label = -1
-                realized_ret = (lower_barrier / entry_price - 1.0) * 100.0
-                break
-
-        if touch_time is None:
-            # Vertical barrier reached
-            touch_time = sub_close.index[-1]
-            final_p = sub_close.iloc[-1]
-            realized_ret = (final_p / entry_price - 1.0) * 100.0
-            touch_type = "timeout"
-            label = 1 if realized_ret > (0.2 * sl_multiplier * v / entry_price * 100) else (-1 if realized_ret < (-0.2 * sl_multiplier * v / entry_price * 100) else 0)
-
-        out.append({
+        loc = _event_location(df, idx)
+        if loc is None:
+            continue
+        side = _resolve_side(sides, idx)
+        if side is None:
+            continue
+        atr = float(vol.iloc[loc])
+        if not np.isfinite(atr) or atr <= 0:
+            continue
+        walked = _walk_barriers(
+            df, loc, side, atr, pt_multiplier, sl_multiplier, max_holding_bars
+        )
+        if walked is None:
+            continue
+        rows.append({
             "datetime": idx,
-            "t1": touch_time,
-            "entry_price": entry_price,
-            "trgt": v,
-            "ret": realized_ret,
-            "label": label,
-            "touch_type": touch_type,
+            "t1": walked["t1"],
+            "entry_price": float(df["close"].iloc[loc]),
+            "trgt": atr,
+            "ret": walked["ret"],
+            "label": walked["label"],
+            "touch_type": walked["touch_type"],
+            "side": side,
         })
 
-    out_df = pd.DataFrame(out).set_index("datetime")
-    return out_df
+    columns = ["t1", "entry_price", "trgt", "ret", "label", "touch_type", "side"]
+    if not rows:
+        return pd.DataFrame(columns=columns).rename_axis("datetime")
+    return pd.DataFrame(rows).set_index("datetime")
 
 
 def realized_payoff_stats(returns: Union[np.ndarray, pd.Series]) -> Dict[str, float]:
@@ -196,79 +270,42 @@ def compute_sample_uniqueness(df_events: pd.DataFrame, total_bars_index: pd.Inde
 def generate_meta_labels(
     df: pd.DataFrame,
     primary_signals: pd.Series,
-    pt_multiplier: float = 5.5,
-    sl_multiplier: float = 1.75,
-    max_holding_bars: int = 24,
+    pt_multiplier: float = TP_ATR_MULT,
+    sl_multiplier: float = SL_ATR_MULT,
+    max_holding_bars: int = MAX_HOLDING_BARS,
+    atr_period: int = ATR_PERIOD,
 ) -> pd.DataFrame:
     """
-    Generates Meta-Labels for a primary strategy signal (+1 for Long, -1 for Short):
-      meta_label = 1 : Primary signal touched profit-taking barrier before stop-loss
-      meta_label = 0 : Primary signal failed (stopped out or timed out at loss)
-    
-    This trains the secondary model to predict trade execution quality / size.
+    Meta-label for a primary signal (+1 long, -1 short).
+
+    meta_label 1: the profit barrier was touched before the stop.
+    meta_label 0: the stop was touched, both levels printed in one bar, or
+    the vertical barrier expired. A profitable timeout is not a success.
+    Events with no ATR or a hole in the forward bars are omitted.
     """
     events_idx = primary_signals[primary_signals != 0].index
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
-    atr = get_atr(df, period=14)
-
-    meta_records = []
-
-    for idx in events_idx:
-        loc = df.index.get_loc(idx)
-        if loc + max_holding_bars >= len(df):
-            break
-
-        side = int(primary_signals.loc[idx])
-        entry_p = close.iloc[loc]
-        v = atr.iloc[loc]
-
-        if side == 1:  # Long signal
-            upper = entry_p + (pt_multiplier * v)
-            lower = entry_p - (sl_multiplier * v)
-        else:  # Short signal
-            upper = entry_p - (pt_multiplier * v)
-            lower = entry_p + (sl_multiplier * v)
-
-        sub_h = high.iloc[loc + 1 : loc + 1 + max_holding_bars]
-        sub_l = low.iloc[loc + 1 : loc + 1 + max_holding_bars]
-        sub_c = close.iloc[loc + 1 : loc + 1 + max_holding_bars]
-
-        success = 0
-        touch_t = sub_c.index[-1]
-
-        for step in range(len(sub_c)):
-            h_bar = sub_h.iloc[step]
-            l_bar = sub_l.iloc[step]
-            b_time = sub_c.index[step]
-
-            if side == 1:
-                hit_tp = h_bar >= upper
-                hit_sl = l_bar <= lower
-            else:
-                hit_tp = l_bar <= upper
-                hit_sl = h_bar >= lower
-
-            if hit_tp and not hit_sl:
-                success = 1
-                touch_t = b_time
-                break
-            elif hit_sl:
-                success = 0
-                touch_t = b_time
-                break
-
-        meta_records.append({
-            "datetime": idx,
-            "t1": touch_t,
-            "side": side,
-            "entry_price": entry_p,
-            "meta_label": success,
-        })
-
-    meta_df = pd.DataFrame(meta_records).set_index("datetime")
-    return meta_df
+    labeled = apply_triple_barrier(
+        df,
+        events_idx=events_idx,
+        pt_multiplier=pt_multiplier,
+        sl_multiplier=sl_multiplier,
+        max_holding_bars=max_holding_bars,
+        sides=primary_signals,
+        atr_period=atr_period,
+    )
+    if labeled.empty:
+        return pd.DataFrame(columns=["t1", "side", "entry_price", "meta_label"]).rename_axis("datetime")
+    meta = pd.DataFrame(
+        {
+            "t1": labeled["t1"],
+            "side": labeled["side"],
+            "entry_price": labeled["entry_price"],
+            "meta_label": (labeled["label"] == 1).astype(int),
+        },
+        index=labeled.index,
+    )
+    meta.index.name = "datetime"
+    return meta
 
 
 if __name__ == "__main__":

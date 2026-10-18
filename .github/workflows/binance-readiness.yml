@@ -1,0 +1,98 @@
+name: Binance futures readiness
+
+# Read-only. No orders. Prints balances and flags, not keys.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Read Binance futures account
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          host="${SSH_HOST:-72.60.18.113}"
+          user="${SSH_USER:-root}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$host" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "${user}@${host}" 'bash -s' << 'REMOTE'
+          set -euo pipefail
+          cd /root/ai-trading-platform-v3
+          python3 - << 'PY'
+          from pathlib import Path
+          env = {}
+          for line in Path(".env").read_text(encoding="utf-8").splitlines():
+              if not line or line.lstrip().startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              env[key] = value.strip().strip('"').strip("'")
+          keys = [
+              "TRADING_MODE", "BINANCE_PAPER_PARALLEL", "BINANCE_TESTNET", "BINANCE_DRY_RUN",
+              "BINANCE_LEVERAGE", "BINANCE_MARGIN_TYPE", "TRADE_USDT_AMOUNT",
+              "MIN_AVAILABLE_MARGIN_USDT", "TRADING_KILL_FLOOR_USDT", "RISK_MAX_DRAWDOWN_PCT",
+              "RISK_MAX_DAILY_LOSS_PCT", "MAX_POSITIONS", "BINANCE_MAX_OPEN_POSITIONS",
+              "EQUITY_SIZING_ENABLED", "RISK_PER_TRADE_PCT", "ACTIVE_BROKER", "CTRADER_ENV",
+              "CTRADER_PAPER_MODE",
+          ]
+          for key in keys:
+              print("flag", key, env.get(key, "unset"))
+          print("binance_key_set", bool(env.get("BINANCE_API_KEY")))
+          print("binance_secret_set", bool(env.get("BINANCE_SECRET_KEY") or env.get("BINANCE_API_SECRET")))
+          PY
+          docker exec -i ai-trading-backend python - << 'PY'
+          from backend.services.binance_futures_service import binance_futures_broker
+          from backend.services.equity_scope import describe_equity_books
+          from backend.services.trading_mode import live_binance_orders_allowed
+
+          print("adapter_dry_run", binance_futures_broker.dry_run)
+          print("adapter_testnet", binance_futures_broker.testnet)
+          print("adapter_leverage", binance_futures_broker.leverage)
+          print("adapter_margin", binance_futures_broker.margin_type)
+          print("orders_allowed", live_binance_orders_allowed())
+          books = describe_equity_books()
+          for key in (
+              "binance_money_mode", "ctrader_money_mode", "split_book",
+              "risk_broker", "equity_scope", "binance_env", "ctrader_env",
+          ):
+              print("scope", key, books.get(key))
+          try:
+              bal = binance_futures_broker.get_balance(raise_on_error=True)
+              print("futures_wallet", round(float(bal.get("balance") or 0), 4))
+              print("futures_available", round(float(bal.get("available") or 0), 4))
+              print("futures_equity", round(float(bal.get("equity") or 0), 4))
+              print("futures_upnl", round(float(bal.get("unrealized_pnl") or 0), 4))
+              print("futures_margin", round(float(bal.get("margin_used") or 0), 4))
+          except Exception as exc:
+              msg = str(exc).replace("\n", " ")[:180]
+              print("futures_balance_error", type(exc).__name__, msg)
+          try:
+              positions = binance_futures_broker.get_positions(raise_on_error=True)
+              print("futures_open", len(positions))
+              for pos in positions:
+                  print(
+                      "futures_pos", pos.get("symbol"), pos.get("side"),
+                      "qty", pos.get("quantity"),
+                      "entry", pos.get("entry_price"),
+                      "upnl", pos.get("unrealized_pnl"),
+                      "lev", pos.get("leverage"),
+                  )
+          except Exception as exc:
+              msg = str(exc).replace("\n", " ")[:180]
+              print("futures_positions_error", type(exc).__name__, msg)
+          PY
+          echo "--- binance log ---"
+          docker logs --since 6h ai-trading-backend 2>&1 \
+            | grep -Ei 'binance|futures' \
+            | grep -Ei 'ERROR|WARNING|DRY-RUN|SAFETY|insufficient|Invalid API|code=-' \
+            | grep -viE 'api.key|secret|signature' \
+            | sed -E 's/[A-Za-z0-9]{32,}/[redacted]/g' \
+            | tail -40
+          REMOTE

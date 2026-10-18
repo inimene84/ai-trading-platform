@@ -1911,6 +1911,12 @@ class CTraderService(BrokerService):
             sl = self.missing_stop_price(
                 symbol, side, entry, pos.get("current_price")
             )
+            if sl is None or float(sl) <= 0:
+                logger.error(
+                    "cTrader refusing non-positive stop for %s position %s: %s",
+                    symbol, pid, sl,
+                )
+                continue
             res = self.amend_position_sltp(
                 pos.get("position_id"),
                 stop_loss=sl,
