@@ -15,7 +15,13 @@ from decimal import Decimal
 from typing import Optional, Dict, List, Any
 
 from backend.brokers.base import BrokerService
-from backend.services.ctrader_oauth import account_uses_live_host, ctrader_env, protobuf_host
+from backend.services.ctrader_oauth import (
+    DEMO_PROTOBUF_HOST,
+    LIVE_PROTOBUF_HOST,
+    account_uses_live_host,
+    ctrader_env,
+    protobuf_host,
+)
 from backend.services.ctrader_tokens import token_store
 from backend.services.trading_mode import live_ctrader_orders_allowed
 
@@ -1153,7 +1159,7 @@ class CTraderService(BrokerService):
         ``is_live`` here is account type (CTRADER_ENV=live + confirm), not
         QT execute / TRADING_MODE. Demo hedging must stay on demo host.
         """
-        if host_override == "live.ctraderapi.com" and not is_live:
+        if host_override == LIVE_PROTOBUF_HOST and not is_live:
             return None
         return host_override
 
@@ -1171,11 +1177,13 @@ class CTraderService(BrokerService):
         """
         if already_flipped:
             return None
-        cur = str(current_host or "")
-        if "live.ctraderapi.com" in cur:
-            return "demo.ctraderapi.com"
+        # Exact hostname only — substring "in" matches attacker hosts such as
+        # live.ctraderapi.com.evil.example (CodeQL py/incomplete-url-substring-sanitization).
+        cur = str(current_host or "").strip().lower()
+        if cur == LIVE_PROTOBUF_HOST:
+            return DEMO_PROTOBUF_HOST
         if is_live:
-            return "live.ctraderapi.com"
+            return LIVE_PROTOBUF_HOST
         return None
 
     def ensure_connected(self) -> bool:
@@ -1231,7 +1239,7 @@ class CTraderService(BrokerService):
             self._host_override, account_live_host, str(self._last_protocol_error or "")
         )
         if cleaned != self._host_override:
-            if self._host_override == "live.ctraderapi.com" and not account_live_host:
+            if self._host_override == LIVE_PROTOBUF_HOST and not account_live_host:
                 logger.error(
                     "Ignoring cTrader live host override — account is demo/unconfirmed "
                     "(CTRADER_ENV=%s)",

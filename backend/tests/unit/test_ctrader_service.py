@@ -567,6 +567,13 @@ def test_alt_host_after_token_invalid_flips_once():
     assert CTraderService.alt_host_after_token_invalid(
         "demo.ctraderapi.com", True, False
     ) == "live.ctraderapi.com"
+    # Substring lookalikes are not the live protobuf host.
+    assert CTraderService.alt_host_after_token_invalid(
+        "live.ctraderapi.com.evil.example", False, False
+    ) is None
+    assert CTraderService.alt_host_after_token_invalid(
+        "not-live.ctraderapi.com", False, False
+    ) is None
     assert CTraderService.alt_host_after_token_invalid(
         "demo.ctraderapi.com", False, False
     ) is None
