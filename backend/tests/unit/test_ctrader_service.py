@@ -2,6 +2,7 @@
 Unit tests for cTrader Open API Service & Token Lifecycle Manager.
 Verifies BrokerService protocol adherence, symbol mapping, lot conversions, and paper simulation.
 """
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -422,15 +423,23 @@ def test_get_trendbars_live_missing_symbol_id_returns_empty():
     svc._authenticated = True
     svc._protocol = MagicMock()
     svc._symbol_ids.pop("EURUSD", None)
+    svc._symbol_ids.pop("NZDJPY", None)
     svc._trendbar_cache.clear()
+    svc._trendbar_last_req.clear()
 
     bars = svc.get_trendbars("EURUSD", "H1", count=40)
     assert bars == []
+    # Do not reserve the 45s TTL: the catalog may load on the next scan.
+    assert not any(key.startswith("EURUSD_") for key in svc._trendbar_last_req)
+    assert svc.get_trendbars("NZDJPY", "M5", count=40) == []
+    assert not any(key.startswith("NZDJPY_") for key in svc._trendbar_last_req)
 
 
 def test_trendbar_lookback_is_count_bounded_for_m5():
-    """M5 requests must not ask for a 7-day payload."""
-    ms = CTraderService.trendbar_lookback_ms(5, 40)
+    """M5 requests must not ask for a 7-day payload (mid-week, session open)."""
+    wednesday = datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc)
+    now_ms = int(wednesday.timestamp() * 1000)
+    ms = CTraderService.trendbar_lookback_ms(5, 40, now_ms=now_ms, symbol="EURUSD")
     seven_days = 7 * 86400 * 1000
     assert ms < seven_days
     assert ms >= 40 * 300 * 1000

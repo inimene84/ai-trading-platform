@@ -11,10 +11,19 @@ import os
 import struct
 import threading
 import time
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional, Dict, List, Any
 
 from backend.brokers.base import BrokerService
+from backend.services.ctrader_bar_pacer import (
+    TRENDBAR_CACHE_TTL_SEC,
+    TrendbarRequestPacer,
+    env_bar_req_per_sec,
+    fair_symbol_order,
+    rate_limit_cooldown_sec,
+)
 from backend.services.ctrader_oauth import (
     DEMO_PROTOBUF_HOST,
     LIVE_PROTOBUF_HOST,
@@ -23,6 +32,7 @@ from backend.services.ctrader_oauth import (
     protobuf_host,
 )
 from backend.services.ctrader_tokens import token_store
+from backend.services.market_hours import market_hours_lookback_ms
 from backend.services.trading_mode import live_ctrader_orders_allowed
 
 logger = logging.getLogger(__name__)
@@ -455,6 +465,8 @@ class CTraderProtocol:
                     })
                 self._service._trendbar_cache[f"{sym_name}_{tb_res.period}"] = bars
                 logger.info(f"cTrader received {len(bars)} trendbars for {sym_name} (period={tb_res.period})")
+                if bars:
+                    self._service.note_trendbar_success(sym_name)
                 waiter = self._service._trendbar_events.get(f"{sym_name}_{tb_res.period}")
                 if waiter is not None:
                     waiter.set()
@@ -483,14 +495,13 @@ class CTraderProtocol:
                 self._service._last_protocol_error = f"{code} — {desc}".strip(" —")
                 if not CTraderService.protocol_error_should_disconnect(code, desc):
                     # Spotware is throttling us: serve stale trendbar cache and
-                    # stop making fresh requests for a minute. Do not drop the
-                    # socket — a disconnect re-auths, reloads the symbol catalog,
-                    # and reconciles, which is what piles onto the limiter.
-                    cooldown = float(os.getenv("CTRADER_RATE_LIMIT_COOLDOWN_SEC", "180") or 180)
-                    self._service._rate_limited_until = time.time() + max(60.0, cooldown)
+                    # stop making fresh requests. Do not drop the socket — a
+                    # disconnect re-auths, reloads the symbol catalog, and
+                    # reconciles, which is what piles onto the limiter.
+                    cooldown = self._service.apply_rate_limit_cooldown()
                     logger.warning(
                         "cTrader rate-limited — %.0fs request cooldown, session kept",
-                        max(60.0, cooldown),
+                        cooldown,
                     )
                     return
                 self._service._auth_event.set()
@@ -612,16 +623,36 @@ class CTraderService(BrokerService):
     TRENDBAR_LOOKBACK_CAP_MS = 7 * 86400 * 1000
 
     @classmethod
-    def trendbar_lookback_ms(cls, period_enum: int, count: int) -> int:
-        """Bound a live trendbar request to about ``count`` bars.
+    def trendbar_lookback_ms(
+        cls,
+        period_enum: int,
+        count: int,
+        now_ms: int | None = None,
+        symbol: str = "EURUSD",
+    ) -> int:
+        """Bound a live trendbar request to about ``count`` open-market bars.
 
         Callers only keep the tail (``cached[-count:]``). Asking Spotware for
         a flat 7 days of M5 bars (~2000 rows) on every refresh is what trips
         BLOCKED_PAYLOAD_TYPE. Daily and weekly requests stay capped at 7 days.
+
+        The wall-clock window is market-hours aware: when it overlaps the
+        weekend close (Fri 21:00–Sun 21:00 UTC) or the weekday daily break,
+        the start is extended by that closed duration so a 40×M5 request
+        still covers ~40 tradable bars after a Friday close / Sunday reopen.
         """
         sec = cls.PERIOD_SECONDS.get(int(period_enum), 300)
         bars = max(int(count), 1) + 2
-        return min(bars * sec * 1000, cls.TRENDBAR_LOOKBACK_CAP_MS)
+        open_ms = min(bars * sec * 1000, cls.TRENDBAR_LOOKBACK_CAP_MS)
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
+        now = datetime.fromtimestamp(now_ms / 1000.0, tz=timezone.utc)
+        return market_hours_lookback_ms(
+            open_ms,
+            now=now,
+            symbol=symbol,
+            cap_ms=cls.TRENDBAR_LOOKBACK_CAP_MS,
+        )
 
     @staticmethod
     def protocol_error_should_disconnect(code: str, desc: str) -> bool:
@@ -629,6 +660,10 @@ class CTraderService(BrokerService):
         if code == "BLOCKED_PAYLOAD_TYPE" or "rate limit" in (desc or "").lower():
             return False
         return True
+
+    @staticmethod
+    def rate_limit_cooldown_sec(strikes: int, base: float | None = None) -> float:
+        return rate_limit_cooldown_sec(strikes, base=base)
 
     def __init__(self):
         self._connected = False
@@ -659,6 +694,11 @@ class CTraderService(BrokerService):
         self._reconnect_delay: float = 5.0
         self._last_protocol_error: Optional[str] = None
         self._rate_limited_until: float = 0.0
+        self._rate_limit_strikes: int = 0
+        self._rate_limit_last_at: float = 0.0
+        self._bar_pacer = TrendbarRequestPacer(env_bar_req_per_sec())
+        self._trendbar_ok_at: Dict[str, float] = {}
+        self._scan_cursor: int = 0
         self._host_override: Optional[str] = None
         self._active_host: Optional[str] = None
         self._retry_correct_host: bool = False
@@ -668,10 +708,50 @@ class CTraderService(BrokerService):
         self._order_ack_lock = threading.Lock()
         self._order_ack_waiters: List[Dict[str, Any]] = []
         self._trendbar_last_req: Dict[str, float] = {}
+        self._trendbar_req_lock = threading.Lock()
         self._trendbar_events: Dict[str, threading.Event] = {}
         self._recent_deals: Dict[str, Dict[str, Any]] = {}
         self._on_positions_changed_callbacks: List[Any] = []
         self._sl_restore_sent: Dict[str, float] = {}
+
+    def note_trendbar_success(self, symbol: str, now: float | None = None) -> None:
+        """Record a live trendbar payload so scan rotation can un-starve later symbols."""
+        ts = time.time() if now is None else float(now)
+        name = (symbol or "").upper()
+        if not name:
+            return
+        self._trendbar_ok_at[name] = ts
+        # In-flight successes that land during a BLOCKED_PAYLOAD_TYPE cooldown
+        # must not wipe the strike count, or backoff never escalates.
+        if ts >= self._rate_limited_until:
+            self._rate_limit_strikes = 0
+
+    def apply_rate_limit_cooldown(self, now: float | None = None) -> float:
+        """BLOCKED_PAYLOAD_TYPE cooldown with exponential backoff on repeats."""
+        ts = time.time() if now is None else float(now)
+        self._rate_limit_strikes = max(0, int(self._rate_limit_strikes)) + 1
+        cooldown = self.rate_limit_cooldown_sec(self._rate_limit_strikes)
+        self._rate_limited_until = ts + cooldown
+        self._rate_limit_last_at = ts
+        return cooldown
+
+    def order_symbols_for_scan(
+        self,
+        symbols: Sequence[str],
+        last_ok_at: Mapping[str, float] | None = None,
+        cursor: int | None = None,
+        advance: bool = True,
+    ) -> list[str]:
+        """Rotate and prioritize starved FX/metals so majors cannot monopolize bar slots."""
+        idx = self._scan_cursor if cursor is None else int(cursor)
+        ordered = fair_symbol_order(
+            symbols,
+            last_ok_at if last_ok_at is not None else self._trendbar_ok_at,
+            idx,
+        )
+        if advance and ordered:
+            self._scan_cursor = idx + 1
+        return ordered
 
     # Spotware volume is in cents of a unit (0.01 of 1 unit of the base asset).
     # FX: 1.00 lot = 100,000 units = 10,000,000 protocol volume.
@@ -2305,43 +2385,97 @@ class CTraderService(BrokerService):
             if time.time() < self._rate_limited_until:
                 cached = self._trendbar_cache.get(cache_key) or []
                 return cached[-count:] if cached else []
-            last = self._trendbar_last_req.get(cache_key, 0)
-            if time.time() - last < 45:
+
+            join_waiter: threading.Event | None = None
+            send_waiter: threading.Event | None = None
+            with self._trendbar_req_lock:
+                last = self._trendbar_last_req.get(cache_key, 0)
                 cached = self._trendbar_cache.get(cache_key) or []
-                if cached:
+                now_req = time.time()
+                if cached and now_req - last < TRENDBAR_CACHE_TTL_SEC:
                     return cached[-count:]
-            else:
-                try:
-                    from ctrader_open_api.messages import OpenApiMessages_pb2 as msgs
-                    from twisted.internet import reactor
+                in_flight = self._trendbar_events.get(cache_key)
+                if in_flight is not None and not in_flight.is_set():
+                    join_waiter = in_flight
+                elif now_req - last < TRENDBAR_CACHE_TTL_SEC:
+                    return []
 
-                    sym_id = self._symbol_ids.get(ct_symbol)
-                    if not sym_id:
-                        logger.warning(
-                            "No cTrader symbol id for %s; skipping live trendbar request",
-                            ct_symbol,
-                        )
-                    else:
-                        now_ms = int(time.time() * 1000)
-                        f_ts = from_ts or (now_ms - self.trendbar_lookback_ms(period_enum, count))
-                        t_ts = to_ts or now_ms
+            if join_waiter is not None:
+                join_waiter.wait(timeout=2.0)
+                cached = self._trendbar_cache.get(cache_key) or []
+                return cached[-count:] if cached else []
 
-                        req = msgs.ProtoOAGetTrendbarsReq()
-                        req.ctidTraderAccountId = self._account_id or 0
-                        req.symbolId = sym_id
-                        req.period = period_enum
-                        req.fromTimestamp = f_ts
-                        req.toTimestamp = t_ts
+            sym_id = self._symbol_ids.get(ct_symbol)
+            if not sym_id:
+                logger.warning(
+                    "No cTrader symbol id for %s; skipping live trendbar request",
+                    ct_symbol,
+                )
+                return []
 
-                        # Register the waiter before sending so a fast response cannot
-                        # arrive (and be missed) before we start waiting.
-                        waiter = threading.Event()
-                        self._trendbar_events[cache_key] = waiter
-                        reactor.callFromThread(lambda: self._protocol._send(req, 2137))
-                        self._trendbar_last_req[cache_key] = time.time()
-                        waiter.wait(timeout=2.0)
-                except Exception as e:
-                    logger.warning(f"Live trendbar request failed: {e}")
+            with self._trendbar_req_lock:
+                last = self._trendbar_last_req.get(cache_key, 0)
+                cached = self._trendbar_cache.get(cache_key) or []
+                now_req = time.time()
+                if cached and now_req - last < TRENDBAR_CACHE_TTL_SEC:
+                    return cached[-count:]
+                in_flight = self._trendbar_events.get(cache_key)
+                if in_flight is not None and not in_flight.is_set():
+                    join_waiter = in_flight
+                elif now_req - last < TRENDBAR_CACHE_TTL_SEC:
+                    return []
+                else:
+                    send_waiter = threading.Event()
+                    self._trendbar_events[cache_key] = send_waiter
+                    # Reserve TTL only as the sender, after we know a request
+                    # will go out, so a missing catalog id cannot lock a symbol.
+                    self._trendbar_last_req[cache_key] = time.time()
+
+            if join_waiter is not None:
+                join_waiter.wait(timeout=2.0)
+                cached = self._trendbar_cache.get(cache_key) or []
+                return cached[-count:] if cached else []
+
+            sent = False
+            try:
+                from ctrader_open_api.messages import OpenApiMessages_pb2 as msgs
+                from twisted.internet import reactor
+
+                now_ms = int(time.time() * 1000)
+                f_ts = from_ts or (
+                    now_ms
+                    - self.trendbar_lookback_ms(
+                        period_enum, count, now_ms=now_ms, symbol=ct_symbol
+                    )
+                )
+                t_ts = to_ts or now_ms
+
+                req = msgs.ProtoOAGetTrendbarsReq()
+                req.ctidTraderAccountId = self._account_id or 0
+                req.symbolId = sym_id
+                req.period = period_enum
+                req.fromTimestamp = f_ts
+                req.toTimestamp = t_ts
+
+                self._bar_pacer.acquire()
+                reactor.callFromThread(lambda: self._protocol._send(req, 2137))
+                sent = True
+                if send_waiter is not None:
+                    send_waiter.wait(timeout=2.0)
+                    if not send_waiter.is_set():
+                        with self._trendbar_req_lock:
+                            if self._trendbar_events.get(cache_key) is send_waiter:
+                                self._trendbar_events.pop(cache_key, None)
+                        send_waiter.set()
+            except Exception as e:
+                logger.warning(f"Live trendbar request failed: {e}")
+                if not sent:
+                    with self._trendbar_req_lock:
+                        if send_waiter is not None and self._trendbar_events.get(cache_key) is send_waiter:
+                            self._trendbar_events.pop(cache_key, None)
+                        self._trendbar_last_req.pop(cache_key, None)
+                    if send_waiter is not None:
+                        send_waiter.set()
 
             cached = self._trendbar_cache.get(cache_key) or []
             if cached:

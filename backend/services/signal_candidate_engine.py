@@ -1362,6 +1362,9 @@ class SignalCandidateEngine:
                 # Crypto
                 "BTCUSDT", "ETHUSDT", "SOLUSDT",
             ]
+        else:
+            universe = list(universe)
+        universe = ctrader_service.order_symbols_for_scan(universe)
 
         self._equity_cache.clear()
         self._prune_terminal_candidates()
@@ -1390,7 +1393,9 @@ class SignalCandidateEngine:
 
                 # Ingest bars
                 if broker == "ctrader":
-                    bars = ctrader_service.get_trendbars(sym, timeframe, count=40)
+                    bars = await asyncio.to_thread(
+                        ctrader_service.get_trendbars, sym, timeframe, count=40
+                    )
                 else:
                     bars = await binance_market_data.get_klines(
                         sym, interval=tf_to_binance_interval(timeframe), limit=40
@@ -1609,7 +1614,9 @@ class SignalCandidateEngine:
                 if already:
                     continue
 
-                bars = ctrader_service.get_trendbars(matched_sym, "M5", count=30)
+                bars = await asyncio.to_thread(
+                    ctrader_service.get_trendbars, matched_sym, "M5", count=30
+                )
                 features = self._compute_features(bars)
                 if not features:
                     logger.warning(

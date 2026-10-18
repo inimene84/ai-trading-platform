@@ -219,3 +219,126 @@ def evaluate_entry_cutoff(
     result["reason"] = reason if resolved == "enforce" else f"shadow: would block ({reason})"
     result["blocked"] = resolved == "enforce"
     return result
+
+
+LOOKBACK_CAP_MS = 7 * 86400 * 1000
+
+
+def is_closed_for_lookback(symbol: str, now: datetime | None = None) -> bool:
+    """True when FX/metals print no bars (weekend close or weekday daily break).
+
+    Crypto is 24/7. Daily-break is included here so trendbar windows cover
+    the requested open-market bar count; ``is_venue_open`` stays weekend-only
+    so entry gating is unchanged.
+    """
+    if is_crypto_symbol(symbol):
+        return False
+    current = _as_utc(now)
+    if not is_venue_open(symbol, current):
+        return True
+    return is_daily_break(current)
+
+
+def _overlap_ms(a0: datetime, a1: datetime, b0: datetime, b1: datetime) -> int:
+    lo = max(a0, b0)
+    hi = min(a1, b1)
+    if hi <= lo:
+        return 0
+    return int((hi - lo).total_seconds() * 1000)
+
+
+def _weekend_closed_ms(start: datetime, end: datetime) -> int:
+    """Milliseconds of ``[start, end)`` inside Fri 21:00–Sun 21:00 UTC."""
+    start = _as_utc(start)
+    end = _as_utc(end)
+    if end <= start:
+        return 0
+    days_since_friday = (start.weekday() - SESSION_CLOSE_WEEKDAY) % 7
+    friday = (start - timedelta(days=days_since_friday)).replace(
+        hour=SESSION_CLOSE_HOUR, minute=0, second=0, microsecond=0
+    )
+    if friday > start:
+        friday -= timedelta(days=7)
+    weekend_span_days = (SESSION_OPEN_WEEKDAY - SESSION_CLOSE_WEEKDAY) % 7
+    closed = 0
+    cursor = friday
+    while cursor < end:
+        sun_open = (cursor + timedelta(days=weekend_span_days)).replace(
+            hour=SESSION_OPEN_HOUR, minute=0, second=0, microsecond=0
+        )
+        closed += _overlap_ms(start, end, cursor, sun_open)
+        cursor += timedelta(days=7)
+    return closed
+
+
+def closed_ms_in_range(
+    start: datetime,
+    end: datetime,
+    symbol: str = "EURUSD",
+) -> int:
+    """Milliseconds of ``[start, end)`` with no FX/metals prints."""
+    if is_crypto_symbol(symbol):
+        return 0
+    start = _as_utc(start)
+    end = _as_utc(end)
+    if end <= start:
+        return 0
+
+    closed = _weekend_closed_ms(start, end)
+
+    day = start.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    last = end.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    while day <= last:
+        start_h, start_m, end_h, end_m = daily_break_window()
+        br0 = day.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+        br1 = day.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+        if br1 <= br0:
+            br1 += timedelta(days=1)
+        if is_daily_break(br0):
+            br_ms = _overlap_ms(start, end, br0, br1)
+            # Custom break windows that spill into Friday 21:00+ are already
+            # counted as weekend — do not double-count that intersection.
+            already = _weekend_closed_ms(max(start, br0), min(end, br1))
+            closed += max(0, br_ms - already)
+        day += timedelta(days=1)
+    return closed
+
+
+def market_hours_lookback_ms(
+    needed_open_ms: int,
+    now: datetime | None = None,
+    symbol: str = "EURUSD",
+    cap_ms: int = LOOKBACK_CAP_MS,
+) -> int:
+    """Wall-clock ms covering ``needed_open_ms`` of venue-open time.
+
+    When the naive window overlaps the weekend close (Fri 21:00–Sun 21:00 UTC)
+    or the weekday daily break, the start is pushed back by that closed
+    duration so a 40×M5 request still yields ~40 tradable bars.
+    """
+    needed = max(0, int(needed_open_ms))
+    cap = max(0, int(cap_ms))
+    if needed == 0:
+        return 0
+    if needed >= cap:
+        return cap
+    current = _as_utc(now)
+    if is_crypto_symbol(symbol):
+        return min(needed, cap)
+
+    def open_ms_in(wall_ms: int) -> int:
+        start = current - timedelta(milliseconds=wall_ms)
+        return int(wall_ms) - closed_ms_in_range(start, current, symbol)
+
+    if open_ms_in(needed) >= needed:
+        return needed
+    lo, hi = needed, cap
+    best = cap
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if open_ms_in(mid) >= needed:
+            best = mid
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    return int(best)

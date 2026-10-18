@@ -1,11 +1,14 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from backend.services.market_hours import (
+    closed_ms_in_range,
     entry_cutoff_blocks,
     evaluate_entry_cutoff,
+    is_closed_for_lookback,
     is_crypto_symbol,
     is_daily_break,
     is_venue_open,
+    market_hours_lookback_ms,
     time_until_venue_close,
 )
 
@@ -78,3 +81,64 @@ def test_entry_cutoff_default_shadow_does_not_block():
     off = evaluate_entry_cutoff("EURUSD", friday_late, minutes=30, mode="off")
     assert off["blocked"] is False
     assert evaluate_entry_cutoff("BTCUSDT", friday_late, mode="enforce")["blocked"] is False
+
+
+def _ms(hours: float) -> int:
+    return int(hours * 3600 * 1000)
+
+
+def test_weekend_closed_ms_is_forty_eight_hours():
+    friday_close = datetime(2026, 10, 16, 21, 0, tzinfo=timezone.utc)
+    sunday_open = datetime(2026, 10, 18, 21, 0, tzinfo=timezone.utc)
+    assert closed_ms_in_range(friday_close, sunday_open, "EURUSD") == _ms(48)
+    assert is_closed_for_lookback("EURUSD", datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)) is True
+    assert is_closed_for_lookback("BTCUSDT", datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)) is False
+
+
+def test_lookback_sunday_after_open_extends_by_weekend_close():
+    """40×M5 needs 3.5h of prints; 1h after Sunday 21:00 that window is mostly closed."""
+    sunday = datetime(2026, 10, 18, 22, 0, tzinfo=timezone.utc)
+    needed = (40 + 2) * 300 * 1000
+    ms = market_hours_lookback_ms(needed, now=sunday, symbol="EURUSD")
+    assert ms == needed + _ms(48)
+    start = sunday - timedelta(milliseconds=ms)
+    assert start == datetime(2026, 10, 16, 18, 30, tzinfo=timezone.utc)
+    assert closed_ms_in_range(start, sunday, "EURUSD") == _ms(48)
+
+
+def test_lookback_monday_open_does_not_extend_once_session_covers_count():
+    """Monday 01:00 UTC is 4h after Sunday open — a 3.5h M5 window stays inside the session."""
+    monday = datetime(2026, 10, 19, 1, 0, tzinfo=timezone.utc)
+    needed = (40 + 2) * 300 * 1000
+    ms = market_hours_lookback_ms(needed, now=monday, symbol="EURUSD")
+    assert ms == needed
+
+
+def test_lookback_monday_morning_midweek_is_count_bounded():
+    monday_late = datetime(2026, 10, 19, 10, 0, tzinfo=timezone.utc)
+    needed = (40 + 2) * 300 * 1000
+    assert market_hours_lookback_ms(needed, now=monday_late, symbol="EURUSD") == needed
+
+
+def test_lookback_extends_across_weekday_daily_break():
+    monday_break = datetime(2026, 10, 19, 21, 30, tzinfo=timezone.utc)
+    needed = (40 + 2) * 300 * 1000
+    ms = market_hours_lookback_ms(needed, now=monday_break, symbol="XAUUSD")
+    assert ms == needed + _ms(0.5)
+    assert is_closed_for_lookback("XAUUSD", monday_break) is True
+    assert is_venue_open("XAUUSD", monday_break) is True  # entry gating unchanged
+
+
+def test_custom_friday_daily_break_does_not_double_count_weekend(monkeypatch):
+    monkeypatch.setenv("CTRADER_DAILY_BREAK_START_UTC", "20:00")
+    monkeypatch.setenv("CTRADER_DAILY_BREAK_END_UTC", "22:00")
+    start = datetime(2026, 10, 16, 19, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 10, 16, 23, 0, tzinfo=timezone.utc)
+    # Fri 20:00–21:00 daily break + Fri 21:00–23:00 weekend = 3h, not 4h.
+    assert closed_ms_in_range(start, end, "EURUSD") == _ms(3)
+
+
+def test_lookback_crypto_ignores_weekend():
+    sunday = datetime(2026, 10, 18, 22, 0, tzinfo=timezone.utc)
+    needed = (40 + 2) * 300 * 1000
+    assert market_hours_lookback_ms(needed, now=sunday, symbol="BTCUSDT") == needed
