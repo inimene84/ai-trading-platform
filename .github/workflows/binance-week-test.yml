@@ -22,7 +22,7 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           set -euo pipefail
-          host="${SSH_HOST:-72.60.18.113}"
+          host="${SSH_HOST:?SSH_HOST secret is required}"
           user="${SSH_USER:-root}"
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
