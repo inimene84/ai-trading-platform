@@ -8,8 +8,11 @@ Spotware OAuth endpoints:
 Full OAuth flow (one-time setup):
   1. Build the authorize URL (see get_auth_url())
   2. Open it in a browser, log in with your cTID
-  3. Copy the `code` from the redirect URL
-  4. Call exchange_code_for_token(code) → saves tokens to .env / file
+  3. Approve the demo hedging account (same CTRADER_ACCOUNT_ID) unless
+     CTRADER_ENV=live is an explicit live-money confirmation
+  4. Copy the `code` from the redirect URL
+  5. Call exchange_code_for_token(code) → saves tokens to .env / file
+  Connect/enable then uses demo.ctraderapi.com when CTRADER_ENV=demo.
 
 Afterwards, use refresh_access_token() to renew silently.
 """

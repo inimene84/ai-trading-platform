@@ -164,7 +164,7 @@ _DEFAULT_REGISTRY: dict[str, ModelConfig] = {
         api_key_env="OPENROUTER_API_KEY",
     ),
     "fallback_2": ModelConfig(
-        name=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+        name=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5"),
         provider="anthropic",
         tier="balanced",
         api_key_env="ANTHROPIC_API_KEY",
