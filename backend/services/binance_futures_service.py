@@ -18,6 +18,22 @@ from dotenv import load_dotenv
 
 from backend.services.trading_mode import live_binance_orders_allowed
 from backend.services.multi_asset_bars import classify_symbol
+from backend.services.binance_fees import fetch_commission_rates, log_fill_fees, summarize_fills
+from backend.services.binance_maker import (
+    book_walked_away,
+    gtx_rejected_as_taker,
+    is_maker_tp_order,
+    maker_close_enabled,
+    maker_requote_enabled,
+    maker_requote_max,
+    maker_tp_enabled,
+    maker_tp_market_flatten_params,
+    maker_tp_params,
+    maker_tp_timeout_sec,
+    maker_wait_sec,
+    price_traded_through_tp,
+    take_profit_market_params,
+)
 
 load_dotenv(Path(__file__).resolve().parents[2] / '.env', override=False)
 
@@ -602,6 +618,10 @@ class BinanceFuturesService:
                     'price':    float(o.get('price', 0)),
                     'status':   o['status'],
                     'algo_id':  None,
+                    'clientOrderId': o.get('clientOrderId') or '',
+                    'timeInForce': o.get('timeInForce') or '',
+                    'reduceOnly': o.get('reduceOnly'),
+                    'updateTime': o.get('updateTime') or o.get('time'),
                 })
         except Exception as e:
             logger.error(f"get_open_orders error: {e}")
@@ -621,6 +641,10 @@ class BinanceFuturesService:
                     'price':    float(o.get('triggerPrice', 0) or 0),
                     'status':   o.get('algoStatus', 'NEW'),
                     'algo_id':  o.get('algoId'),
+                    'clientOrderId': o.get('clientAlgoId') or o.get('clientOrderId') or '',
+                    'timeInForce': o.get('timeInForce') or '',
+                    'reduceOnly': o.get('reduceOnly'),
+                    'updateTime': o.get('updateTime') or o.get('createTime'),
                 })
         except Exception as e:
             logger.debug(f"get_open_algo_orders error: {e}")
@@ -657,6 +681,12 @@ class BinanceFuturesService:
         upper = (order_type or "").upper()
         return any(t in upper for t in self._PROTECTIVE_ORDER_TYPES)
 
+    def _is_protective_order(self, order: dict) -> bool:
+        """SL/TP/trailing plus optional resting maker-TP GTX limits."""
+        if self._is_protective_order_type(order.get("type") or ""):
+            return True
+        return is_maker_tp_order(order)
+
     def cancel_non_protective_orders(self, symbol: str) -> int:
         """Cancel entry/limit orders only — preserve live SL/TP/trailing protection."""
         if not live_binance_orders_allowed():
@@ -670,7 +700,7 @@ class BinanceFuturesService:
         for o in self.get_open_orders(raise_on_error=True):
             if o.get("symbol") != fsym:
                 continue
-            if self._is_protective_order_type(o.get("type") or ""):
+            if self._is_protective_order(o):
                 continue
             try:
                 if o.get("algo_id"):
@@ -695,8 +725,11 @@ class BinanceFuturesService:
         return [
             o for o in self.get_open_orders(raise_on_error)
             if o.get('symbol') == futures_sym
-            and o.get('type') in self._PROTECTIVE_ORDER_TYPES
             and o.get('side') == sl_side
+            and (
+                o.get('type') in self._PROTECTIVE_ORDER_TYPES
+                or is_maker_tp_order(o)
+            )
         ]
 
     def _cancel_listed_orders(self, client, futures_sym: str, orders: list) -> int:
@@ -735,9 +768,132 @@ class BinanceFuturesService:
 
     def _has_exchange_take_profit(self, futures_sym: str, position_side: str, raise_on_error: bool = False) -> bool:
         return any(
-            'TAKE_PROFIT' in (o.get('type') or '')
+            'TAKE_PROFIT' in (o.get('type') or '') or is_maker_tp_order(o)
             for o in self._collect_protective_orders(futures_sym, position_side, raise_on_error)
         )
+
+    def _maker_tp_client_id(self, futures_sym: str, close_side: str) -> str:
+        return f"qtpMTP{futures_sym[:8]}{close_side[:1]}{int(time.time()) % 100000}"[:36]
+
+    def _place_take_profit_order(
+        self,
+        client,
+        futures_sym: str,
+        close_side: str,
+        position_side: str,
+        tp_price: float,
+        quantity: Optional[float] = None,
+    ) -> dict:
+        """TAKE_PROFIT_MARKET unless BINANCE_MAKER_TP_ENABLED (GTX reduce-only LIMIT)."""
+        rounded = self._round_price(futures_sym, tp_price)
+        if not maker_tp_enabled():
+            return self._safe_create_order(
+                client,
+                take_profit_market_params(
+                    futures_sym=futures_sym,
+                    close_side=close_side,
+                    position_side=position_side,
+                    tp_price=rounded,
+                ),
+            )
+        qty = quantity if quantity and quantity > 0 else self._live_position_qty(futures_sym, position_side)
+        qty = self._round_qty(futures_sym, qty, bump_to_min=False) if qty else 0.0
+        if qty <= 0:
+            logger.warning("[TP] maker TP skipped for %s — no quantity", futures_sym)
+            return self._safe_create_order(
+                client,
+                take_profit_market_params(
+                    futures_sym=futures_sym,
+                    close_side=close_side,
+                    position_side=position_side,
+                    tp_price=rounded,
+                ),
+            )
+        params = maker_tp_params(
+            futures_sym=futures_sym,
+            close_side=close_side,
+            position_side=position_side,
+            quantity=qty,
+            tp_price=rounded,
+            client_order_id=self._maker_tp_client_id(futures_sym, close_side),
+        )
+        try:
+            order = self._safe_create_order(client, params)
+            logger.info(
+                "  [TP] maker GTX LIMIT for %s @ %s qty=%s (id=%s)",
+                futures_sym, rounded, qty, order.get("orderId") or order.get("algoId"),
+            )
+            return order
+        except Exception as tp_e:
+            last = self._mark_or_last_price(client, futures_sym)
+            if gtx_rejected_as_taker(tp_e) or price_traded_through_tp(
+                side=close_side, tp_price=rounded, last_price=last,
+            ):
+                return self._flatten_maker_tp_market(
+                    client,
+                    futures_sym=futures_sym,
+                    close_side=close_side,
+                    position_side=position_side,
+                    reason=f"gtx_rejected_or_through:{tp_e}",
+                )
+            raise
+
+    def _flatten_maker_tp_market(
+        self,
+        client,
+        *,
+        futures_sym: str,
+        close_side: str,
+        position_side: str,
+        reason: str,
+    ) -> dict:
+        """Immediate MARKET flatten after a maker TP is already through.
+
+        Never re-places TAKE_PROFIT_MARKET at a stop that has printed (-2021).
+        Qty is the live position, not a stale rest size.
+        """
+        live_qty = self._round_qty(
+            futures_sym,
+            self._live_position_qty(futures_sym, position_side),
+            bump_to_min=False,
+        )
+        if live_qty <= 0:
+            logger.warning(
+                "  [TP] maker through for %s (%s) — skip MARKET, live qty=0",
+                futures_sym, reason,
+            )
+            return {"status": "skipped", "reason": "gtx_through_no_live_qty"}
+        logger.warning(
+            "  [TP] maker GTX through for %s (%s) — MARKET flatten qty=%s",
+            futures_sym, reason, live_qty,
+        )
+        return self._safe_create_order(
+            client,
+            maker_tp_market_flatten_params(
+                futures_sym=futures_sym,
+                close_side=close_side,
+                position_side=position_side,
+                quantity=live_qty,
+            ),
+        )
+
+    def _last_price(self, client, futures_sym: str) -> float:
+        try:
+            ticker = client.futures_symbol_ticker(symbol=futures_sym)
+            return float(ticker.get("price") or 0.0)
+        except Exception:
+            return 0.0
+
+    def _mark_or_last_price(self, client, futures_sym: str) -> float:
+        """Prefer mark; fall back to last. Either through the rest is enough to flatten."""
+        try:
+            payload = client.futures_mark_price(symbol=futures_sym)
+            mark = float((payload or {}).get("markPrice") or 0.0)
+            if mark > 0:
+                return mark
+        except Exception:
+            pass
+        return self._last_price(client, futures_sym)
 
     @staticmethod
     def _is_existing_close_position_error(err: Exception) -> bool:
@@ -855,15 +1011,9 @@ class BinanceFuturesService:
             )
             if tp_valid:
                 try:
-                    tp_params = {
-                        "symbol": futures_sym,
-                        "side": sl_side,
-                        "type": 'TAKE_PROFIT_MARKET',
-                        "stopPrice": self._round_price(futures_sym, take_profit),
-                        "closePosition": "true",
-                        "positionSide": position_side,
-                    }
-                    tp_order = self._safe_create_order(client, tp_params)
+                    tp_order = self._place_take_profit_order(
+                        client, futures_sym, sl_side, position_side, take_profit,
+                    )
                     restored.append(f"TP@{take_profit} id={tp_order.get('algoId') or tp_order.get('orderId')}")
                     logger.warning(
                         f"  [PROTECT-RESTORE] {futures_sym} replaced missing TP @ {take_profit}"
@@ -1098,6 +1248,15 @@ class BinanceFuturesService:
                     logger.warning(f"  [MAKER] post-only entry path errored ({mk_e}) — falling back to MARKET")
                     result = None
 
+            if result is None and is_close and maker_close_enabled():
+                try:
+                    result = self._try_maker_close(
+                        client, futures_sym, side, quantity, position_side,
+                    )
+                except Exception as mk_e:
+                    logger.warning(f"  [MAKER-CLOSE] post-only close errored ({mk_e}) — MARKET fallback")
+                    result = None
+
             if result is None:
                 # Default / fallback: original MARKET (taker) order.
                 order_params = {
@@ -1135,15 +1294,17 @@ class BinanceFuturesService:
             # omit fees, corrupting expectancy and learning metrics.
             commission = 0.0
             exchange_realized_pnl = None
+            fill_role = "unknown"
             if order_id:
                 try:
                     fills = client.futures_account_trades(
                         symbol=futures_sym, orderId=int(order_id),
                     )
-                    commission = sum(
-                        abs(float(f.get("commission", 0) or 0))
-                        for f in fills
-                    )
+                    rates = fetch_commission_rates(client, futures_sym)
+                    summary = summarize_fills(fills, rates=rates)
+                    commission = float(summary.get("commission") or 0.0)
+                    fill_role = str(summary.get("role") or "unknown")
+                    log_fill_fees(futures_sym, order_id, summary)
                     exchange_realized_pnl = sum(
                         float(f.get("realizedPnl", 0) or 0)
                         for f in fills
@@ -1299,15 +1460,9 @@ class BinanceFuturesService:
                 else:
                     try:
                         tp_side = 'SELL' if side == 'BUY' else 'BUY'
-                        tp_params = {
-                            "symbol": futures_sym,
-                            "side": tp_side,
-                            "type": 'TAKE_PROFIT_MARKET',
-                            "stopPrice": self._round_price(futures_sym, take_profit),
-                            "closePosition": "true",
-                            "positionSide": position_side,
-                        }
-                        tp_order = self._safe_create_order(client, tp_params)
+                        tp_order = self._place_take_profit_order(
+                            client, futures_sym, tp_side, position_side, take_profit, quantity,
+                        )
                         tp_algo_id = tp_order.get('algoId') or tp_order.get('orderId')
                         logger.info(f"  [TP] Placed for {futures_sym} @ {take_profit} (id={tp_algo_id})")
                     except Exception as tp_e:
@@ -1342,6 +1497,7 @@ class BinanceFuturesService:
                 'quantity':     quantity,
                 'filled_price': filled_price,
                 'commission': commission,
+                'fill_role': fill_role,
                 'realized_pnl': exchange_realized_pnl,
                 'action':       action,
                 'raw':          result,
@@ -1393,13 +1549,21 @@ class BinanceFuturesService:
         so the order rests as a maker (0.02% / rebate) instead of crossing the
         spread as a taker (0.05%). Polls up to MAKER_WAIT_SEC for a fill.
 
+        When ``BINANCE_MAKER_REQUOTE_ENABLED`` (default false) the rest is
+        cancelled and re-joined if the book walks away, so fewer entries
+        fall through to MARKET. Off keeps today's single-shot GTX.
+
         Returns the Binance order dict if FULLY filled as maker, else returns
         None so the caller falls back to a MARKET order. FAIL-OPEN: any error
         returns None (→ MARKET), so worst case == today's behavior.
         """
         import time as _t
-        wait_sec = float(os.getenv("MAKER_WAIT_SEC", "8"))
+        wait_sec = maker_wait_sec()
         poll = 0.75
+        if maker_requote_enabled():
+            return self._try_maker_entry_requote(
+                client, futures_sym, side, quantity, position_side, wait_sec, poll,
+            )
 
         # Best bid/ask from the book
         book = client.futures_orderbook_ticker(symbol=futures_sym)
@@ -1477,6 +1641,248 @@ class BinanceFuturesService:
                 f"maker fill reconciliation uncertain for {futures_sym}: {e}"
             ) from e
         return None
+
+    def _try_maker_entry_requote(self, client, futures_sym, side, quantity, position_side, wait_sec, poll):
+        """Re-join the touch when the book walks away (flag-gated)."""
+        import time as _t
+        deadline = _t.time() + wait_sec
+        attempts = 0
+        max_attempts = maker_requote_max()
+        last_error = None
+        while _t.time() < deadline and attempts < max_attempts:
+            attempts += 1
+            try:
+                book = client.futures_orderbook_ticker(symbol=futures_sym)
+                best_bid = float(book["bidPrice"])
+                best_ask = float(book["askPrice"])
+            except Exception as e:
+                last_error = e
+                break
+            limit_px = self._round_price(futures_sym, best_bid if side == "BUY" else best_ask)
+            params = {
+                "symbol": futures_sym,
+                "side": side,
+                "type": "LIMIT",
+                "timeInForce": "GTX",
+                "price": limit_px,
+                "quantity": quantity,
+                "positionSide": position_side,
+            }
+            try:
+                order = client.futures_create_order(**params)
+            except Exception as e:
+                last_error = e
+                if gtx_rejected_as_taker(e):
+                    logger.debug(
+                        "  [MAKER] requote %s rejected as taker (%s) — retry next touch",
+                        futures_sym, e,
+                    )
+                    _t.sleep(poll)
+                    continue
+                logger.debug(f"  [MAKER] requote rejected for {futures_sym} ({e})")
+                return None
+            oid = order.get("orderId")
+            while _t.time() < deadline:
+                _t.sleep(poll)
+                try:
+                    st = client.futures_get_order(symbol=futures_sym, orderId=oid)
+                except Exception:
+                    continue
+                status = st.get("status")
+                if status == "FILLED":
+                    logger.info(
+                        f"  [MAKER] ✓ requote FILLED {futures_sym} @ {st.get('avgPrice')} "
+                        f"(attempt {attempts})"
+                    )
+                    return st
+                if status in ("CANCELED", "EXPIRED", "REJECTED"):
+                    break
+                try:
+                    book = client.futures_orderbook_ticker(symbol=futures_sym)
+                    if book_walked_away(
+                        side=side,
+                        rest_price=limit_px,
+                        best_bid=float(book["bidPrice"]),
+                        best_ask=float(book["askPrice"]),
+                        tick=TICK_SIZES.get(futures_sym, 0.0),
+                    ):
+                        try:
+                            client.futures_cancel_order(symbol=futures_sym, orderId=oid)
+                        except Exception:
+                            pass
+                        logger.info(
+                            f"  [MAKER] {futures_sym} book walked away @ {limit_px} — requoting"
+                        )
+                        break
+                except Exception:
+                    continue
+            else:
+                try:
+                    client.futures_cancel_order(symbol=futures_sym, orderId=oid)
+                except Exception:
+                    pass
+                try:
+                    final = client.futures_get_order(symbol=futures_sym, orderId=oid)
+                    if final.get("status") == "FILLED":
+                        return final
+                    executed = float(final.get("executedQty", 0) or 0)
+                    if executed > 0:
+                        remaining = self._round_qty(futures_sym, quantity - executed)
+                        if remaining > 0:
+                            return None
+                        return final
+                except Exception as e:
+                    raise RuntimeError(
+                        f"maker fill reconciliation uncertain for {futures_sym}: {e}"
+                    ) from e
+                return None
+        if last_error:
+            logger.debug(f"  [MAKER] requote ended for {futures_sym}: {last_error}")
+        return None
+
+    def _try_maker_close(self, client, futures_sym, side, quantity, position_side):
+        """POST-ONLY (GTX) reduce-only close; None → MARKET fallback."""
+        import time as _t
+        wait_sec = maker_wait_sec()
+        poll = 0.75
+        book = client.futures_orderbook_ticker(symbol=futures_sym)
+        best_bid = float(book["bidPrice"])
+        best_ask = float(book["askPrice"])
+        limit_px = best_bid if side == "BUY" else best_ask
+        limit_px = self._round_price(futures_sym, limit_px)
+        params = {
+            "symbol": futures_sym,
+            "side": side,
+            "type": "LIMIT",
+            "timeInForce": "GTX",
+            "price": limit_px,
+            "quantity": quantity,
+            "positionSide": position_side,
+        }
+        try:
+            order = client.futures_create_order(**params)
+        except Exception as e:
+            logger.debug(f"  [MAKER-CLOSE] GTX rejected for {futures_sym} ({e})")
+            return None
+        oid = order.get("orderId")
+        deadline = _t.time() + wait_sec
+        while _t.time() < deadline:
+            _t.sleep(poll)
+            try:
+                st = client.futures_get_order(symbol=futures_sym, orderId=oid)
+            except Exception:
+                continue
+            if st.get("status") == "FILLED":
+                logger.info(f"  [MAKER-CLOSE] ✓ {futures_sym} @ {st.get('avgPrice')}")
+                return st
+            if st.get("status") in ("CANCELED", "EXPIRED", "REJECTED"):
+                return None
+        try:
+            client.futures_cancel_order(symbol=futures_sym, orderId=oid)
+        except Exception:
+            pass
+        try:
+            final = client.futures_get_order(symbol=futures_sym, orderId=oid)
+            if final.get("status") == "FILLED":
+                return final
+            executed = float(final.get("executedQty", 0) or 0)
+            if executed > 0:
+                remaining = self._round_qty(futures_sym, quantity - executed, bump_to_min=False)
+                if remaining > 0:
+                    top = self._safe_create_order(client, {
+                        "symbol": futures_sym,
+                        "side": side,
+                        "type": "MARKET",
+                        "quantity": remaining,
+                        "positionSide": position_side,
+                    })
+                    logger.info(
+                        f"  [MAKER-CLOSE] partial {executed}, topped up {remaining} at MARKET"
+                    )
+                    return top or final
+                return final
+        except Exception as e:
+            raise RuntimeError(f"maker close reconciliation uncertain for {futures_sym}: {e}") from e
+        return None
+
+    def reconcile_maker_tps(self) -> dict:
+        """Market-flatten resting maker TPs whose last/mark has traded through.
+
+        No-op unless ``BINANCE_MAKER_TP_ENABLED``. Never cancels STOP_MARKET.
+        Age / timeout never flattens a resting TP. Cancel of the GTX must
+        succeed before any MARKET is sent. Flatten qty is the live position.
+        """
+        if not maker_tp_enabled() or self.dry_run or not live_binance_orders_allowed():
+            return {"skipped": True, "reason": "disabled"}
+        client = self._get_client()
+        timeout = maker_tp_timeout_sec()
+        now_ms = int(time.time() * 1000)
+        actions = []
+        for o in self.get_open_orders(raise_on_error=False):
+            if not is_maker_tp_order(o):
+                continue
+            futures_sym = o.get("symbol")
+            last = self._mark_or_last_price(client, futures_sym)
+            tp_px = float(o.get("price") or 0)
+            aged = False
+            updated = o.get("updateTime")
+            try:
+                if updated and (now_ms - int(updated)) / 1000.0 >= timeout:
+                    aged = True
+            except (TypeError, ValueError):
+                aged = False
+            through = price_traded_through_tp(
+                side=str(o.get("side") or ""), tp_price=tp_px, last_price=last,
+            )
+            if aged and not through:
+                logger.info(
+                    "[TP] maker TP %s aged >= %ss still resting — no flatten",
+                    futures_sym, timeout,
+                )
+                continue
+            if not through:
+                continue
+            try:
+                if o.get("algo_id"):
+                    client.futures_cancel_algo_order(algoId=o["algo_id"])
+                elif o.get("order_id"):
+                    client.futures_cancel_order(symbol=futures_sym, orderId=int(o["order_id"]))
+                else:
+                    logger.warning("[TP] maker TP %s has no cancel id — skip MARKET", futures_sym)
+                    continue
+            except Exception as ce:
+                logger.warning(
+                    "[TP] cancel maker TP %s failed — skip MARKET: %s",
+                    o.get("order_id"), ce,
+                )
+                continue
+            position_side = "LONG" if o.get("side") == "SELL" else "SHORT"
+            qty = self._round_qty(
+                futures_sym,
+                self._live_position_qty(futures_sym, position_side),
+                bump_to_min=False,
+            )
+            if qty <= 0:
+                logger.info("[TP] maker TP through on %s but live qty=0 — cancel only", futures_sym)
+                continue
+            try:
+                self._safe_create_order(
+                    client,
+                    maker_tp_market_flatten_params(
+                        futures_sym=futures_sym,
+                        close_side=str(o.get("side") or ""),
+                        position_side=position_side,
+                        quantity=qty,
+                    ),
+                )
+                logger.warning(
+                    "[TP] maker TP fallback MARKET %s %s qty=%s (traded_through)",
+                    o.get("side"), futures_sym, qty,
+                )
+                actions.append({"symbol": futures_sym, "reason": "traded_through", "qty": qty})
+            except Exception as me:
+                logger.error("[TP] maker TP market fallback failed for %s: %s", futures_sym, me)
+        return {"skipped": False, "fallbacks": actions}
 
     def _native_trailing_enabled(self) -> bool:
         try:
@@ -1856,7 +2262,7 @@ class BinanceFuturesService:
             o for o in self._collect_protective_orders(
                 futures_sym, position_side, raise_on_error=True,
             )
-            if 'TAKE_PROFIT' in (o.get('type') or '')
+            if 'TAKE_PROFIT' in (o.get('type') or '') or is_maker_tp_order(o)
         ]
         old_levels = [
             float(o.get('price') or 0)
@@ -1871,16 +2277,16 @@ class BinanceFuturesService:
                     symbol=futures_sym, orderId=int(o['order_id']),
                 )
 
-        params = {
-            "symbol": futures_sym,
-            "side": close_side,
-            "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": rounded_new,
-            "closePosition": "true",
-            "positionSide": position_side,
-        }
+        params = take_profit_market_params(
+            futures_sym=futures_sym,
+            close_side=close_side,
+            position_side=position_side,
+            tp_price=rounded_new,
+        )
         try:
-            order = self._safe_create_order(client, params)
+            order = self._place_take_profit_order(
+                client, futures_sym, close_side, position_side, rounded_new,
+            )
             return {
                 'status': 'replaced',
                 'symbol': futures_sym,

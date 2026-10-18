@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 from backend.database.connection import SessionLocal
 from backend.database.models import Trade
 from backend.services.ctrader_service import CTraderService, ctrader_service
+from backend.services.ctrader_weekend_protect import apply_swap_holds, apply_weekend_protect
 
 logger = logging.getLogger(__name__)
 
@@ -176,16 +177,23 @@ def _manage_position(db, pos: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def run_exit_manager_once() -> Dict[str, Any]:
     """Single pass over the live cTrader book. Called from the poller."""
-    if not ENABLED:
-        return {"skipped": True, "reason": "disabled"}
     if not ctrader_service.has_credentials():
         return {"skipped": True, "reason": "no_credentials"}
     if not ctrader_service.is_connected:
         return {"skipped": True, "reason": "not_connected"}
 
-    positions = ctrader_service.get_positions()
+    positions = ctrader_service.get_positions() or []
+    weekend = apply_weekend_protect(positions, ctrader_service)
+    swap_holds = apply_swap_holds(positions, ctrader_service)
+    if not ENABLED:
+        return {
+            "skipped": True,
+            "reason": "disabled",
+            "weekend_protect": weekend,
+            "swap_holds": swap_holds,
+        }
     if not positions:
-        return {"managed": 0}
+        return {"managed": 0, "weekend_protect": weekend, "swap_holds": swap_holds}
 
     db = SessionLocal()
     try:
@@ -200,6 +208,11 @@ def run_exit_manager_once() -> Dict[str, Any]:
                     "Exit manager error for %s: %s", pos.get("symbol"), exc
                 )
         db.commit()
-        return {"managed": len(amends), "amends": amends}
+        return {
+            "managed": len(amends),
+            "amends": amends,
+            "weekend_protect": weekend,
+            "swap_holds": swap_holds,
+        }
     finally:
         db.close()

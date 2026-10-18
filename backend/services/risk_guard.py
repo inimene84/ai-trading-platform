@@ -13,6 +13,7 @@ from backend.services.equity_scope import (
 from backend.services.trading_mode import TradingMode, get_trading_mode
 from backend.database.models import Trade, PortfolioSnapshot
 from backend.services.ledger import is_binance_paper_fill
+from backend.services.shared_risk import evaluate_shared_risk
 
 
 def _snapshot_risk_equity(snapshot: PortfolioSnapshot | None) -> float:
@@ -472,3 +473,13 @@ def enforce_risk_limits(
                         logger.warning("[RISK GUARD] %s — paper/testing: daily-loss halt suppressed", msg)
                     else:
                         raise RiskBreach(msg)
+
+    # 5. Shared cross-venue budget (default shadow). Per-venue caps above
+    #    still apply unchanged. Combined limits only fire in enforce mode
+    #    when both books share a money mode.
+    shared = evaluate_shared_risk(
+        open_trades,
+        combined_equity=_snapshot_risk_equity(latest_snapshot) if latest_snapshot else None,
+    )
+    if shared.get("action") == "block":
+        raise RiskBreach("; ".join(shared.get("breaches") or ["shared risk limit"]))

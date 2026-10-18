@@ -28,7 +28,13 @@ from backend.services.multi_asset_bars import classify_symbol, tf_to_binance_int
 from backend.services.trading_mode import live_ctrader_orders_allowed
 from backend.services.symbol_aliases import same_crypto_perp_leg
 from backend.services.position_caps import live_binance_position_count
-from backend.services.market_hours import is_venue_open
+from backend.services.market_hours import evaluate_entry_cutoff, is_venue_open
+from backend.services.venue_router import venue_for_symbol
+from backend.services.funding_filter import (
+    apply_size_mult,
+    evaluate_funding_filter,
+    fetch_funding_rate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -810,6 +816,23 @@ class SignalCandidateEngine:
         self._note_venue_closed("ctrader", symbol)
         return True
 
+    def _ctrader_entry_cutoff(self, symbol: str) -> bool:
+        """True only when CTRADER_ENTRY_CUTOFF_MODE=enforce and we are in the window.
+
+        Default ``shadow`` logs and never skips, so merge does not change live
+        Friday/daily-break entries.
+        """
+        decision = evaluate_entry_cutoff(symbol)
+        if decision.get("would_block") and decision.get("mode") == "shadow":
+            logger.info(
+                "[%s] ENTRY CUTOFF shadow: %s (minutes_until_close=%s)",
+                symbol, decision.get("reason"), decision.get("minutes_until_close"),
+            )
+        if decision.get("blocked"):
+            logger.info("[%s] ENTRY CUTOFF enforce skip: %s", symbol, decision.get("reason"))
+            return True
+        return False
+
     def _account_equity(self) -> float:
         """Live cTrader equity when connected; otherwise a conservative fallback.
 
@@ -1359,8 +1382,10 @@ class SignalCandidateEngine:
                     continue
                 if self.execution_config.get("forex_only") and asset_class == "crypto":
                     continue
-                broker = "binance_futures" if asset_class == "crypto" else "ctrader"
+                broker = venue_for_symbol(sym)
                 if broker == "ctrader" and self._ctrader_venue_closed(sym):
+                    continue
+                if broker == "ctrader" and self._ctrader_entry_cutoff(sym):
                     continue
 
                 # Ingest bars
@@ -1444,6 +1469,28 @@ class SignalCandidateEngine:
                             raw_signal = inverted
 
                         size_data = self._calculate_size(sym, raw_signal["entry_price"], raw_signal["stop_loss"], broker)
+                        funding_meta = None
+                        if broker == "binance_futures":
+                            funding_rate = await fetch_funding_rate(sym)
+                            funding_meta = evaluate_funding_filter(
+                                direction=raw_signal["direction"],
+                                funding_rate=funding_rate,
+                            )
+                            if funding_meta.get("action") == "veto":
+                                logger.info(
+                                    "[%s] FUNDING FILTER VETO: %s",
+                                    sym, funding_meta.get("reason"),
+                                )
+                                continue
+                            if funding_meta.get("action") == "size_down":
+                                size_data = apply_size_mult(
+                                    size_data, float(funding_meta.get("size_mult") or 1.0),
+                                )
+                            elif funding_meta.get("would_action") in {"veto", "size_down"}:
+                                logger.info(
+                                    "[%s] FUNDING FILTER shadow: %s",
+                                    sym, funding_meta.get("reason"),
+                                )
 
                         # Timing window parameters
                         timing_mode = raw_signal["timing_mode"]
@@ -1474,6 +1521,7 @@ class SignalCandidateEngine:
                             "side_inverted": bool(raw_signal.get("side_inverted")),
                             "features": features,
                             "sizing": size_data,
+                            "funding_filter": funding_meta,
                             "fx_gate": (
                                 {
                                     "action": gate_result.action,
@@ -1863,6 +1911,27 @@ class SignalCandidateEngine:
                 "skipped": True,
                 "error": "VENUE_CLOSED — market is closed; not sending IC order.",
             }
+        if not force and cand.get("broker") == "ctrader" and self._ctrader_entry_cutoff(cand_sym):
+            return {
+                "success": False,
+                "skipped": True,
+                "error": "ENTRY_CUTOFF — too close to venue close / daily break.",
+            }
+        if not force and cand.get("broker") == "binance_futures":
+            funding_meta = evaluate_funding_filter(
+                direction=str(cand.get("direction") or ""),
+                funding_rate=(cand.get("funding_filter") or {}).get("funding_rate"),
+            )
+            if funding_meta.get("action") == "veto":
+                return {
+                    "success": False,
+                    "skipped": True,
+                    "error": f"FUNDING_FILTER — {funding_meta.get('reason')}",
+                }
+            if funding_meta.get("action") == "size_down" and cand.get("sizing"):
+                cand["sizing"] = apply_size_mult(
+                    cand["sizing"], float(funding_meta.get("size_mult") or 1.0),
+                )
         if not force and self.is_symbol_cooling_down(cand_sym):
             return {
                 "success": False,

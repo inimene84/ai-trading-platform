@@ -10,6 +10,7 @@ import os
 from datetime import datetime, timezone
 
 from backend.services.trading_mode import live_binance_orders_allowed
+from backend.services.binance_maker import is_maker_tp_order
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,11 @@ async def _poll_loop():
             if broker_name == "binance_futures" and live_binance_orders_allowed():
                 await _sync_open_orders(svc)
                 await _cancel_orphaned_orders(svc)
+                try:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, svc.reconcile_maker_tps)
+                except Exception as tp_e:
+                    logger.debug("Order poller: maker TP reconcile skipped: %s", tp_e)
         except Exception as e:
             logger.warning(f"Order poller cycle error: {e}")
         
@@ -91,7 +97,7 @@ async def _cancel_orphaned_orders(svc):
         if sym in pos_syms:
             logger.debug(f"Orphan reconcile: keeping protective orders for {sym} — position still open")
             continue  # live position — keep its protective orders
-        if o.get("type") not in _PROTECTIVE_ORDER_TYPES:
+        if o.get("type") not in _PROTECTIVE_ORDER_TYPES and not is_maker_tp_order(o):
             continue
         try:
             if o.get("algo_id"):

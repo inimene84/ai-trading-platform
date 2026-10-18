@@ -196,6 +196,7 @@ def describe_equity_books() -> dict[str, Any]:
         "risk_broker": risk_broker_name(),
         "split_book_warning": SPLIT_BOOK_WARNING if split else None,
         "union_label": UNION_LABEL,
+        "shared_risk_mode": (os.getenv("SHARED_RISK_MODE", "shadow") or "shadow").strip().lower(),
     }
 
 
