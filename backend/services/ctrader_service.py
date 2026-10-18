@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Optional, Dict, List, Any
 
 from backend.brokers.base import BrokerService
+from backend.services.ctrader_oauth import account_uses_live_host, ctrader_env, protobuf_host
 from backend.services.ctrader_tokens import token_store
 from backend.services.trading_mode import live_ctrader_orders_allowed
 
@@ -168,10 +169,13 @@ class CTraderProtocol:
                         live_confirm = os.getenv(
                             "CTRADER_LIVE_CONFIRM", os.getenv("CTRADE_LIVE_CONFIRM", "")
                         ).strip()
-                        if account_live and live_confirm != "I_UNDERSTAND":
+                        env_wants_live = ctrader_env() == "live"
+                        if account_live and (live_confirm != "I_UNDERSTAND" or not env_wants_live):
                             logger.error(
-                                "cTrader account %s is live but CTRADER_LIVE_CONFIRM is not set — staying on demo",
+                                "cTrader account %s is live but CTRADER_ENV=%s confirm=%s — staying on demo host",
                                 chosen,
+                                ctrader_env(),
+                                live_confirm == "I_UNDERSTAND",
                             )
                             self._service._last_protocol_error = "LIVE_CONFIRM_REQUIRED"
                             self._service._auth_event.set()
@@ -650,7 +654,9 @@ class CTraderService(BrokerService):
         self._last_protocol_error: Optional[str] = None
         self._rate_limited_until: float = 0.0
         self._host_override: Optional[str] = None
+        self._active_host: Optional[str] = None
         self._retry_correct_host: bool = False
+        self._tried_alt_host_after_token_invalid: bool = False
         self._last_order_error: Optional[str] = None
         self._order_ack_event = threading.Event()
         self._order_ack_lock = threading.Lock()
@@ -1130,6 +1136,48 @@ class CTraderService(BrokerService):
                 return int(acc["id"])
         return int(valid[0]["id"])
 
+    @staticmethod
+    def should_force_token_refresh(last_error: str) -> bool:
+        """Refresh OAuth when Spotware rejected routing or the access token."""
+        err = str(last_error or "")
+        return "CANT_ROUTE" in err or "ACCESS_TOKEN_INVALID" in err
+
+    @staticmethod
+    def sanitized_host_override(
+        host_override: Optional[str],
+        is_live: bool,
+        last_error: str = "",
+    ) -> Optional[str]:
+        """Drop a live-host override when the account is not live-money.
+
+        ``is_live`` here is account type (CTRADER_ENV=live + confirm), not
+        QT execute / TRADING_MODE. Demo hedging must stay on demo host.
+        """
+        if host_override == "live.ctraderapi.com" and not is_live:
+            return None
+        return host_override
+
+    @staticmethod
+    def alt_host_after_token_invalid(
+        current_host: str,
+        is_live: bool,
+        already_flipped: bool,
+    ) -> Optional[str]:
+        """One-shot live↔demo flip when Spotware rejects the access token.
+
+        Account-list never arrives on TOKEN_INVALID, so HOST_MISMATCH cannot
+        pick the other protobuf host. Never flip a demo account onto live.
+        ``is_live`` is account type, not QT execute.
+        """
+        if already_flipped:
+            return None
+        cur = str(current_host or "")
+        if "live.ctraderapi.com" in cur:
+            return "demo.ctraderapi.com"
+        if is_live:
+            return "live.ctraderapi.com"
+        return None
+
     def ensure_connected(self) -> bool:
         """Connect to cTrader when credentials exist.
 
@@ -1163,7 +1211,7 @@ class CTraderService(BrokerService):
     def _connect_unlocked(self) -> bool:
         tokens = token_store.get_tokens()
         client_id = tokens.get("client_id") or os.getenv("CTRADER_CLIENT_ID", "")
-        force_refresh = "CANT_ROUTE" in str(self._last_protocol_error or "")
+        force_refresh = self.should_force_token_refresh(str(self._last_protocol_error or ""))
         access_token = (
             token_store.refresh_if_needed(force=force_refresh)
             or tokens.get("access_token")
@@ -1175,25 +1223,39 @@ class CTraderService(BrokerService):
             logger.warning("cTrader credentials missing. Operating in paper/dry-run mode.")
             return False
 
-        # Host security gate: paper mode defaults to demo host.
-        # TRADING_MODE=paper must never select live.ctraderapi.com even when
-        # CTRADER_PAPER_MODE=false and CTRADER_LIVE_CONFIRM is set.
-        paper_mode = (
-            os.getenv("CTRADER_PAPER_MODE", os.getenv("CTRADE_PAPER_MODE", "true")).lower() == "true"
+        # Host follows account type (CTRADER_ENV), not QT execute.
+        # Demo hedging + TRADING_MODE=live still uses demo.ctraderapi.com.
+        # TRADING_MODE=paper must never select live.ctraderapi.com.
+        account_live_host = account_uses_live_host() and live_ctrader_orders_allowed()
+        cleaned = self.sanitized_host_override(
+            self._host_override, account_live_host, str(self._last_protocol_error or "")
         )
-        live_confirm = os.getenv("CTRADER_LIVE_CONFIRM", os.getenv("CTRADE_LIVE_CONFIRM", "")).strip()
-        is_live = (
-            (not paper_mode)
-            and (live_confirm == "I_UNDERSTAND")
-            and live_ctrader_orders_allowed()
-        )
-        if self._host_override == "live.ctraderapi.com" and not is_live:
-            logger.error("Ignoring cTrader live host override without live confirmation")
-            self._host_override = None
-        host = self._host_override or ("live.ctraderapi.com" if is_live else "demo.ctraderapi.com")
+        if cleaned != self._host_override:
+            if self._host_override == "live.ctraderapi.com" and not account_live_host:
+                logger.error(
+                    "Ignoring cTrader live host override — account is demo/unconfirmed "
+                    "(CTRADER_ENV=%s)",
+                    ctrader_env(),
+                )
+            else:
+                logger.warning(
+                    "Ignoring stale cTrader host override %s (account_live_host=%s)",
+                    self._host_override,
+                    account_live_host,
+                )
+            self._host_override = cleaned
+        host = self._host_override or protobuf_host(account_live_host)
+        self._active_host = host
         port = 5035
         if self._host_override:
             logger.info("cTrader using host override %s", host)
+        else:
+            logger.info(
+                "cTrader protobuf host %s (CTRADER_ENV=%s, executing=%s)",
+                host,
+                ctrader_env(),
+                live_ctrader_orders_allowed(),
+            )
 
         self._auth_event.clear()
         self._authenticated = False
@@ -1273,8 +1335,24 @@ class CTraderService(BrokerService):
                 self._next_connect_ok_at = 0.0
                 self._last_protocol_error = None
                 self._retry_correct_host = False
+                self._tried_alt_host_after_token_invalid = False
                 logger.info("cTrader connected and authenticated successfully!")
                 return True
+            alt = self.alt_host_after_token_invalid(
+                host,
+                account_live_host,
+                bool(getattr(self, "_tried_alt_host_after_token_invalid", False)),
+            )
+            if alt and "ACCESS_TOKEN_INVALID" in str(self._last_protocol_error or ""):
+                self._tried_alt_host_after_token_invalid = True
+                self._host_override = alt
+                self._next_connect_ok_at = 0.0
+                logger.warning(
+                    "cTrader TOKEN_INVALID on %s — retrying %s with refreshed token",
+                    host,
+                    alt,
+                )
+                return self._connect_unlocked()
             if self._retry_correct_host and self._host_override:
                 self._retry_correct_host = False
                 self._next_connect_ok_at = 0.0
@@ -2312,11 +2390,14 @@ class CTraderService(BrokerService):
 
     def status(self) -> Dict[str, Any]:
         tokens = token_store.get_tokens()
+        host = self._active_host or self._host_override or protobuf_host()
+        executing = (not self._dry_run) and self.is_connected
         return {
             "connected": self.is_connected,
             "authenticated": self._authenticated,
-            "env": "live" if not self._dry_run else "paper",
+            "env": ctrader_env(),
             "dry_run": self._dry_run,
+            "executing": executing,
             "account_id": tokens.get("account_id"),
             "login": self._trader_login,
             "broker": self._broker_name,
@@ -2328,7 +2409,7 @@ class CTraderService(BrokerService):
             "margin": self.margin,
             "last_error": self._last_protocol_error,
             "connect_cooldown_s": max(0, int(self._next_connect_ok_at - time.time())),
-            "host": self._host_override,
+            "host": host,
             "account_id_live": self._account_id,
         }
 
