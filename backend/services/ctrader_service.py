@@ -2385,55 +2385,97 @@ class CTraderService(BrokerService):
             if time.time() < self._rate_limited_until:
                 cached = self._trendbar_cache.get(cache_key) or []
                 return cached[-count:] if cached else []
+
+            join_waiter: threading.Event | None = None
+            send_waiter: threading.Event | None = None
             with self._trendbar_req_lock:
                 last = self._trendbar_last_req.get(cache_key, 0)
-                now_req = time.time()
-                cache_fresh = now_req - last < TRENDBAR_CACHE_TTL_SEC
-                if not cache_fresh:
-                    # Reserve the 45s TTL before pacing so a second caller
-                    # cannot emit another ProtoOAGetTrendbarsReq for this key.
-                    self._trendbar_last_req[cache_key] = now_req
-            if cache_fresh:
                 cached = self._trendbar_cache.get(cache_key) or []
-                if cached:
+                now_req = time.time()
+                if cached and now_req - last < TRENDBAR_CACHE_TTL_SEC:
                     return cached[-count:]
-            else:
-                try:
-                    from ctrader_open_api.messages import OpenApiMessages_pb2 as msgs
-                    from twisted.internet import reactor
+                in_flight = self._trendbar_events.get(cache_key)
+                if in_flight is not None and not in_flight.is_set():
+                    join_waiter = in_flight
+                elif now_req - last < TRENDBAR_CACHE_TTL_SEC:
+                    return []
 
-                    sym_id = self._symbol_ids.get(ct_symbol)
-                    if not sym_id:
-                        logger.warning(
-                            "No cTrader symbol id for %s; skipping live trendbar request",
-                            ct_symbol,
-                        )
-                    else:
-                        now_ms = int(time.time() * 1000)
-                        f_ts = from_ts or (
-                            now_ms
-                            - self.trendbar_lookback_ms(
-                                period_enum, count, now_ms=now_ms, symbol=ct_symbol
-                            )
-                        )
-                        t_ts = to_ts or now_ms
+            if join_waiter is not None:
+                join_waiter.wait(timeout=2.0)
+                cached = self._trendbar_cache.get(cache_key) or []
+                return cached[-count:] if cached else []
 
-                        req = msgs.ProtoOAGetTrendbarsReq()
-                        req.ctidTraderAccountId = self._account_id or 0
-                        req.symbolId = sym_id
-                        req.period = period_enum
-                        req.fromTimestamp = f_ts
-                        req.toTimestamp = t_ts
+            sym_id = self._symbol_ids.get(ct_symbol)
+            if not sym_id:
+                logger.warning(
+                    "No cTrader symbol id for %s; skipping live trendbar request",
+                    ct_symbol,
+                )
+                return []
 
-                        # Register the waiter before sending so a fast response cannot
-                        # arrive (and be missed) before we start waiting.
-                        waiter = threading.Event()
-                        self._trendbar_events[cache_key] = waiter
-                        self._bar_pacer.acquire()
-                        reactor.callFromThread(lambda: self._protocol._send(req, 2137))
-                        waiter.wait(timeout=2.0)
-                except Exception as e:
-                    logger.warning(f"Live trendbar request failed: {e}")
+            with self._trendbar_req_lock:
+                last = self._trendbar_last_req.get(cache_key, 0)
+                cached = self._trendbar_cache.get(cache_key) or []
+                now_req = time.time()
+                if cached and now_req - last < TRENDBAR_CACHE_TTL_SEC:
+                    return cached[-count:]
+                in_flight = self._trendbar_events.get(cache_key)
+                if in_flight is not None and not in_flight.is_set():
+                    join_waiter = in_flight
+                elif now_req - last < TRENDBAR_CACHE_TTL_SEC:
+                    return []
+                else:
+                    send_waiter = threading.Event()
+                    self._trendbar_events[cache_key] = send_waiter
+                    # Reserve TTL only as the sender, after we know a request
+                    # will go out, so a missing catalog id cannot lock a symbol.
+                    self._trendbar_last_req[cache_key] = time.time()
+
+            if join_waiter is not None:
+                join_waiter.wait(timeout=2.0)
+                cached = self._trendbar_cache.get(cache_key) or []
+                return cached[-count:] if cached else []
+
+            sent = False
+            try:
+                from ctrader_open_api.messages import OpenApiMessages_pb2 as msgs
+                from twisted.internet import reactor
+
+                now_ms = int(time.time() * 1000)
+                f_ts = from_ts or (
+                    now_ms
+                    - self.trendbar_lookback_ms(
+                        period_enum, count, now_ms=now_ms, symbol=ct_symbol
+                    )
+                )
+                t_ts = to_ts or now_ms
+
+                req = msgs.ProtoOAGetTrendbarsReq()
+                req.ctidTraderAccountId = self._account_id or 0
+                req.symbolId = sym_id
+                req.period = period_enum
+                req.fromTimestamp = f_ts
+                req.toTimestamp = t_ts
+
+                self._bar_pacer.acquire()
+                reactor.callFromThread(lambda: self._protocol._send(req, 2137))
+                sent = True
+                if send_waiter is not None:
+                    send_waiter.wait(timeout=2.0)
+                    if not send_waiter.is_set():
+                        with self._trendbar_req_lock:
+                            if self._trendbar_events.get(cache_key) is send_waiter:
+                                self._trendbar_events.pop(cache_key, None)
+                        send_waiter.set()
+            except Exception as e:
+                logger.warning(f"Live trendbar request failed: {e}")
+                if not sent:
+                    with self._trendbar_req_lock:
+                        if send_waiter is not None and self._trendbar_events.get(cache_key) is send_waiter:
+                            self._trendbar_events.pop(cache_key, None)
+                        self._trendbar_last_req.pop(cache_key, None)
+                    if send_waiter is not None:
+                        send_waiter.set()
 
             cached = self._trendbar_cache.get(cache_key) or []
             if cached:

@@ -170,6 +170,7 @@ def test_ttl_is_reserved_before_pacer_sleep():
 
     assert sends["n"] == 1
     assert clock.sleeps == [0.25]
+    assert "EURUSD_5" in svc._trendbar_last_req
 
 
 def test_get_trendbars_sunday_window_covers_weekend_close():
