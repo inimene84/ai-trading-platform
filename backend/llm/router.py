@@ -1133,22 +1133,20 @@ def build_provider_chain(task_type: str) -> list[tuple[str, ModelConfig]]:
     return _expand_kie_model_hops(configs_to_try)
 
 
-async def call_llm_resilient(
+async def call_llm_resilient_meta(
     task_type: str,
     prompt: str,
     system: str = "",
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     response_json: bool = False,
-) -> str:
+) -> tuple[str, dict[str, Any]]:
     """
-    Highly resilient LLM executor.
+    Highly resilient LLM executor returning ``(text, meta)``.
 
-    1. Acquires a semaphore to limit concurrency.
-    2. Tries the primary model once; timeouts/connect errors fail over immediately.
-    3. HTTP 5xx / 429 get one short retry, then the next fallback.
-    4. Stops when the chain budget is exhausted so the trading loop is not stalled.
-    5. Cleans and parses output (removing <think> tags, extracting JSON if requested).
+    ``meta`` includes ``provider``, ``model``, ``label``, ``attempt``, and ``latency_ms``
+    so callers (bear-veto, postmortems, shadow replay) can log the resolved model
+    and detect relay drift.
     """
     configs_to_try = build_provider_chain(task_type)
     budget = _chain_budget_seconds(task_type)
@@ -1182,6 +1180,7 @@ async def call_llm_resilient(
                     )
                     break
                 timeout = min(timeout, max(1.0, remaining - 0.2))
+                call_started = time.monotonic()
                 try:
                     logger.info(
                         "LLM Router: Trying %s (model=%s, provider=%s, attempt=%s, timeout=%.1fs)",
@@ -1209,7 +1208,14 @@ async def call_llm_resilient(
                         text = json.dumps(parsed)
                     logger.info("LLM Router: Success using %s", attempt_name)
                     _record_llm_success(task_type, cfg.provider, cfg.name)
-                    return text
+                    meta = {
+                        "provider": cfg.provider,
+                        "model": cfg.name,
+                        "label": attempt_name,
+                        "attempt": attempt,
+                        "latency_ms": round((time.monotonic() - call_started) * 1000.0, 1),
+                    }
+                    return text, meta
                 except Exception as e:
                     last_error = e
                     last_provider = cfg.provider
@@ -1242,3 +1248,32 @@ async def call_llm_resilient(
         err_msg = f"All LLM providers in the chain failed. Last error: {summary}"
         logger.critical(err_msg)
         raise LLMChainExhausted(err_msg)
+
+
+async def call_llm_resilient(
+    task_type: str,
+    prompt: str,
+    system: str = "",
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    response_json: bool = False,
+) -> str:
+    """
+    Highly resilient LLM executor.
+
+    1. Acquires a semaphore to limit concurrency.
+    2. Tries the primary model once; timeouts/connect errors fail over immediately.
+    3. HTTP 5xx / 429 get one short retry, then the next fallback.
+    4. Stops when the chain budget is exhausted so the trading loop is not stalled.
+    5. Cleans and parses output (removing <think> tags, extracting JSON if requested).
+    """
+    text, _ = await call_llm_resilient_meta(
+        task_type=task_type,
+        prompt=prompt,
+        system=system,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        response_json=response_json,
+    )
+    return text
+
