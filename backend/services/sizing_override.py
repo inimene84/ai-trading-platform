@@ -199,6 +199,12 @@ def query_recent_streak_and_drawdown(
         active_broker = risk_broker_name().lower()
         mode_val = get_trading_mode().value if hasattr(get_trading_mode(), "value") else str(get_trading_mode())
 
+        mode = (os.getenv("SIZING_OVERRIDE_MODE", "shadow") or "shadow").strip().lower()
+        if mode != "enforce":
+            # Shadow/off never apply the multiplier; skip the blocking DB read
+            # so a wedged database cannot stall a live entry decision.
+            return 0, 0.0
+
         with SessionLocal() as db:
             q = (
                 db.query(Trade)

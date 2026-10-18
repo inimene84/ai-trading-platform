@@ -34,9 +34,15 @@ def _jwt_role(token: str) -> str:
         return ""
 
 
-def _looks_like_anon_key(key: str) -> bool:
+def _is_privileged_key(key: str) -> bool:
+    """Accept a JWT only when ``role=service_role``. Non-JWT secrets (``sb_secret_…``) are allowed."""
     role = _jwt_role(key)
-    return role == "anon"
+    if role == "service_role":
+        return True
+    if role:
+        return False
+    # Not a JWT (or unreadable). Allow dedicated service-named secrets / sb_secret_ keys only.
+    return key.startswith("sb_secret_") or not key.startswith(("eyJ", "sb_publishable_", "sb_anon_"))
 
 
 def service_role_key() -> str:
@@ -45,9 +51,9 @@ def service_role_key() -> str:
         raw = (os.getenv(env_name) or "").strip()
         if not raw:
             continue
-        if _looks_like_anon_key(raw):
+        if not _is_privileged_key(raw):
             logger.warning(
-                "Ignoring %s for privileged Supabase writes: JWT role is anon",
+                "Ignoring %s for privileged Supabase writes: not a service_role credential",
                 env_name,
             )
             continue

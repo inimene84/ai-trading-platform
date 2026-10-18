@@ -14,7 +14,7 @@ from backend.services.postmortem import (
     on_trade_closed,
 )
 from backend.services.regime_circuit_breaker import RegimeCircuitBreaker
-from backend.services.sizing_override import SizingOverrideConfig, compute_sizing_override
+from backend.services.sizing_override import SizingOverrideConfig, compute_sizing_override, query_recent_streak_and_drawdown
 from backend.services.supabase_admin import service_role_credentials, service_role_key
 
 _SHADOW_REPLAY_PATH = Path(__file__).resolve().parents[3] / "scripts" / "shadow_replay.py"
@@ -202,6 +202,14 @@ def test_sizing_override_circuit_breaker_open_zeros_notional():
     assert out.adjusted_notional == 0.0
 
 
+def test_shadow_sizing_skips_blocking_db_query(monkeypatch):
+    monkeypatch.delenv("SIZING_OVERRIDE_MODE", raising=False)
+    with patch("backend.database.connection.SessionLocal") as session_cls:
+        streak, dd = query_recent_streak_and_drawdown(account_equity=1000.0)
+    assert (streak, dd) == (0, 0.0)
+    session_cls.assert_not_called()
+
+
 def test_default_sizing_override_ignores_open_circuit_breaker(monkeypatch):
     """Default SIZING_OVERRIDE_MODE=shadow + REGIME_CB_MODE=shadow must not resize."""
     monkeypatch.delenv("SIZING_OVERRIDE_MODE", raising=False)
@@ -244,7 +252,7 @@ def test_service_role_credentials_never_return_anon(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.setenv("SUPABASE_ANON_KEY", anon_jwt)
     monkeypatch.setenv("SUPABASE_KEY", anon_jwt)
-    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", anon_jwt)
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     assert service_role_key() == ""
     assert service_role_credentials() == ("", "")

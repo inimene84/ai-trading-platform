@@ -367,10 +367,13 @@ class PostmortemPoller:
                 if tid in self._seen_ids:
                     skipped += 1
                     continue
-                self._seen_ids.add(tid)
                 try:
-                    await asyncio.wait_for(on_trade_closed(snap), timeout=per_trade_timeout)
-                    processed += 1
+                    pm = await asyncio.wait_for(on_trade_closed(snap), timeout=per_trade_timeout)
+                    if pm is not None:
+                        self._seen_ids.add(tid)
+                        processed += 1
+                    else:
+                        logger.warning("PostmortemPoller trade %s produced no record; will retry", tid)
                 except Exception as e:
                     logger.warning("PostmortemPoller trade %s skipped: %s", tid, e)
         return {"processed": processed, "skipped": skipped}
