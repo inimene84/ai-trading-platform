@@ -26,6 +26,7 @@ from backend.jev.config import (
     openrouter_headers,
 )
 from backend.jev.schema import JevSchemaError, validate_system_one
+from backend.services.provider_credit_circuit import credit_circuit
 
 _paused_until = 0.0
 
@@ -33,10 +34,11 @@ _paused_until = 0.0
 def reset_circuit() -> None:
     global _paused_until
     _paused_until = 0.0
+    credit_circuit.note_success("openrouter")
 
 
 def circuit_open() -> bool:
-    return time.time() < _paused_until
+    return time.time() < _paused_until or credit_circuit.is_open("openrouter")
 
 
 def note_credit_failure(message: str) -> None:
@@ -44,6 +46,7 @@ def note_credit_failure(message: str) -> None:
     text = message.lower()
     if "402" in text or "insufficient credit" in text or "insufficient credits" in text:
         _paused_until = time.time() + jev_pause_seconds()
+        credit_circuit.note_failure("openrouter", message)
 
 
 class MockJevClient:

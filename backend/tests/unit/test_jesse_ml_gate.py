@@ -334,6 +334,47 @@ async def test_jesse_ml_gate_fail_closed_when_promotion_blocked(ml_risk_config, 
 
 
 @pytest.mark.asyncio
+async def test_stuck_uncertainty_veto_fails_open_after_repeated_identical_output(ml_risk_config, monkeypatch):
+    from backend.services.ml_uncertainty_guard import stuck_uncertainty
+
+    monkeypatch.setenv("JESSE_ML_GATE_ENABLED", "true")
+    monkeypatch.setenv("JESSE_ML_STUCK_VETO_HITS", "5")
+    stuck_uncertainty.reset()
+    engine = DecisionEngine(ml_risk_config)
+    engine.enable_kronos = False
+    engine.promotion_state = None
+    engine.account_equity = 1000.0
+    engine.account_available = 1000.0
+    bars = _make_bars(50)
+    mock_signal = StrategySignal(
+        symbol="BNBUSDC", signal="BUY", confidence=0.70, entry_price=bars[-1]["close"],
+        stop_loss=bars[-1]["close"] * 0.98, take_profit=bars[-1]["close"] * 1.04,
+    )
+    engine.strategy.generate_signal = MagicMock(return_value=mock_signal)
+    engine.regime_detector.detect = MagicMock(return_value=MagicMock(regime="TRENDING", weights=MagicMock(return_value={})))
+    mock_ml = {
+        "status": "success",
+        "signal": "BUY",
+        "confidence": 0.55,
+        "probabilities": {"bullish": 0.40, "bearish": 0.20, "neutral": 0.40},
+        "uncertainty": "HIGH",
+        "gated": True,
+        "gated_reason": "CONFORMAL_UNCERTAINTY_GATE (Margin: 0.064 < 0.08)",
+        "conformal_margin": 0.064,
+        "latest_close": 1123.4,
+        "kelly": {"size_multiplier": 0.5},
+    }
+    with patch("backend.services.jesse_bridge.jesse_bridge.get_ml_prediction", AsyncMock(return_value=mock_ml)):
+        for _ in range(4):
+            decision = await engine.evaluate_symbol("BNBUSDC", bars, None, 0, [], False)
+            assert decision is None
+            assert "uncertainty gate" in engine.last_evaluation.get("reason", "")
+        decision = await engine.evaluate_symbol("BNBUSDC", bars, None, 0, [], False)
+    assert decision is not None
+    stuck_uncertainty.reset()
+
+
+@pytest.mark.asyncio
 async def test_jesse_ml_kelly_clipping_below_30_partition_trades(ml_risk_config, monkeypatch):
     """When partition closed trades < 30, Kelly multiplier must be clipped to [0.25, 1.0]."""
     monkeypatch.setenv("TRADING_MODE", "live")

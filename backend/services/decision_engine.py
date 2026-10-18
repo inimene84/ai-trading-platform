@@ -23,6 +23,8 @@ from backend.services.jesse_ml_gates import (
     clip_kelly_for_thin_book,
     empirical_payoff_ratio,
 )
+from backend.services.ml_uncertainty_guard import stuck_uncertainty
+from backend.services.position_caps import effective_binance_position_cap
 from backend.services.kronos_gate import apply_kronos_gate
 from backend.services.opinion_layer import analyze_symbol as opinion_analyze
 from backend.services.risk_config import RiskConfig
@@ -892,9 +894,24 @@ class DecisionEngine:
                             # Conformal Uncertainty Veto: reject trades in high ambiguity or wide conformal sets
                             if uncertainty == "HIGH" or gated:
                                 reason = ml_res.get("gated_reason") or f"Conformal uncertainty is HIGH (margin={ml_res.get('conformal_margin', 0):.3f})"
-                                logger.info(f"[{symbol}] Jesse ML Conformal Uncertainty Gate VETO: {reason} blocks {signal.signal}")
-                                self._record_eval(symbol, signal.signal, signal.confidence, f"vetoed by Jesse ML uncertainty gate ({reason})")
-                                return None
+                                if stuck_uncertainty.observe(
+                                    symbol,
+                                    margin=ml_res.get("conformal_margin"),
+                                    latest_close=ml_res.get("latest_close"),
+                                    reason=reason,
+                                ):
+                                    logger.warning(
+                                        "[%s] Jesse ML uncertainty output is stuck (%s) — "
+                                        "skipping stale veto so the symbol can trade",
+                                        symbol,
+                                        reason,
+                                    )
+                                else:
+                                    logger.info(f"[{symbol}] Jesse ML Conformal Uncertainty Gate VETO: {reason} blocks {signal.signal}")
+                                    self._record_eval(symbol, signal.signal, signal.confidence, f"vetoed by Jesse ML uncertainty gate ({reason})")
+                                    return None
+                            else:
+                                stuck_uncertainty.reset(symbol)
 
                             # Hard Veto if ML model opposes candidate direction
                             if signal.signal == "BUY" and (p_bearish >= 0.50 or ml_sig == "SELL"):
@@ -1003,7 +1020,7 @@ class DecisionEngine:
                     return None
 
         # 6. Max positions check (flatten/reverse of an existing leg is not a new slot)
-        max_positions_cap = getattr(self.config, "max_binance_positions", self.config.max_positions)
+        max_positions_cap = effective_binance_position_cap(self.config)
         if open_count >= max_positions_cap:
             self._record_eval(symbol, signal.signal, signal.confidence,
                               f"max positions reached ({max_positions_cap})")

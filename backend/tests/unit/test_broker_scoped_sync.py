@@ -118,6 +118,40 @@ async def test_legacy_null_broker_rows_reconcile_with_binance():
     assert db.query(Trade).filter(Trade.symbol == "SOLUSDT").one().status == "closed"
 
 
+@pytest.mark.asyncio
+async def test_binance_sync_attaches_usdc_row_to_live_usdt_leg():
+    """A strategy row on ETHUSDC must stay open when the live book is ETHUSDT."""
+    db = _session()
+    db.add(
+        Trade(
+            symbol="ETHUSDC",
+            direction="SELL",
+            quantity=0.02,
+            entry_price=4000.0,
+            status="open",
+            broker="binance_futures",
+            strategy="combined",
+            mode="live",
+        )
+    )
+    db.commit()
+    broker = MagicMock()
+    broker.get_positions.return_value = [
+        {"symbol": "ETHUSDT", "side": "SELL", "quantity": 0.02, "entry_price": 4001.0}
+    ]
+
+    await BrokerPositionSyncService.sync_positions(
+        db, broker, {}, {}, broker_name="binance_futures"
+    )
+
+    row = db.query(Trade).one()
+    assert row.status == "open"
+    assert row.symbol == "ETHUSDT"
+    assert row.strategy == "combined"
+    assert row.broker_position_id == "ETHUSDT:SHORT"
+    broker.cancel_all_orders.assert_not_called()
+
+
 def test_active_broker_name_matches_selector(monkeypatch):
     from backend.services import trading_loop
 
