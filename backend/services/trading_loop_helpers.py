@@ -303,6 +303,13 @@ class BrokerPositionSyncService:
         updated = 0
         adopted = 0
         try:
+            # A dry-run adapter has no real book; reconciling against its
+            # empty/synthetic snapshot would close live DB rows. Compare with
+            # is True so test doubles (MagicMock attrs are truthy) and
+            # brokers without the flag still reconcile.
+            if getattr(broker, "dry_run", False) is True:
+                return 0
+
             broker_raw = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: broker.get_positions(raise_on_error=True)
             )

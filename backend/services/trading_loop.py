@@ -341,9 +341,17 @@ class TradingLoopService:
         books: list[dict] = []
         try:
             if hasattr(ctrader_broker, "get_balance"):
-                ct = ctrader_broker.get_balance() or {}
-                if ct:
-                    books.append({**ct, "broker": ct.get("broker") or "ctrader"})
+                ct_connected = bool(
+                    ctrader_broker.is_connected()
+                    if callable(getattr(ctrader_broker, "is_connected", None))
+                    else getattr(ctrader_broker, "is_connected", False)
+                )
+                if not ct_connected:
+                    books.append({"broker": "ctrader", "error": "not_connected"})
+                else:
+                    ct = ctrader_broker.get_balance() or {}
+                    if ct:
+                        books.append({**ct, "broker": ct.get("broker") or "ctrader"})
         except Exception as exc:
             logger.warning("cTrader get_balance failed: %s", exc)
             books.append({"broker": "ctrader", "error": type(exc).__name__})

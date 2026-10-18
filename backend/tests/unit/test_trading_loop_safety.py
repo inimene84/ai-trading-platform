@@ -1,8 +1,8 @@
 """Trading loop safety fixes: status balance, pyramid reconstruct, live SL/TP skip."""
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
-from backend.services.trading_loop import TradingLoopService
+from backend.services.trading_loop import TradingLoopService, ctrader_broker
 from backend.services.trading_loop_helpers import remove_closed_pyramid_layer
 from backend.services.trading_mode import TradingMode
 
@@ -92,6 +92,8 @@ def test_status_uses_broker_balance():
     ), patch(
         "backend.services.trading_loop.get_active_broker_name",
         return_value="ctrader",
+    ), patch.object(
+        type(ctrader_broker), "is_connected", new_callable=PropertyMock, return_value=True,
     ):
         st = loop.status
     assert st["cash"] == 44.0
@@ -99,6 +101,28 @@ def test_status_uses_broker_balance():
     assert st["margin_used"] == 47.0
     assert st["split_book"] is False
     assert st["risk_broker"] in {"ctrader", "cTrader"}
+
+
+def test_status_ignores_ctrader_balance_when_disconnected():
+    """A disconnected cTrader adapter can hold a stale cached balance; never use it."""
+    loop = TradingLoopService()
+    stale = MagicMock(return_value={"available": 44.0, "equity": 91.5, "balance": 91.5, "broker": "ctrader"})
+    with patch(
+        "backend.services.trading_loop.get_trading_mode",
+        return_value=TradingMode.LIVE,
+    ), patch.object(
+        loop, "_is_live_binance", return_value=False,
+    ), patch(
+        "backend.services.trading_loop.ctrader_broker.get_balance", stale,
+    ), patch(
+        "backend.services.trading_loop.get_active_broker_name",
+        return_value="ctrader",
+    ), patch.object(
+        type(ctrader_broker), "is_connected", new_callable=PropertyMock, return_value=False,
+    ):
+        st = loop.status
+    stale.assert_not_called()
+    assert st["cash"] != 44.0
 
 
 def test_status_uses_binance_equity_on_split_book(monkeypatch):
