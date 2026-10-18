@@ -2,6 +2,7 @@
 Unit tests for cTrader Open API Service & Token Lifecycle Manager.
 Verifies BrokerService protocol adherence, symbol mapping, lot conversions, and paper simulation.
 """
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -429,8 +430,10 @@ def test_get_trendbars_live_missing_symbol_id_returns_empty():
 
 
 def test_trendbar_lookback_is_count_bounded_for_m5():
-    """M5 requests must not ask for a 7-day payload."""
-    ms = CTraderService.trendbar_lookback_ms(5, 40)
+    """M5 requests must not ask for a 7-day payload (mid-week, session open)."""
+    wednesday = datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc)
+    now_ms = int(wednesday.timestamp() * 1000)
+    ms = CTraderService.trendbar_lookback_ms(5, 40, now_ms=now_ms, symbol="EURUSD")
     seven_days = 7 * 86400 * 1000
     assert ms < seven_days
     assert ms >= 40 * 300 * 1000
