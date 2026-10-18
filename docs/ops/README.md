@@ -14,6 +14,7 @@ Canonical, still-current docs live at the repo root:
 
 | File | Purpose |
 |------|---------|
+| `VENUE_FUSION.md` | Binance + cTrader venue-fusion flags (all default off/shadow) |
 | `ACTION_PLAN.md` | Historical action plan |
 | `DIAGNOSIS_SUMMARY.md` | Past incident diagnosis |
 | `DEBUG_PORT.md` | Debug-port notes |

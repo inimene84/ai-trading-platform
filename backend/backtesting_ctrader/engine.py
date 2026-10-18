@@ -25,6 +25,8 @@ from typing import Optional
 
 import numpy as np
 
+from backend.backtesting_ctrader.venue_costs import estimate_round_trip, venue_costs_enabled
+
 logger = logging.getLogger(__name__)
 
 
@@ -230,7 +232,20 @@ class BacktestEngine:
             raw_pnl = (position["entry_price"] - exit_price) * qty
 
         commission = position["entry_price"] * qty * self.commission
-        pnl = raw_pnl - commission
+        extra = 0.0
+        if venue_costs_enabled():
+            notional = float(position["entry_price"]) * abs(float(qty))
+            hours = float(position.get("hold_hours") or 0.0)
+            costs = estimate_round_trip(
+                venue="ctrader",
+                symbol=str(position.get("symbol") or ""),
+                notional=notional,
+                side=str(side),
+                hours_held=hours,
+                lots=abs(float(qty)),
+            )
+            extra = float(costs.get("total") or 0.0)
+        pnl = raw_pnl - commission - extra
         return pnl, balance + pnl
 
     def _compute_sl_tp(self, sig, entry: float, bars: list):
