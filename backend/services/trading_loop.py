@@ -276,6 +276,18 @@ class TradingLoopService:
         return [t for t in open_trades if is_binance_paper_fill(t)]
 
     @staticmethod
+    def _execution_total_open(total_all: int, own_open: int) -> int:
+        """Open-symbol count for the execution-time MAX_POSITIONS check.
+
+        Paper-parallel: the loop's own non-cTrader book (self._open_count),
+        same scope as the max-open and same-direction checks; the cTrader/n8n
+        forex legs have their own caps. Otherwise the all-book count, unchanged.
+        """
+        if TradingLoopService._crypto_session_id() == BINANCE_PAPER_SESSION_ID:
+            return int(own_open or 0)
+        return int(total_all or 0)
+
+    @staticmethod
     def _same_direction_symbols(all_open, scoped_open, action):
         """Distinct symbols already open in *action* for the correlation cap.
 
@@ -1541,7 +1553,10 @@ class TradingLoopService:
                     # Re-check the position cap inside the lock with the freshest count
                     max_binance_cap = effective_binance_position_cap(self.risk_config)
                     max_total_cap = self.risk_config.max_positions
-                    total_open = getattr(self, "_total_open_count", self._open_count)
+                    total_open = self._execution_total_open(
+                        getattr(self, "_total_open_count", self._open_count),
+                        self._open_count,
+                    )
                     at_binance_cap, observed, _cap = binance_book_at_cap(
                         self.risk_config,
                         db_open_count=self._open_count,
