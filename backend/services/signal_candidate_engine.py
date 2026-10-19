@@ -44,6 +44,7 @@ from backend.services.funding_filter import (
     fetch_funding_rate,
 )
 
+from backend.services.entry_blocklists import entry_block_reason
 logger = logging.getLogger(__name__)
 
 # Broker rejects that will fail identically on every retry of the same order.
@@ -879,6 +880,23 @@ class SignalCandidateEngine:
         """
         try:
             equity = float(getattr(ctrader_service, "equity", 0) or 0)
+            age_fn = getattr(ctrader_service, "balance_age_sec", None)
+            age = age_fn() if callable(age_fn) else None
+            max_age = float(os.getenv("CTRADER_EQUITY_MAX_AGE_SEC", "900") or 900)
+            if equity > 0 and age is not None and age > max_age:
+                # Snapshot is only taken at account auth; never size a new
+                # trade off an old one. Ask for a fresh one (read-only) and
+                # use the conservative fallback until it arrives.
+                refresh = getattr(ctrader_service, "request_balance_refresh", None)
+                if callable(refresh):
+                    refresh()
+                fallback = float(os.getenv("CTRADER_FALLBACK_EQUITY", "150"))
+                logger.warning(
+                    "cTrader equity snapshot is %.0fs old (> %.0fs); sizing on min(snapshot, "
+                    "fallback $%.0f) until refreshed",
+                    age, max_age, fallback,
+                )
+                return min(equity, fallback)
             if equity > 0:
                 return equity
         except Exception:
@@ -1305,6 +1323,35 @@ class SignalCandidateEngine:
             }
         return None
 
+    @staticmethod
+    def _binance_paper_book_equity() -> Optional[float]:
+        """Paper-book equity when Binance runs paper (paper-parallel or paper mode).
+
+        Paper candidates fill in the local paper book, so size them from it,
+        not from the live wallet (0 in paper) or BINANCE_FALLBACK_EQUITY.
+        Returns None when Binance is live, or no paper book exists.
+        """
+        from backend.services.trading_mode import (
+            BINANCE_PAPER_SESSION_ID,
+            TradingMode,
+            binance_paper_parallel_enabled,
+            get_trading_mode,
+        )
+
+        if not (binance_paper_parallel_enabled() or get_trading_mode() != TradingMode.LIVE):
+            return None
+        try:
+            from backend.services.unified_trading import UnifiedTrading
+
+            pf = UnifiedTrading().get_paper_portfolio(
+                BINANCE_PAPER_SESSION_ID if binance_paper_parallel_enabled() else None
+            ) or {}
+            eq = float(pf.get("equity") or pf.get("cash") or 0.0)
+            return eq if eq > 0 else None
+        except Exception as err:
+            logger.debug("paper book equity lookup failed: %s", err)
+            return None
+
     def _resolve_equity(self, broker: str) -> float:
         """Live account equity for risk sizing. Conservative fallback, never $10k on a live book."""
         if broker == "ctrader":
@@ -1312,6 +1359,10 @@ class SignalCandidateEngine:
         cached = self._equity_cache.get(broker)
         if cached is not None:
             return cached
+        paper_eq = self._binance_paper_book_equity()
+        if paper_eq is not None:
+            self._equity_cache[broker] = paper_eq
+            return paper_eq
         fallback = float(os.getenv("BINANCE_FALLBACK_EQUITY", "150"))
         equity = 0.0
         try:
@@ -1448,6 +1499,10 @@ class SignalCandidateEngine:
                     if not (ctrader_crypto_orders_allowed() and is_ic_crypto_symbol(sym)):
                         continue
                 broker = broker_for_scan_symbol(sym)
+                block = entry_block_reason(broker, sym)
+                if block:
+                    logger.info(f"[{sym}] scan skip: {block}")
+                    continue
                 if broker == "ctrader" and self._ctrader_venue_closed(sym):
                     continue
                 if broker == "ctrader" and self._ctrader_entry_cutoff(sym):
@@ -1483,6 +1538,10 @@ class SignalCandidateEngine:
                 for ev in evaluators:
                     raw_signal = ev(sym, features, broker)
                     if raw_signal:
+                        strat_block = entry_block_reason(broker, sym, raw_signal.get("strategy"))
+                        if strat_block:
+                            logger.info(f"[{sym}] scan skip: {strat_block}")
+                            continue  # next strategy may still qualify
                         if broker == "ctrader":
                             sl, tp = CTraderService.clamp_protective_prices(
                                 sym,
@@ -1976,6 +2035,17 @@ class SignalCandidateEngine:
                 return {"success": False, "error": "Timing window expired."}
 
         cand_sym = str(cand.get("symbol", "")).upper()
+        # Config blocklists apply even with force=True (approved cut, Oct 19).
+        block = entry_block_reason(cand.get("broker"), cand_sym, cand.get("strategy"))
+        if block:
+            cand["status"] = CandidateStatus.CANCELLED
+            logger.info(f"[{cand_sym}] execute refused: {block}")
+            return {
+                "success": False,
+                "skipped": True,
+                "candidate_id": candidate_id,
+                "error": block,
+            }
         if not force and cand.get("broker") == "ctrader" and self._ctrader_venue_closed(cand_sym):
             return {
                 "success": False,

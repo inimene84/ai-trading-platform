@@ -359,6 +359,7 @@ class CTraderProtocol:
                 self._service.balance = balance
                 self._service.equity = balance
                 self._service.margin = 0.0
+                self._service._balance_updated_at = time.monotonic()
                 self._service._leverage = trader.leverageInCents / 100 if trader.leverageInCents else 500
                 self._service._broker_name = trader.brokerName if trader.brokerName else "cTrader Broker"
                 self._service._trader_login = trader.traderLogin if trader.traderLogin else 0
@@ -786,6 +787,9 @@ class CTraderService(BrokerService):
         self.balance: float = 0.0
         self.equity: float = 0.0
         self.margin: float = 0.0
+        # Monotonic time of the last ProtoOATraderRes (0 = never).
+        self._balance_updated_at: float = 0.0
+        self._balance_refresh_requested_at: float = 0.0
         self._leverage: float = 500.0
         self._broker_name: str = "cTrader"
         self._trader_login: int = 0
@@ -1823,6 +1827,34 @@ class CTraderService(BrokerService):
         self._protocol = None
         self._dry_run = True
         logger.info("cTrader disconnected — paper mode enabled")
+
+    def balance_age_sec(self) -> Optional[float]:
+        """Seconds since the last account balance snapshot, None if never."""
+        ts = float(getattr(self, "_balance_updated_at", 0.0) or 0.0)
+        if ts <= 0:
+            return None
+        return max(0.0, time.monotonic() - ts)
+
+    def request_balance_refresh(self, min_interval_sec: float = 60.0) -> bool:
+        """Ask Spotware for a fresh ProtoOATraderRes (read-only). Non-blocking."""
+        now = time.monotonic()
+        if now - float(getattr(self, "_balance_refresh_requested_at", 0.0) or 0.0) < min_interval_sec:
+            return False
+        if self._dry_run or not self.is_connected or self._protocol is None:
+            return False
+        try:
+            from ctrader_open_api.messages import OpenApiMessages_pb2 as msgs
+            from twisted.internet import reactor
+
+            req = msgs.ProtoOATraderReq()
+            req.ctidTraderAccountId = self._account_id or 0
+            proto = self._protocol
+            reactor.callFromThread(lambda: proto._send(req, 2121))
+            self._balance_refresh_requested_at = now
+            return True
+        except Exception as e:
+            logger.debug("cTrader balance refresh request failed: %s", e)
+            return False
 
     def get_balance(self) -> Dict[str, Any]:
         """Fetch current balance, equity, and margin."""

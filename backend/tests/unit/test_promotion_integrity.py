@@ -308,7 +308,8 @@ async def test_shadow_logs_prediction_and_does_not_apply_kelly(monkeypatch):
 
     assert decision is not None
     assert decision.action == "BUY"
-    assert getattr(mock_signal, "kelly_multiplier", None) == 0.0
+    # Shadow contributes no sizing: None (0.0 now means "no edge -> skip").
+    assert getattr(mock_signal, "kelly_multiplier", None) is None
     assert engine.promotion_state.logged_predictions
     assert engine.last_evaluation.get("shadow_ml", {}).get("signal") == "SELL"
 

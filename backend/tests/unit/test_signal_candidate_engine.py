@@ -20,6 +20,17 @@ from backend.services.multi_asset_bars import classify_symbol, tf_to_binance_int
 
 
 @pytest.fixture(autouse=True)
+def _no_loser_blocklists(monkeypatch):
+    """These tests exercise other gates with MOMENTUM_TREND_PULSE fixtures.
+
+    The Oct 19 blocklists are covered in test_kelly_losers_20261019.py.
+    """
+    monkeypatch.setenv("CTRADER_DISABLED_STRATEGIES", "none")
+    monkeypatch.setenv("CTRADER_SYMBOL_BLOCKLIST", "none")
+    monkeypatch.setenv("BINANCE_BASE_BLOCKLIST", "none")
+
+
+@pytest.fixture(autouse=True)
 def isolate_ctrader_db_positions(monkeypatch):
     monkeypatch.setattr("backend.services.signal_candidate_engine.open_ctrader_db_symbols", lambda: set())
     monkeypatch.setattr("backend.services.signal_candidate_engine.count_open_ctrader_db_trades", lambda: 0)
