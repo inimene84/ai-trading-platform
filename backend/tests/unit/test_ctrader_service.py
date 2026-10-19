@@ -146,6 +146,18 @@ def test_normalize_position_price_keeps_decoded_gold_and_crypto():
     assert CTraderService.normalize_position_price(15_971_900, "USDJPY") == pytest.approx(159.719)
 
 
+def test_normalize_position_price_decodes_cheap_crypto_spotware_ints():
+    """DOGUSD/ADA/XRP raw = price*1e5 is also a plausible human quote — pick BASE_PRICES."""
+    assert CTraderService.normalize_position_price(15_000, "DOGUSD") == pytest.approx(0.15)
+    assert CTraderService.normalize_position_price(0.15, "DOGUSD") == pytest.approx(0.15)
+    assert CTraderService.normalize_position_price(45_000, "ADAUSD") == pytest.approx(0.45)
+    assert CTraderService.normalize_position_price(0.45, "ADAUSD") == pytest.approx(0.45)
+    assert CTraderService.normalize_position_price(58_500, "XRPUSD") == pytest.approx(0.585)
+    assert CTraderService.normalize_position_price(0.585, "XRPUSD") == pytest.approx(0.585)
+    assert CTraderService.normalize_position_price(155.0, "SOLUSD") == pytest.approx(155.0)
+    assert CTraderService.normalize_position_price(15_500_000, "SOLUSD") == pytest.approx(155.0)
+
+
 def test_nzdjpy_pip_and_digits_are_jpy_not_eurusd_defaults():
     assert CTraderService.digits_for("NZDJPY") == 3
     assert CTraderService.pip_size_for("NZDJPY") == Decimal("0.01")
@@ -753,6 +765,49 @@ def test_place_order_allows_mapped_crypto_on_demo_when_enabled(monkeypatch):
     res = svc.place_order(symbol="ETHUSDT", direction="BUY", quantity=0.1, price=3500.0)
     assert res["status"] == "simulated"
     assert res["symbol"] == "ETHUSD"
+    reset_ctrader_crypto_catalog_cache()
+
+
+def test_place_order_refuses_crypto_when_catalog_empty(monkeypatch):
+    """Empty accepted set must fail closed — not treat falsy as 'allow all'."""
+    monkeypatch.setenv("CTRADER_CRYPTO_ENABLED", "true")
+    monkeypatch.setenv("CTRADER_ENV", "demo")
+    monkeypatch.setenv("CTRADER_CRYPTO_SYMBOLS", "ETHUSDT")
+    from backend.services.ctrader_crypto import reset_ctrader_crypto_catalog_cache, validate_ctrader_crypto_catalog
+
+    reset_ctrader_crypto_catalog_cache()
+    validate_ctrader_crypto_catalog({"EURUSD"})  # live book has no IC crypto
+    svc = CTraderService()
+    res = svc.place_order(symbol="ETHUSD", direction="BUY", quantity=0.1, price=3500.0)
+    assert res["status"] == "error"
+    assert "catalog" in res["error"]
+    reset_ctrader_crypto_catalog_cache()
+
+
+def test_crypto_lots_do_not_snap_to_ten_lot_fx_step():
+    """0.1 ETHUSD is 10 protocol cents (1 coin/lot), not a 1000-cent FX step."""
+    assert CTraderService.step_volume_cents_for("ETHUSD") == 1
+    assert CTraderService.step_volume_cents_for("EURUSD") == 1_000
+    assert CTraderService.lots_to_protocol_volume(0.1, "ETHUSD") == 10
+    assert CTraderService.lots_to_protocol_volume(1.0, "ETHUSD") == 100
+    assert CTraderService.lots_to_protocol_volume(0.01, "EURUSD") == 100_000
+    spec = CTraderService().get_symbol_specification("ETHUSD")
+    assert spec["step_volume"] == 1
+    assert spec["lot_size"] == 1.0
+
+
+def test_priority_symbol_ids_include_accepted_crypto_when_enabled(monkeypatch):
+    monkeypatch.setenv("CTRADER_CRYPTO_ENABLED", "true")
+    monkeypatch.setenv("CTRADER_CRYPTO_SYMBOLS", "ETHUSDT,BTC")
+    from backend.services.ctrader_crypto import reset_ctrader_crypto_catalog_cache, validate_ctrader_crypto_catalog
+
+    reset_ctrader_crypto_catalog_cache()
+    validate_ctrader_crypto_catalog({"ETHUSD", "BTCUSD", "XAUUSD"})
+    svc = CTraderService()
+    ids = set(svc.priority_symbol_ids())
+    assert svc.DEFAULT_SYMBOL_IDS["ETHUSD"] in ids
+    assert svc.DEFAULT_SYMBOL_IDS["BTCUSD"] in ids
+    assert svc.DEFAULT_SYMBOL_IDS["XAUUSD"] in ids
     reset_ctrader_crypto_catalog_cache()
 
 

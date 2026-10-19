@@ -80,13 +80,34 @@ def daily_break_window() -> tuple[int, int, int, int]:
 
 
 def is_daily_break(now: Optional[datetime] = None) -> bool:
-    """True during the weekday daily maintenance window (not the weekend)."""
+    """True during the weekday daily maintenance window (not the weekend).
+
+    Friday 21:00 UTC is the FX weekly close, so this predicate stays False
+    after that hour (existing weekend skip covers FX). IC crypto CFDs stay
+    open Friday night — use ``is_ic_daily_break`` for their 21:00–22:00 gap.
+    """
     current = _as_utc(now)
     weekday = current.weekday()
     if weekday >= 5:  # Sat/Sun handled by the weekly window
         return False
     if weekday == SESSION_CLOSE_WEEKDAY and current.hour >= SESSION_CLOSE_HOUR:
         return False  # already weekly-closed
+    return _inside_daily_break_window(current)
+
+
+def is_ic_daily_break(now: Optional[datetime] = None) -> bool:
+    """IC crypto daily break — weekdays including Friday 21:00–22:00 UTC.
+
+    Unlike ``is_daily_break``, Friday after 21:00 is still the maintenance
+    gap (IC crypto is not weekly-closed). Weekend stays open.
+    """
+    current = _as_utc(now)
+    if current.weekday() >= 5:
+        return False
+    return _inside_daily_break_window(current)
+
+
+def _inside_daily_break_window(current: datetime) -> bool:
     start_h, start_m, end_h, end_m = daily_break_window()
     start = current.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
     end = current.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
@@ -208,7 +229,7 @@ def entry_cutoff_blocks(
         return False
     current = _as_utc(now)
     if is_crypto_symbol(symbol) and _is_ic_crypto_cfd(symbol):
-        if is_daily_break(current):
+        if is_ic_daily_break(current):
             return True
         remaining = time_until_venue_close(symbol, current)
         if remaining is None:
@@ -242,7 +263,10 @@ def evaluate_entry_cutoff(
         "mode": resolved,
         "would_block": would_block,
         "blocked": False,
-        "daily_break": is_daily_break(now) if (not is_crypto_symbol(symbol) or _is_ic_crypto_cfd(symbol)) else False,
+        "daily_break": (
+            is_ic_daily_break(now) if _is_ic_crypto_cfd(symbol)
+            else (is_daily_break(now) if not is_crypto_symbol(symbol) else False)
+        ),
         "minutes_until_close": None if remaining is None else remaining.total_seconds() / 60.0,
         "reason": "cutoff_off" if resolved == "off" else "cutoff_ok",
     }

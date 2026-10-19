@@ -1316,8 +1316,8 @@ class SignalCandidateEngine:
                 units = float(spec.get("lot_size") or 1.0)
                 lots = risk_amount / max(stop_distance * units, 1e-9)
                 lot_cents = float(ctrader_service.lot_size_cents(symbol) or 100.0)
-                min_vol = float(spec.get("min_volume") or 1.0)
-                step_vol = float(spec.get("step_volume") or 1.0)
+                min_vol = float(ctrader_service.min_volume_cents(symbol) or 1.0)
+                step_vol = float(ctrader_service.step_volume_cents(symbol) or 1.0)
                 min_lots = (min_vol / lot_cents) if lot_cents else 0.01
                 step_lots = (step_vol / lot_cents) if lot_cents else min_lots
                 lots = max(min_lots, lots)

@@ -694,6 +694,20 @@ def test_calculate_size_crypto_uses_candidate_stop_not_hardcoded_pct():
     assert wide["risk_usd"] == pytest.approx(50.0)
 
 
+def test_calculate_size_ic_crypto_does_not_snap_to_ten_lots():
+    """IC crypto step is 1 protocol unit (0.01 lot), not the FX 10-lot grid."""
+    engine = SignalCandidateEngine()
+    with patch(
+        "backend.services.signal_candidate_engine.ctrader_service.equity",
+        10000.0,
+    ):
+        sizing = engine._calculate_size("ETHUSD", 3500.0, 3465.0, "ctrader")
+    assert sizing["lots"] > 0
+    assert sizing["lots"] % 10 != 0 or sizing["lots"] < 10
+    # 0.5% of $10k / $35 stop ≈ 1.43 lots — must not jump to 10.
+    assert sizing["lots"] < 10.0
+
+
 def test_prune_terminal_candidates_drops_old_terminal_keeps_live():
     engine = SignalCandidateEngine()
     now = int(time.time())

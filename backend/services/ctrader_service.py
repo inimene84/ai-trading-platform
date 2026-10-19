@@ -7,6 +7,7 @@ safe paper mode by default, token lifecycle rotation persistence, and auto-recon
 """
 
 import logging
+import math
 import os
 import struct
 import threading
@@ -857,12 +858,25 @@ class CTraderService(BrokerService):
             return int(spec["min_volume"])
         return self.min_volume_cents_for(symbol)
 
+    @classmethod
+    def step_volume_cents_for(cls, symbol: Optional[str] = None) -> int:
+        """FX keeps the 1000-cent step. Crypto CFDs step in 1 protocol unit.
+
+        A 1000-cent fallback with ``lot_size_cents=100`` (1 coin) snaps 0.1 lot
+        onto a 10-lot grid. Metals keep the FX step — their lot sizes are large
+        enough that 1000 cents is still a fraction of 0.01 lot.
+        """
+        name = cls.normalize_symbol_name(symbol) if symbol else ""
+        if name and classify_symbol(name) == "crypto":
+            return 1
+        return cls.STEP_VOLUME_CENTS
+
     def step_volume_cents(self, symbol: Optional[str] = None) -> int:
         name = self.normalize_symbol_name(symbol) if symbol else ""
         spec = self._symbol_specs.get(name) or {}
         if spec.get("step_volume"):
             return int(spec["step_volume"])
-        return self.STEP_VOLUME_CENTS
+        return self.step_volume_cents_for(symbol)
 
     @classmethod
     def units_per_lot(cls, symbol: str, lot_size_cents: Optional[int] = None) -> float:
@@ -895,7 +909,7 @@ class CTraderService(BrokerService):
     ) -> int:
         size = int(lot_size or cls.lot_size_cents_for(symbol))
         min_vol = int(min_volume or cls.min_volume_cents_for(symbol))
-        step = int(step_volume or cls.STEP_VOLUME_CENTS)
+        step = int(step_volume if step_volume is not None else cls.step_volume_cents_for(symbol))
         raw = int(round(float(lots) * size))
         raw = max(min_vol, raw)
         if step > 0:
@@ -1025,6 +1039,20 @@ class CTraderService(BrokerService):
         decoded = val / float(cls.SPOTWARE_PRICE_SCALE)
         human_ok = cls._plausible_human_price(val, symbol)
         decoded_ok = cls._plausible_human_price(decoded, symbol)
+        name = cls.normalize_symbol_name(symbol) if symbol else ""
+        base = cls.BASE_PRICES.get(name) if name else None
+        # Cheap alts (DOGUSD $0.15 → raw 15000) are plausible both as a desk
+        # quote and as price*1e5. Pick the interpretation closer in log-space
+        # to the known quote; fall back to integer-like Spotware ints.
+        if human_ok and decoded_ok:
+            if base and base > 0 and val > 0 and decoded > 0:
+                human_dist = abs(math.log(val / float(base)))
+                decoded_dist = abs(math.log(decoded / float(base)))
+                chosen = decoded if decoded_dist < human_dist else val
+                return float(round(chosen, digits))
+            if val >= 1_000 and abs(val - round(val)) < 1e-9:
+                return float(round(decoded, digits))
+            return float(round(val, digits))
         if human_ok and not (decoded_ok and val >= cls.SPOTWARE_PRICE_SCALE):
             return float(round(val, digits))
         if decoded_ok:
@@ -1248,12 +1276,17 @@ class CTraderService(BrokerService):
         return merged
 
     def priority_symbol_ids(self) -> List[int]:
-        """Metals plus any open position — enough to size volume correctly."""
+        """Metals, accepted IC crypto, and open positions — needed for live lotSize/step."""
         wanted: set[int] = set()
         for name in ("XAUUSD", "XAGUSD", "GOLD", "SILVER"):
             sid = self._symbol_ids.get(name)
             if sid:
                 wanted.add(int(sid))
+        if ctrader_crypto_enabled():
+            for name in accepted_ctrader_crypto_symbols():
+                sid = self._symbol_ids.get(name)
+                if sid:
+                    wanted.add(int(sid))
         for pos in self._positions:
             sid = pos.get("symbol_id")
             if sid:
@@ -1873,7 +1906,7 @@ class CTraderService(BrokerService):
                     ),
                 }
             accepted = set(accepted_ctrader_crypto_symbols())
-            if accepted and mapped not in accepted:
+            if mapped not in accepted:
                 logger.warning(
                     "cTrader skipping unknown crypto symbol %s (not in live catalog)",
                     _log_symbol(mapped),
