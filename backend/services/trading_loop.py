@@ -262,6 +262,20 @@ class TradingLoopService:
         return live_binance_orders_allowed()
 
     @staticmethod
+    def _risk_position_book(open_trades):
+        """Rows the loop's max-open-positions check should count.
+
+        Paper-parallel: the loop trades only the local Binance paper book, so
+        count those fills; the cTrader/n8n forex book has its own caps.
+        Otherwise None (unchanged: the guard's broker-scoped book).
+        """
+        if TradingLoopService._crypto_session_id() != BINANCE_PAPER_SESSION_ID:
+            return None
+        from backend.services.ledger import is_binance_paper_fill
+
+        return [t for t in open_trades if is_binance_paper_fill(t)]
+
+    @staticmethod
     def _crypto_session_id() -> str | None:
         """Paper-parallel crypto fills use a dedicated session, not live cTrader.
 
@@ -726,7 +740,13 @@ class TradingLoopService:
         try:
             open_trades = db_risk.query(Trade).filter(Trade.status.in_(["open", "filled"])).all()
             latest_snapshot = latest_snapshot_for_risk(db_risk)
-            enforce_risk_limits(db_risk, self.risk_config, open_trades, latest_snapshot)
+            enforce_risk_limits(
+                db_risk,
+                self.risk_config,
+                open_trades,
+                latest_snapshot,
+                position_book=self._risk_position_book(open_trades),
+            )
         except RiskBreach as rb:
             logger.critical(
                 f"[RISK BREACH] {rb.reason}. LOOP STOPPED. "

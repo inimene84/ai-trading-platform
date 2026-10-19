@@ -330,6 +330,7 @@ def enforce_risk_limits(
     cfg: RiskConfig,
     open_trades: list[Trade],
     latest_snapshot: PortfolioSnapshot | None,
+    position_book: list[Trade] | None = None,
 ):
     """Enforces active trading safety guardrails.
 
@@ -361,9 +362,15 @@ def enforce_risk_limits(
     #    len(open_trades) over-counts and would false-trigger this breach. This
     #    matches how the trading loop itself defines an open position:
     #    func.count(func.distinct(Trade.symbol)).
+    #
+    #    position_book lets a caller scope the count to its own book: the
+    #    crypto loop in BINANCE_PAPER_PARALLEL mode owns only its paper fills,
+    #    and the cTrader/n8n forex book must not stop it (8 FX symbols vs a
+    #    crypto cap of 2 halted the loop every cycle).
     risk_trades = _trades_for_risk(open_trades)
+    count_trades = risk_trades if position_book is None else list(position_book)
     open_symbols = {
-        s for t in risk_trades if (s := getattr(t, "symbol", None))
+        s for t in count_trades if (s := getattr(t, "symbol", None))
     }
     position_count = len(open_symbols)
     position_cap = min(cfg.max_positions, cfg.max_open_positions)
