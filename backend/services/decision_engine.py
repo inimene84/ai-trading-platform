@@ -3,10 +3,6 @@ import logging
 from typing import Optional, Dict, Any, List, Never, Tuple
 from dataclasses import dataclass
 
-from sqlalchemy import func, or_
-
-from backend.database.connection import SessionLocal
-from backend.database.models import Trade
 from backend.ml.promotion_service import (
     PromotionState,
     apply_live_signal_check,
@@ -14,11 +10,8 @@ from backend.ml.promotion_service import (
     promotion_required,
     resolve_promotion,
 )
-from backend.services.equity_scope import risk_broker_name
-from backend.services.pnl_accounting import RECONCILIATION_STRATEGIES
 from backend.services.jesse_bridge import jesse_bridge
 from backend.services.jesse_ml_gates import (
-    STRATEGY_PAYOFF_RATIO,
     calculate_fractional_kelly,
     clip_kelly_for_thin_book,
     empirical_payoff_ratio,
