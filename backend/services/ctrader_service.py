@@ -2368,13 +2368,112 @@ class CTraderService(BrokerService):
         sl, _ = cls.clamp_protective_prices(symbol, entry_f, sl, None, direction=side)
         return float(round(sl, digits))
 
+    @staticmethod
+    def _db_protection_for(position_id: str | int) -> Dict[str, Optional[float]]:
+        """SL/TP stored on the open DB row for a cTrader position (read-only)."""
+        try:
+            from backend.database.connection import SessionLocal
+            from backend.database.models import Trade
+        except Exception:
+            return {}
+        db = None
+        try:
+            db = SessionLocal()
+            row = (
+                db.query(Trade)
+                .filter(
+                    Trade.broker_position_id == str(position_id),
+                    Trade.status.in_(["open", "filled"]),
+                )
+                .order_by(Trade.id.desc())
+                .first()
+            )
+            if row is None:
+                return {}
+            return {"stop_loss": row.stop_loss, "take_profit": row.take_profit}
+        except Exception as exc:
+            logger.debug("cTrader amend: DB protection lookup failed for %s: %s", position_id, exc)
+            return {}
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+
+    def _resolve_kept_leg(
+        self,
+        leg: str,
+        position_id: str | int,
+        matched: Optional[Dict[str, Any]],
+        db_levels: Optional[Dict[str, Optional[float]]],
+    ) -> tuple[Optional[float], str]:
+        """Existing level for an SL/TP leg the caller did not send.
+
+        ProtoOAAmendPositionSLTPReq is a full replace: an omitted
+        stopLoss/takeProfit is removed at the broker. Broker cache wins;
+        the DB row is a fallback and is only used while still on the
+        legal side of the current mark (a stale through-price level would
+        make the broker reject the whole amend, including the new SL).
+        """
+        cached = (matched or {}).get(leg)
+        try:
+            if cached is not None and float(cached) > 0:
+                return float(cached), "broker"
+        except (TypeError, ValueError):
+            pass
+        val = (db_levels or {}).get(leg)
+        try:
+            val = float(val) if val is not None else None
+        except (TypeError, ValueError):
+            val = None
+        if not val or val <= 0:
+            return None, "none"
+        side = str((matched or {}).get("side") or (matched or {}).get("direction") or "").upper()
+        symbol = str((matched or {}).get("symbol") or "")
+        mark = None
+        try:
+            mark = self.get_mark_price(symbol, side) if symbol else None
+        except Exception:
+            mark = None
+        if mark is None:
+            try:
+                mark = float((matched or {}).get("current_price") or 0) or None
+            except (TypeError, ValueError):
+                mark = None
+        if mark:
+            buy = side in {"BUY", "LONG"}
+            sell = side in {"SELL", "SHORT"}
+            bad = (
+                (leg == "take_profit" and ((buy and val <= mark) or (sell and val >= mark)))
+                or (leg == "stop_loss" and ((buy and val >= mark) or (sell and val <= mark)))
+            )
+            if bad:
+                logger.warning(
+                    "cTrader amend %s: DB %s %s is through mark %s for %s — not re-sent",
+                    position_id, leg, val, mark, side,
+                )
+                return None, "db_through_mark"
+        return val, "db"
+
     def amend_position_sltp(
         self,
         position_id: str | int,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
+        *,
+        clear_stop_loss: bool = False,
+        clear_take_profit: bool = False,
     ) -> Dict[str, Any]:
-        """Set absolute SL/TP on an open cTrader position (ProtoOAAmendPositionSLTPReq)."""
+        """Set absolute SL/TP on an open cTrader position (ProtoOAAmendPositionSLTPReq).
+
+        The Spotware request replaces both legs: a field left out is removed
+        at the broker. So a leg passed as ``None`` now KEEPS the position's
+        existing level (broker cache, else the open DB row). Pass
+        ``clear_take_profit=True`` / ``clear_stop_loss=True`` to remove a leg
+        on purpose. When no existing level is known the leg is omitted, as
+        before.
+        """
         if self._orders_live_blocked() or self._dry_run or not self.is_connected or self._protocol is None:
             return {
                 "status": "simulated",
@@ -2386,7 +2485,30 @@ class CTraderService(BrokerService):
             (p for p in self._positions if str(p.get("position_id")) == str(position_id)),
             None,
         )
-        if stop_loss:
+        kept: Dict[str, str] = {}
+        db_levels: Optional[Dict[str, Optional[float]]] = None
+        # Only fill kept legs for a position we can see live in the broker
+        # cache; an unknown position keeps the old behaviour.
+        legs = (
+            (("stop_loss", clear_stop_loss), ("take_profit", clear_take_profit))
+            if matched is not None else ()
+        )
+        for leg, clear in legs:
+            current_val = stop_loss if leg == "stop_loss" else take_profit
+            if current_val or clear:
+                continue
+            cached = (matched or {}).get(leg)
+            if db_levels is None and not cached:
+                db_levels = self._db_protection_for(position_id)
+            val, source = self._resolve_kept_leg(leg, position_id, matched, db_levels)
+            if val:
+                kept[leg] = source
+                if leg == "stop_loss":
+                    stop_loss = val
+                else:
+                    take_profit = val
+        # Validate caller-supplied stops only; a kept broker/DB stop is not new.
+        if stop_loss and "stop_loss" not in kept:
             if not matched:
                 return {
                     "status": "error",
@@ -2435,16 +2557,18 @@ class CTraderService(BrokerService):
             payload_type = int(getattr(req, "payloadType", 0) or 2113)
             reactor.callFromThread(lambda: self._protocol._send(req, payload_type))
             logger.info(
-                "cTrader amend SL/TP sent for %s sl=%s tp=%s",
+                "cTrader amend SL/TP sent for %s sl=%s tp=%s%s",
                 position_id,
                 stop_loss,
                 take_profit,
+                f" (kept: {kept})" if kept else "",
             )
             return {
                 "status": "sent",
                 "position_id": str(position_id),
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
+                "kept": kept,
             }
         except Exception as e:
             logger.error("cTrader amend SL/TP failed for %s: %s", position_id, e)

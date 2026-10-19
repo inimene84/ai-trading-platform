@@ -156,7 +156,11 @@ def _manage_position(db, pos: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if side == "SELL" and cur_sl is not None and clamped_sl >= cur_sl - pip:
         return None
 
-    res = ctrader_service.amend_position_sltp(pid, stop_loss=clamped_sl)
+    # Spotware amend replaces both legs; send the live TP so a trail/BE
+    # move does not strip it (GBPAUD 298227173 lost TP this way).
+    res = ctrader_service.amend_position_sltp(
+        pid, stop_loss=clamped_sl, take_profit=pos.get("take_profit"),
+    )
     if res.get("status") in ("sent", "simulated"):
         logger.info(
             "Exit manager %s %s: SL %s -> %s (favorable=%.1f pips, R=%.1f pips)",

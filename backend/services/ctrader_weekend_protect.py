@@ -164,7 +164,10 @@ def apply_weekend_protect(positions: list[dict[str, Any]], ctrader, now: Optiona
         if entry <= 0 or side not in {"BUY", "SELL"}:
             continue
         if action["detail"] == "tighten_to_break_even":
-            res = ctrader.amend_position_sltp(action["position_id"], stop_loss=entry)
+            # Keep the live TP: the Spotware amend replaces both legs.
+            res = ctrader.amend_position_sltp(
+                action["position_id"], stop_loss=entry, take_profit=pos.get("take_profit"),
+            )
             action["result"] = res.get("status")
             plan["applied"].append(action)
         else:
