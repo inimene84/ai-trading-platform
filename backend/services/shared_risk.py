@@ -21,6 +21,12 @@ import os
 from typing import Any, Optional
 
 from backend.services.ctrader_crypto import crypto_base_asset
+from backend.services.ctrader_notional import (
+    ctrader_notional_usd,
+    ctrader_risk_exposure_usd,
+    dedupe_open_ctrader_rows,
+    is_ctrader_trade,
+)
 from backend.services.equity_scope import (
     binance_money_mode,
     compose_balance_payload,
@@ -43,20 +49,8 @@ def _is_fx_trade(trade: Any) -> bool:
 
 
 def _fx_notional_usdt(symbol: str, lots: float, price: float) -> float:
-    sym = str(symbol or "").upper().replace("/", "").replace("_", "")
-    lots = abs(float(lots or 0.0))
-    px = abs(float(price or 0.0))
-    if lots <= 0:
-        return 0.0
-    units = lots * 100_000.0
-    if len(sym) != 6:
-        return units * px if px > 0 else units
-    base, quote = sym[:3], sym[3:]
-    if base == "USD":
-        return units
-    if quote == "USD":
-        return units * (px if px > 0 else 1.0)
-    return units * px if px > 0 and px < 20 else units
+    """Full USD notional of a cTrader lot position (per-symbol units/lot)."""
+    return ctrader_notional_usd(symbol, lots, price)
 
 
 def _trade_exposure_usdt(trade: Any) -> float:
@@ -67,15 +61,16 @@ def _trade_exposure_usdt(trade: Any) -> float:
         q = float(qty or 0.0)
     except (TypeError, ValueError):
         return 0.0
+    symbol = str(getattr(trade, "symbol", "") or "")
+    if is_ctrader_trade(trade):
+        return ctrader_risk_exposure_usd(symbol, q, px)
     if _is_fx_trade(trade):
-        notional = _fx_notional_usdt(str(getattr(trade, "symbol", "") or ""), q, px)
-        lev = float(os.getenv("RISK_FX_LEVERAGE", os.getenv("CTRADER_LEVERAGE", "30")) or 30)
-        return notional / max(lev, 1.0)
+        return ctrader_risk_exposure_usd(symbol, q, px)
     return abs(px * q)
 
 
 def _directional_exposure_usdt(open_trades: list[Any]) -> float:
-    return sum(_trade_exposure_usdt(t) for t in open_trades)
+    return sum(_trade_exposure_usdt(t) for t in dedupe_open_ctrader_rows(list(open_trades or [])))
 
 
 def shared_risk_mode() -> str:
