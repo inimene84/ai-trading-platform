@@ -14,6 +14,13 @@ from backend.services.trading_mode import TradingMode, get_trading_mode
 from backend.database.models import Trade, PortfolioSnapshot
 from backend.services.ledger import is_binance_paper_fill
 from backend.services.shared_risk import evaluate_shared_risk
+from backend.services.ctrader_notional import (
+    CTRADER_BROKERS,
+    ctrader_notional_usd,
+    ctrader_risk_exposure_usd,
+    dedupe_open_ctrader_rows,
+)
+from backend.services.multi_asset_bars import classify_symbol
 
 
 def _snapshot_risk_equity(snapshot: PortfolioSnapshot | None) -> float:
@@ -192,44 +199,32 @@ class RiskBreach(Exception):
 
 
 def _is_fx_trade(trade: Trade) -> bool:
-    """cTrader FX/metal rows store quantity in lots, not coin units."""
+    """cTrader rows (FX, metals, crypto CFDs) store quantity in lots, not coin units.
+
+    Any cTrader row is lot-denominated. A bare 6-letter symbol with no broker
+    is treated as FX only when it is not a crypto CFD name (ETHUSD/BTCUSD).
+    """
     broker = str(getattr(trade, "broker", "") or getattr(trade, "exchange", "") or "").lower()
-    if broker in {"ctrader", "ctrader:paper", "icmarkets", "ic"}:
+    if broker in CTRADER_BROKERS:
         return True
+    if broker:
+        return False
     symbol = str(getattr(trade, "symbol", "") or "").upper().replace("/", "").replace("_", "")
+    if classify_symbol(symbol) == "crypto":
+        return False
     if len(symbol) == 6 and symbol.isalpha():
         return True
     return False
 
 
 def _fx_notional_usdt(symbol: str, lots: float, price: float) -> float:
-    """Approximate USD notional for 1 standard lot = 100_000 units of base.
+    """Full USD notional of a cTrader lot position (per-symbol units/lot).
 
-    quantity on cTrader trades is lots (0.01 = micro). Crypto-style
-    price*qty understates FX by ~1e5 and must not be used for the gate.
+    Kept for callers/tests; delegates to ctrader_notional so ETHUSD (1 coin
+    per lot), XAUUSD (100 oz) and XAGUSD (1,000 oz) are not sized as
+    100,000-unit FX lots.
     """
-    sym = str(symbol or "").upper().replace("/", "").replace("_", "")
-    lots = abs(float(lots or 0.0))
-    px = abs(float(price or 0.0))
-    if lots <= 0:
-        return 0.0
-    units = lots * 100_000.0
-    if len(sym) != 6:
-        return units * px if px > 0 else units
-    base, quote = sym[:3], sym[3:]
-    if base == "USD":
-        return units  # USDXXX: base notional is already USD
-    if quote == "USD":
-        return units * (px if px > 0 else 1.0)  # XXXUSD
-    if quote == "JPY":
-        # Convert JPY notional to USD with price if USDJPY-like, else ~150.
-        jpy_notional = units * (px if px > 0 else 150.0)
-        usdjpy = px if base == "USD" and px > 50 else float(os.getenv("RISK_USDJPY_FALLBACK", "150"))
-        return jpy_notional / max(usdjpy, 1.0)
-    # Other crosses: treat quote*units as quote-ccy, rough USD via price if small.
-    if px > 0 and px < 20:
-        return units * px
-    return units
+    return ctrader_notional_usd(symbol, lots, price)
 
 
 def _trade_exposure_usdt(trade: Trade) -> float:
@@ -247,13 +242,10 @@ def _trade_exposure_usdt(trade: Trade) -> float:
     except (TypeError, ValueError):
         return 0.0
     if _is_fx_trade(trade):
-        notional = _fx_notional_usdt(str(getattr(trade, "symbol", "") or ""), q, px)
-        # Cap compares against equity*mult (~4x). Full FX notional is leveraged
-        # buying power; use margin-equivalent exposure so a $1k demo with micros
-        # is not always halted. Override with RISK_FX_LEVERAGE.
-        lev = float(os.getenv("RISK_FX_LEVERAGE", os.getenv("CTRADER_LEVERAGE", "30")) or 30)
-        lev = max(lev, 1.0)
-        return notional / lev
+        # FX/metals: margin-equivalent (notional / RISK_FX_LEVERAGE) so a demo
+        # with micros is not always halted. cTrader crypto CFDs: full notional
+        # (1 coin per lot), like the crypto loop's |price*qty|.
+        return ctrader_risk_exposure_usd(str(getattr(trade, "symbol", "") or ""), q, px)
     return abs(px * q)
 
 
@@ -297,11 +289,13 @@ def _trades_for_risk(open_trades: list[Trade]) -> list[Trade]:
 def _directional_exposure_usdt(open_trades: list[Trade]) -> float:
     """Sum absolute exposure of open trades on the active broker book.
 
-    Crypto: |entry_price * quantity|.
-    FX/cTrader: lot notional in USD / RISK_FX_LEVERAGE (margin-equivalent).
+    Crypto (Binance): |entry_price * quantity|.
+    cTrader FX/metals: per-symbol lot notional in USD / RISK_FX_LEVERAGE.
+    cTrader crypto CFDs: lots * units_per_lot (1 coin) * price, full notional.
+    Duplicate open rows for one cTrader broker_position_id count once.
     """
     total = 0.0
-    for t in open_trades:
+    for t in dedupe_open_ctrader_rows(list(open_trades or [])):
         total += _trade_exposure_usdt(t)
     return total
 
