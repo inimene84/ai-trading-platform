@@ -138,7 +138,11 @@ export interface FeedQuotesResponse {
 }
 
 export interface FeedBar {
-  time: string | number;
+  /** cTrader/yfinance rows: unix seconds. Binance rows had null here until the backend fix. */
+  time: string | number | null;
+  /** Binance klines carry their open time as ISO-8601 `date`. */
+  date?: string;
+  timestamp?: string | number;
   open: number;
   high: number;
   low: number;

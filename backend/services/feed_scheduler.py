@@ -99,12 +99,49 @@ async def _job_dashboard_snapshot() -> None:
     logger.info("FeedScheduler: dashboard_snapshot completed")
 
 
+_DEFAULT_FX_BATCH = "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,USDCHF,NZDUSD,EURGBP,EURJPY,GBPJPY"
+
+
+def _fx_batch_symbols() -> List[str]:
+    """FX pairs for the Kronos batch, limited to what the active cTrader
+    account actually lists (empty when cTrader is not connected)."""
+    if not _env_flag("KRONOS_BATCH_FX_ENABLED", True):
+        return []
+    wanted = [s.strip().upper() for s in os.getenv("FEED_SYMBOLS_FX", _DEFAULT_FX_BATCH).split(",") if s.strip()]
+    try:
+        from backend.services.ctrader_service import ctrader_service
+        if not ctrader_service.is_connected:
+            return []
+        ids = getattr(ctrader_service, "_symbol_ids", {}) or {}
+        return [s for s in wanted if s in ids]
+    except Exception:
+        logger.debug("FeedScheduler: FX batch universe unavailable", exc_info=True)
+        return []
+
+
+def _fx_batch_pause_sec() -> float:
+    try:
+        return max(0.0, float(os.getenv("KRONOS_BATCH_FX_PAUSE_SEC", "1.0") or 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+
+
 async def _job_kronos_batch() -> None:
-    """Run Kronos predictions for the default universe; cache + publish results."""
+    """Run Kronos predictions for the default universe; cache + publish results.
+
+    FX pairs run last, one at a time with a short pause, so the CPU-bound
+    Kronos sidecar (2 cores) and Spotware's 5 req/s historical limit (the
+    trendbar pacer already enforces CTRADER_BAR_REQ_PER_SEC) stay unstressed.
+    """
+    started = asyncio.get_event_loop().time()
     universe = unified_feed.default_universe()
-    symbols = universe["crypto"] + universe["equities"] + universe["metals"]
+    fx_symbols = _fx_batch_symbols()
+    symbols = universe["crypto"] + universe["equities"] + universe["metals"] + fx_symbols
+    fx_set = set(fx_symbols)
     results: List[Dict[str, Any]] = []
     for sym in symbols:
+        if sym in fx_set:
+            await asyncio.sleep(_fx_batch_pause_sec())
         try:
             bars_payload = await unified_feed.get_bars(sym, "1h", limit=400)
             pred = await kronos_service.predict(bars_payload.get("data"), sym, "1h")
@@ -139,7 +176,10 @@ async def _job_kronos_batch() -> None:
 
     _LATEST_BATCH["as_of"] = _utc_now_iso()
     _LATEST_BATCH["results"] = results
-    logger.info("FeedScheduler: kronos_batch completed (%s symbols)", len(results))
+    logger.info(
+        "FeedScheduler: kronos_batch completed (%s symbols, %s FX) in %.1fs",
+        len(results), len(fx_symbols), asyncio.get_event_loop().time() - started,
+    )
 
 
 class FeedSchedulerService:

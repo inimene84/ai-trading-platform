@@ -12,7 +12,7 @@ import {
   Timer,
   Activity,
 } from 'lucide-react';
-import { createChart, ColorType, LineSeries, LineStyle } from 'lightweight-charts';
+import { createChart, ColorType, CandlestickSeries, LineSeries, LineStyle } from 'lightweight-charts';
 import { cn } from '../lib/utils';
 import { apiService } from '../services/apiService';
 import type {
@@ -24,10 +24,28 @@ import type {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const DEFAULT_UNIVERSE = [
-  'BTCUSDC', 'ETHUSDC', 'SOLUSDC', 'BNBUSDC', 'XRPUSDC',
-  'AAPL', 'MSFT', 'NVDA', 'SPX',
-  'XAUUSD', 'XAGUSD', 'XPTUSD', 'XPDUSD',
+// Every symbol here was checked on 2026-10-19 to return bars from
+// /api/feed/bars: crypto = Binance USDC-M perpetuals (TRADING_SYMBOLS plus the
+// most liquid USDC perps), FX = cTrader symbols the loop already pulls
+// trendbars for. Forecasts run on demand (one Kronos-mini CPU call each).
+const UNIVERSE_GROUPS: { label: string; symbols: string[] }[] = [
+  {
+    label: 'Crypto (Binance USDC perps)',
+    symbols: [
+      'BTCUSDC', 'ETHUSDC', 'SOLUSDC', 'BNBUSDC', 'XRPUSDC',
+      'AVAXUSDC', 'LINKUSDC', 'ADAUSDC', 'DOGEUSDC', 'LTCUSDC',
+      'SUIUSDC', 'BCHUSDC', 'NEARUSDC', 'AAVEUSDC', 'ARBUSDC',
+    ],
+  },
+  {
+    label: 'Forex (cTrader)',
+    symbols: [
+      'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'USDCAD',
+      'USDCHF', 'NZDUSD', 'EURGBP', 'EURJPY', 'GBPJPY',
+    ],
+  },
+  { label: 'Metals (cTrader)', symbols: ['XAUUSD', 'XAGUSD', 'XPTUSD', 'XPDUSD'] },
+  { label: 'Equities / index', symbols: ['AAPL', 'MSFT', 'NVDA', 'SPX'] },
 ];
 
 const INTERVALS = ['15m', '1h', '4h'] as const;
@@ -37,10 +55,17 @@ const HISTORY_LIMIT = 200;
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Convert backend bar/forecast timestamps to lightweight-charts unix seconds. */
-function toChartTime(t: string | number): number {
+function toChartTime(t: string | number | null | undefined): number {
+  if (t === null || t === undefined || t === '') return 0;
   if (typeof t === 'number') return t > 1e12 ? Math.floor(t / 1000) : Math.floor(t);
+  if (/^\d+$/.test(t)) return toChartTime(Number(t));
   const ms = Date.parse(t);
   return Number.isNaN(ms) ? 0 : Math.floor(ms / 1000);
+}
+
+/** Bars from /api/feed/bars: cTrader rows carry `time`, Binance rows `date`. */
+function barTime(b: FeedBar): number {
+  return toChartTime(b.time ?? b.date ?? b.timestamp);
 }
 
 function fmtPct(v: number | null | undefined): string {
@@ -105,9 +130,13 @@ function ForecastChart({
       },
     }) as any;
 
-    histSeriesRef.current = chart.addSeries(LineSeries, {
-      color: '#10b981',
-      lineWidth: 2,
+    histSeriesRef.current = chart.addSeries(CandlestickSeries, {
+      upColor: '#10b981',
+      downColor: '#f43f5e',
+      borderUpColor: '#10b981',
+      borderDownColor: '#f43f5e',
+      wickUpColor: '#10b981',
+      wickDownColor: '#f43f5e',
       title: 'Historical',
     });
     fcSeriesRef.current = chart.addSeries(LineSeries, {
@@ -136,15 +165,22 @@ function ForecastChart({
   useEffect(() => {
     if (!histSeriesRef.current || !fcSeriesRef.current) return;
 
-    const histByTime = new Map<number, number>();
+    const histByTime = new Map<number, FeedBar>();
     for (const b of bars) {
-      const t = toChartTime(b.time);
-      if (t > 0) histByTime.set(t, b.close);
+      const t = barTime(b);
+      if (t > 0 && Number(b.close) > 0) histByTime.set(t, b);
     }
-    const histData = Array.from(histByTime.entries())
+    const candles = Array.from(histByTime.entries())
       .sort((a, b) => a[0] - b[0])
-      .map(([time, value]) => ({ time: time as any, value }));
-    histSeriesRef.current.setData(histData);
+      .map(([time, b]) => ({
+        time: time as any,
+        open: Number(b.open),
+        high: Number(b.high),
+        low: Number(b.low),
+        close: Number(b.close),
+      }));
+    histSeriesRef.current.setData(candles);
+    const histData = candles.map(c => ({ time: c.time, value: c.close }));
 
     const path = forecastPath || [];
     const fcByTime = new Map<number, number>();
@@ -171,7 +207,7 @@ function ForecastChart({
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-4 text-[10px] font-bold uppercase tracking-wider">
         <span className="flex items-center gap-1.5 text-emerald-400">
-          <span className="inline-block w-4 h-0.5 bg-emerald-500 rounded" /> Historical close
+          <span className="inline-block w-4 h-0.5 bg-emerald-500 rounded" /> Historical candles
         </span>
         <span className="flex items-center gap-1.5 text-amber-400">
           <span className="inline-block w-4 border-t-2 border-dashed border-amber-500" /> Kronos forecast path
@@ -272,8 +308,12 @@ export const ForecastPanel: React.FC = () => {
             onChange={(e) => setSymbol(e.target.value)}
             className="bg-zinc-900/90 border border-zinc-800 rounded-xl py-2 px-3 text-xs font-mono font-bold text-white focus:outline-none focus:border-emerald-500/50"
           >
-            {DEFAULT_UNIVERSE.map(s => (
-              <option key={s} value={s}>{s}</option>
+            {UNIVERSE_GROUPS.map(g => (
+              <optgroup key={g.label} label={g.label}>
+                {g.symbols.map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </optgroup>
             ))}
           </select>
 

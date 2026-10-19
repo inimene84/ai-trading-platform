@@ -475,9 +475,10 @@ def test_trendbar_lookback_is_count_bounded_for_m5():
     assert ms <= (40 + 2) * 300 * 1000
 
 
-def test_trendbar_lookback_caps_long_periods_at_seven_days():
-    ms = CTraderService.trendbar_lookback_ms(11, 500)
-    assert ms == 7 * 86400 * 1000
+def test_trendbar_lookback_caps_intraday_at_seven_days_long_periods_at_a_year():
+    # H1 (9) keeps the 7-day cap; H12 (11) and longer use the 1-year cap.
+    assert CTraderService.trendbar_lookback_ms(9, 500) == 7 * 86400 * 1000
+    assert CTraderService.trendbar_lookback_ms(11, 5000) == 365 * 86400 * 1000
 
 
 def test_rate_limit_does_not_drop_the_session():
