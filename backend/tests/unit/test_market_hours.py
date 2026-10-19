@@ -7,6 +7,7 @@ from backend.services.market_hours import (
     is_closed_for_lookback,
     is_crypto_symbol,
     is_daily_break,
+    is_ic_daily_break,
     is_venue_open,
     market_hours_lookback_ms,
     time_until_venue_close,
@@ -15,9 +16,27 @@ from backend.services.market_hours import (
 
 def test_crypto_always_open_on_weekend():
     saturday = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)  # Saturday
-    for symbol in ("BTCUSDT", "ETHUSDC", "BTC-USD", "SOL-USD"):
+    for symbol in ("BTCUSDT", "ETHUSDC", "BTC-USD", "SOL-USD", "ETHUSD", "BTCUSD"):
         assert is_crypto_symbol(symbol) is True
         assert is_venue_open(symbol, saturday) is True
+
+
+def test_ic_crypto_respects_daily_break_not_weekend():
+    saturday = datetime(2026, 9, 12, 21, 15, tzinfo=timezone.utc)
+    wed_break = datetime(2026, 9, 16, 21, 15, tzinfo=timezone.utc)
+    wed_open = datetime(2026, 9, 16, 14, 0, tzinfo=timezone.utc)
+    friday_break = datetime(2026, 9, 11, 21, 15, tzinfo=timezone.utc)
+    assert is_venue_open("ETHUSD", saturday) is True
+    assert entry_cutoff_blocks("ETHUSD", saturday, minutes=30) is False
+    assert entry_cutoff_blocks("ETHUSD", wed_break, minutes=30) is True
+    assert entry_cutoff_blocks("ETHUSD", wed_open, minutes=30) is False
+    # Friday 21:00–22:00 is still the IC maintenance gap (crypto is not weekly-closed).
+    assert is_daily_break(friday_break) is False  # FX weekly-close exception unchanged
+    assert is_ic_daily_break(friday_break) is True
+    assert entry_cutoff_blocks("ETHUSD", friday_break, minutes=30) is True
+    # Binance perps still never take the IC daily break.
+    assert entry_cutoff_blocks("ETHUSDT", wed_break, minutes=30) is False
+    assert entry_cutoff_blocks("ETHUSDT", friday_break, minutes=30) is False
 
 
 def test_forex_and_metals_closed_saturday():

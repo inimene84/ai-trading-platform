@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from backend.database.connection import SessionLocal
 from backend.database.models import Trade
+from backend.services.ctrader_crypto import ctrader_trade_mode
 from backend.services.trade_dedupe import find_open_leg
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,9 @@ _OPEN_STATUSES = ("open", "filled")
 _CTRADER_EXTRA_SYMBOLS = {
     "XAUUSD", "XAGUSD", "GOLD", "SILVER", "OIL", "WTI", "BRENT",
     "XTIUSD", "XBRUSD", "US30", "NAS100", "US500", "GER40", "UK100",
-    "JP225", "SPX500", "WS30", "NDX", "DAX", "BTCUSD", "ETHUSD", "SOLUSD",
+    "JP225", "SPX500", "WS30", "NDX", "DAX",
+    "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "ADAUSD", "BNBUSD",
+    "LNKUSD", "AVXUSD", "DOGUSD",
 }
 
 
@@ -58,8 +61,6 @@ def persist_ctrader_execution(
     notes: Optional[str] = None,
 ) -> Optional[int]:
     """Insert an open Trade row for a successful cTrader dispatch."""
-    from backend.services.trading_mode import live_ctrader_orders_allowed
-
     db = SessionLocal()
     try:
         trade = Trade(
@@ -76,7 +77,7 @@ def persist_ctrader_execution(
             broker_order_id=str(order_id) if order_id else None,
             broker_position_id=str(position_id) if position_id else None,
             notes=notes or "cTrader live execution",
-            mode="live" if live_ctrader_orders_allowed() else "paper",
+            mode=ctrader_trade_mode(),
         )
         db.add(trade)
         db.commit()
@@ -367,6 +368,7 @@ def reconcile_ctrader_positions(
                 exchange="ctrader",
                 broker_position_id=pid or None,
                 notes="Synced from cTrader live book",
+                mode=ctrader_trade_mode(),
             )
         )
         created += 1

@@ -232,6 +232,8 @@ def test_usdcad_classified_as_forex_not_crypto():
     """USDCAD must not match USDC substring and route to cTrader."""
     assert classify_symbol("USDCAD") == "forex"
     assert classify_symbol("BTCUSDT") == "crypto"
+    assert classify_symbol("BTCUSD") == "crypto"
+    assert classify_symbol("ETHUSD") == "crypto"
 
 
 def test_six_letter_usdt_perps_are_crypto_not_forex():
@@ -690,6 +692,20 @@ def test_calculate_size_crypto_uses_candidate_stop_not_hardcoded_pct():
     assert tight["quantity"] > wide["quantity"]
     assert tight["risk_usd"] == pytest.approx(50.0)
     assert wide["risk_usd"] == pytest.approx(50.0)
+
+
+def test_calculate_size_ic_crypto_does_not_snap_to_ten_lots():
+    """IC crypto step is 1 protocol unit (0.01 lot), not the FX 10-lot grid."""
+    engine = SignalCandidateEngine()
+    with patch(
+        "backend.services.signal_candidate_engine.ctrader_service.equity",
+        10000.0,
+    ):
+        sizing = engine._calculate_size("ETHUSD", 3500.0, 3465.0, "ctrader")
+    assert sizing["lots"] > 0
+    assert sizing["lots"] % 10 != 0 or sizing["lots"] < 10
+    # 0.5% of $10k / $35 stop ≈ 1.43 lots — must not jump to 10.
+    assert sizing["lots"] < 10.0
 
 
 def test_prune_terminal_candidates_drops_old_terminal_keeps_live():

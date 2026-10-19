@@ -40,4 +40,5 @@ def test_describe_table_lists_all_asset_classes():
     assert table["crypto"] == "binance_futures"
     assert table["forex"] == "ctrader"
     assert table["metal"] == "ctrader"
+    assert table["ctrader_crypto_enabled"] == "false"
     assert set(table) >= {"crypto", "forex", "metal", "oil", "index", "stock"}

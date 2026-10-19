@@ -20,6 +20,13 @@ from backend.services.multi_asset_bars import classify_symbol
 
 _CRYPTO_YFINANCE = {"BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD"}
 
+
+def _is_ic_crypto_cfd(symbol: str) -> bool:
+    """IC Markets crypto CFDs (BTCUSD) — 24/7 including weekend, daily break applies."""
+    from backend.services.ctrader_crypto import is_ic_crypto_symbol
+
+    return is_ic_crypto_symbol(symbol)
+
 # Weekly window (UTC). Matches the historical QuantumTrade / IC session.
 SESSION_OPEN_WEEKDAY = 6  # Sunday
 SESSION_OPEN_HOUR = 21
@@ -73,13 +80,34 @@ def daily_break_window() -> tuple[int, int, int, int]:
 
 
 def is_daily_break(now: Optional[datetime] = None) -> bool:
-    """True during the weekday daily maintenance window (not the weekend)."""
+    """True during the weekday daily maintenance window (not the weekend).
+
+    Friday 21:00 UTC is the FX weekly close, so this predicate stays False
+    after that hour (existing weekend skip covers FX). IC crypto CFDs stay
+    open Friday night — use ``is_ic_daily_break`` for their 21:00–22:00 gap.
+    """
     current = _as_utc(now)
     weekday = current.weekday()
     if weekday >= 5:  # Sat/Sun handled by the weekly window
         return False
     if weekday == SESSION_CLOSE_WEEKDAY and current.hour >= SESSION_CLOSE_HOUR:
         return False  # already weekly-closed
+    return _inside_daily_break_window(current)
+
+
+def is_ic_daily_break(now: Optional[datetime] = None) -> bool:
+    """IC crypto daily break — weekdays including Friday 21:00–22:00 UTC.
+
+    Unlike ``is_daily_break``, Friday after 21:00 is still the maintenance
+    gap (IC crypto is not weekly-closed). Weekend stays open.
+    """
+    current = _as_utc(now)
+    if current.weekday() >= 5:
+        return False
+    return _inside_daily_break_window(current)
+
+
+def _inside_daily_break_window(current: datetime) -> bool:
     start_h, start_m, end_h, end_m = daily_break_window()
     start = current.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
     end = current.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
@@ -113,10 +141,28 @@ def is_venue_open(symbol: str, now: datetime | None = None) -> bool:
 
 
 def next_venue_close(symbol: str, now: Optional[datetime] = None) -> Optional[datetime]:
-    """Next session close or daily-break start. None for 24/7 crypto."""
-    if is_crypto_symbol(symbol):
+    """Next session close or daily-break start. None for 24/7 Binance crypto.
+
+    IC crypto CFDs stay open on the weekend but still hit the weekday
+    daily-break window, so the next close is that break start.
+    """
+    if is_crypto_symbol(symbol) and not _is_ic_crypto_cfd(symbol):
         return None
     current = _as_utc(now)
+    if is_crypto_symbol(symbol) and _is_ic_crypto_cfd(symbol):
+        start_h, start_m, _end_h, _end_m = daily_break_window()
+        break_today = current.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+        if current.weekday() < 5 and current < break_today:
+            return break_today
+        # Weekend / after today's break → next weekday break.
+        days = 1
+        cursor = current
+        while days <= 7:
+            cursor = current + timedelta(days=days)
+            if cursor.weekday() < 5:
+                return cursor.replace(hour=start_h, minute=start_m, second=0, microsecond=0)
+            days += 1
+        return None
     if not is_venue_open(symbol, current):
         return current
     start_h, start_m, _end_h, _end_m = daily_break_window()
@@ -174,12 +220,22 @@ def entry_cutoff_blocks(
 ) -> bool:
     """True when an entry would sit inside the pre-close / daily-break window.
 
-    Crypto never blocks. Already-closed weekly sessions also block (the
-    existing ``is_venue_open`` path is the primary weekend skip).
+    Binance crypto never blocks. IC crypto CFDs respect the weekday daily
+    break (and the pre-break cutoff) but stay open on the weekend.
+    Already-closed weekly FX sessions also block (the existing
+    ``is_venue_open`` path is the primary weekend skip).
     """
-    if is_crypto_symbol(symbol):
+    if is_crypto_symbol(symbol) and not _is_ic_crypto_cfd(symbol):
         return False
     current = _as_utc(now)
+    if is_crypto_symbol(symbol) and _is_ic_crypto_cfd(symbol):
+        if is_ic_daily_break(current):
+            return True
+        remaining = time_until_venue_close(symbol, current)
+        if remaining is None:
+            return False
+        cutoff = entry_cutoff_minutes() if minutes is None else max(0.0, float(minutes))
+        return remaining.total_seconds() <= cutoff * 60.0
     if not is_venue_open(symbol, current):
         return True
     if is_daily_break(current):
@@ -207,7 +263,10 @@ def evaluate_entry_cutoff(
         "mode": resolved,
         "would_block": would_block,
         "blocked": False,
-        "daily_break": False if is_crypto_symbol(symbol) else is_daily_break(now),
+        "daily_break": (
+            is_ic_daily_break(now) if _is_ic_crypto_cfd(symbol)
+            else (is_daily_break(now) if not is_crypto_symbol(symbol) else False)
+        ),
         "minutes_until_close": None if remaining is None else remaining.total_seconds() / 60.0,
         "reason": "cutoff_off" if resolved == "off" else "cutoff_ok",
     }

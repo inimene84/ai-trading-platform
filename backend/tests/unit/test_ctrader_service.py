@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.brokers.base import BrokerService
-from backend.services.ctrader_service import CTraderProtocol, CTraderService, ctrader_broker
+from backend.services.ctrader_service import CTraderProtocol, CTraderService, _log_symbol, ctrader_broker
 from backend.services.ctrader_tokens import CTraderTokenStore
 
 
@@ -34,6 +34,8 @@ def test_symbol_normalization():
     assert svc._normalize_symbol("GBPUSD=X") == "GBPUSD"
     assert svc._normalize_symbol("BTC-USD") == "BTCUSD"
     assert svc._normalize_symbol("ETH-USD") == "ETHUSD"
+    assert svc._normalize_symbol("ETHUSDT") == "ETHUSD"
+    assert svc._normalize_symbol("LINKUSDT") == "LNKUSD"
     assert svc._normalize_symbol("USDJPY=X") == "USDJPY"
     assert svc._normalize_symbol("EURUSD") == "EURUSD"
 
@@ -129,6 +131,31 @@ def test_decode_spotware_price_always_divides_by_100000():
     assert CTraderService.decode_spotware_price(9_454_000, "NZDJPY") == pytest.approx(94.54)
     assert CTraderService.decode_spotware_price(15_420_000, "USDJPY") == pytest.approx(154.2)
     assert CTraderService.decode_spotware_price(116_172, "EURUSD") == pytest.approx(1.16172)
+
+
+def test_normalize_position_price_keeps_decoded_gold_and_crypto():
+    """Already-decoded XAUUSD ~4182 must not be divided by 1e5 (the 0.04 bug)."""
+    assert CTraderService.normalize_position_price(4182.50, "XAUUSD") == pytest.approx(4182.50)
+    assert CTraderService.normalize_position_price(418_250_000, "XAUUSD") == pytest.approx(4182.50)
+    assert CTraderService.normalize_position_price(67000.0, "BTCUSD") == pytest.approx(67000.0)
+    assert CTraderService.normalize_position_price(6_700_000_000, "BTCUSD") == pytest.approx(67000.0)
+    assert CTraderService.normalize_position_price(3500.25, "ETHUSD") == pytest.approx(3500.25)
+    assert CTraderService.normalize_position_price(1.16172, "EURUSD") == pytest.approx(1.16172)
+    assert CTraderService.normalize_position_price(116_172, "EURUSD") == pytest.approx(1.16172)
+    assert CTraderService.normalize_position_price(159.719, "USDJPY") == pytest.approx(159.719)
+    assert CTraderService.normalize_position_price(15_971_900, "USDJPY") == pytest.approx(159.719)
+
+
+def test_normalize_position_price_decodes_cheap_crypto_spotware_ints():
+    """DOGUSD/ADA/XRP raw = price*1e5 is also a plausible human quote — pick BASE_PRICES."""
+    assert CTraderService.normalize_position_price(15_000, "DOGUSD") == pytest.approx(0.15)
+    assert CTraderService.normalize_position_price(0.15, "DOGUSD") == pytest.approx(0.15)
+    assert CTraderService.normalize_position_price(45_000, "ADAUSD") == pytest.approx(0.45)
+    assert CTraderService.normalize_position_price(0.45, "ADAUSD") == pytest.approx(0.45)
+    assert CTraderService.normalize_position_price(58_500, "XRPUSD") == pytest.approx(0.585)
+    assert CTraderService.normalize_position_price(0.585, "XRPUSD") == pytest.approx(0.585)
+    assert CTraderService.normalize_position_price(155.0, "SOLUSD") == pytest.approx(155.0)
+    assert CTraderService.normalize_position_price(15_500_000, "SOLUSD") == pytest.approx(155.0)
 
 
 def test_nzdjpy_pip_and_digits_are_jpy_not_eurusd_defaults():
@@ -704,3 +731,90 @@ def test_authenticated_drop_does_reconnect():
     proto._service = svc
     proto.connectionLost("socket closed")
     svc._schedule_reconnect.assert_called_once()
+
+
+def test_log_symbol_strips_crlf():
+    assert _log_symbol("ETHUSD\nERROR:root:forged") == "ETHUSD\\nERROR:root:forged"
+    assert "\n" not in _log_symbol("BTCUSD\r\nBUY")
+
+
+def test_place_order_refuses_crypto_by_default():
+    svc = CTraderService()
+    res = svc.place_order(symbol="ETHUSDT", direction="BUY", quantity=0.1, price=3500.0)
+    assert res["status"] == "error"
+    assert "crypto" in res["error"]
+
+
+def test_place_order_refuses_crypto_on_live_even_when_enabled(monkeypatch):
+    monkeypatch.setenv("CTRADER_CRYPTO_ENABLED", "true")
+    monkeypatch.setenv("CTRADER_ENV", "live")
+    svc = CTraderService()
+    res = svc.place_order(symbol="ETHUSD", direction="BUY", quantity=0.1, price=3500.0)
+    assert res["status"] == "error"
+    assert "crypto" in res["error"]
+
+
+def test_place_order_allows_mapped_crypto_on_demo_when_enabled(monkeypatch):
+    monkeypatch.setenv("CTRADER_CRYPTO_ENABLED", "true")
+    monkeypatch.setenv("CTRADER_ENV", "demo")
+    from backend.services.ctrader_crypto import reset_ctrader_crypto_catalog_cache, validate_ctrader_crypto_catalog
+
+    reset_ctrader_crypto_catalog_cache()
+    validate_ctrader_crypto_catalog({"ETHUSD", "BTCUSD"})
+    svc = CTraderService()
+    res = svc.place_order(symbol="ETHUSDT", direction="BUY", quantity=0.1, price=3500.0)
+    assert res["status"] == "simulated"
+    assert res["symbol"] == "ETHUSD"
+    reset_ctrader_crypto_catalog_cache()
+
+
+def test_place_order_refuses_crypto_when_catalog_empty(monkeypatch):
+    """Empty accepted set must fail closed — not treat falsy as 'allow all'."""
+    monkeypatch.setenv("CTRADER_CRYPTO_ENABLED", "true")
+    monkeypatch.setenv("CTRADER_ENV", "demo")
+    monkeypatch.setenv("CTRADER_CRYPTO_SYMBOLS", "ETHUSDT")
+    from backend.services.ctrader_crypto import reset_ctrader_crypto_catalog_cache, validate_ctrader_crypto_catalog
+
+    reset_ctrader_crypto_catalog_cache()
+    validate_ctrader_crypto_catalog({"EURUSD"})  # live book has no IC crypto
+    svc = CTraderService()
+    res = svc.place_order(symbol="ETHUSD", direction="BUY", quantity=0.1, price=3500.0)
+    assert res["status"] == "error"
+    assert "catalog" in res["error"]
+    reset_ctrader_crypto_catalog_cache()
+
+
+def test_crypto_lots_do_not_snap_to_ten_lot_fx_step():
+    """0.1 ETHUSD is 10 protocol cents (1 coin/lot), not a 1000-cent FX step."""
+    assert CTraderService.step_volume_cents_for("ETHUSD") == 1
+    assert CTraderService.step_volume_cents_for("EURUSD") == 1_000
+    assert CTraderService.lots_to_protocol_volume(0.1, "ETHUSD") == 10
+    assert CTraderService.lots_to_protocol_volume(1.0, "ETHUSD") == 100
+    assert CTraderService.lots_to_protocol_volume(0.01, "EURUSD") == 100_000
+    spec = CTraderService().get_symbol_specification("ETHUSD")
+    assert spec["step_volume"] == 1
+    assert spec["lot_size"] == 1.0
+
+
+def test_priority_symbol_ids_include_accepted_crypto_when_enabled(monkeypatch):
+    monkeypatch.setenv("CTRADER_CRYPTO_ENABLED", "true")
+    monkeypatch.setenv("CTRADER_CRYPTO_SYMBOLS", "ETHUSDT,BTC")
+    from backend.services.ctrader_crypto import reset_ctrader_crypto_catalog_cache, validate_ctrader_crypto_catalog
+
+    reset_ctrader_crypto_catalog_cache()
+    validate_ctrader_crypto_catalog({"ETHUSD", "BTCUSD", "XAUUSD"})
+    svc = CTraderService()
+    ids = set(svc.priority_symbol_ids())
+    assert svc.DEFAULT_SYMBOL_IDS["ETHUSD"] in ids
+    assert svc.DEFAULT_SYMBOL_IDS["BTCUSD"] in ids
+    assert svc.DEFAULT_SYMBOL_IDS["XAUUSD"] in ids
+    reset_ctrader_crypto_catalog_cache()
+
+
+def test_min_crypto_stop_uses_ticks_not_fx_pips():
+    sl, _ = CTraderService.clamp_protective_prices(
+        "ETHUSD", 3500.0, 3499.99, None, direction="BUY",
+    )
+    # 10 ticks at digits=2 (0.01) or 0.1% of 3500 = 3.5 — the % floor wins.
+    assert sl == pytest.approx(3500.0 - 3.5, abs=0.05)
+    assert sl < 3500.0
