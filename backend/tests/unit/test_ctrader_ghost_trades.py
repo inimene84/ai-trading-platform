@@ -17,6 +17,12 @@ from backend.services.ctrader_trade_sync import (
 from backend.routes.trading import get_positions
 
 
+@pytest.fixture(autouse=True)
+def _no_fill_grace(monkeypatch):
+    """These rows model positions that closed long ago, not fresh fills."""
+    monkeypatch.setenv("CTRADER_SYNC_CLOSE_GRACE_SEC", "0")
+
+
 def _session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

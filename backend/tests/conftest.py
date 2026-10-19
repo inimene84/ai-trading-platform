@@ -4,6 +4,88 @@ from pathlib import Path
 
 import pytest
 
+# --- Production DB guard ----------------------------------------------------
+# Unit tests ran inside the live backend container with its DATABASE_URL and
+# wrote fake cTrader trades (test-123 / sim_ct_*) into /app/data/hedge_fund.db.
+# Point the app engine at a throwaway SQLite file before any backend module
+# creates it, and refuse any connection to a production database file.
+import tempfile as _tempfile
+
+_PROD_DB_URLS = {u for u in (os.environ.get("DATABASE_URL"),) if u}
+for _envfile in (Path(__file__).resolve().parents[2] / ".env", Path("/app/.env")):
+    try:
+        for _line in _envfile.read_text().splitlines():
+            if _line.strip().startswith("DATABASE_URL="):
+                _v = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                if _v:
+                    _PROD_DB_URLS.add(_v)
+    except OSError:
+        pass
+_PROD_DB_FILES = {
+    "/app/data/hedge_fund.db",
+    str(Path(__file__).resolve().parents[1] / "hedge_fund.db"),
+    str(Path(__file__).resolve().parents[1] / "data" / "hedge_fund.db"),
+}
+for _u in list(_PROD_DB_URLS):
+    if _u.startswith("sqlite:///"):
+        _PROD_DB_FILES.add(os.path.realpath(_u[len("sqlite:///"):]))
+_TEST_DB_DIR = _tempfile.mkdtemp(prefix="pytest-db-")
+_TEST_DB_URL = f"sqlite:///{_TEST_DB_DIR}/test_hedge_fund.db"
+os.environ["DATABASE_URL"] = _TEST_DB_URL
+os.environ["PYTEST_DB_GUARD"] = "1"
+
+
+def _is_prod_target(url_or_path: str) -> bool:
+    if not url_or_path:
+        return False
+    if url_or_path in _PROD_DB_URLS:
+        return True
+    path = url_or_path
+    if path.startswith("sqlite:///"):
+        path = path[len("sqlite:///"):]
+    if path in ("", ":memory:") or path.startswith("file::memory:"):
+        return False
+    return os.path.realpath(path) in {os.path.realpath(p) for p in _PROD_DB_FILES}
+
+
+from sqlalchemy import event as _sa_event  # noqa: E402
+from sqlalchemy.engine import Engine as _SAEngine  # noqa: E402
+
+
+@_sa_event.listens_for(_SAEngine, "do_connect")
+def _refuse_prod_db(dialect, conn_rec, cargs, cparams):
+    target = str(cargs[0]) if cargs else str(cparams.get("database") or cparams.get("dsn") or "")
+    if _is_prod_target(target):
+        raise RuntimeError(f"pytest DB guard: refusing connection to production database {target!r}")
+
+
+from backend.database import connection as _db_connection  # noqa: E402
+from backend.database import models as _db_models  # noqa: E402
+
+if _is_prod_target(str(_db_connection.engine.url)) or str(_db_connection.engine.url) != _TEST_DB_URL:
+    pytest.exit(
+        f"pytest DB guard: app engine points at {_db_connection.engine.url!s}, expected the temp test DB",
+        returncode=3,
+    )
+_db_models.Base.metadata.create_all(_db_connection.engine)
+
+
+@pytest.fixture(autouse=True)
+def _no_ctrader_trade_persist(request, monkeypatch):
+    """Execution paths must not write Trade rows from unit tests.
+
+    Tests that exercise persistence itself (test_ctrader_trade_sync) keep the real
+    function; everything else gets a recorder.
+    """
+    if request.module.__name__.endswith("test_ctrader_trade_sync"):
+        return
+    try:
+        import backend.services.signal_candidate_engine as _sce
+    except Exception:
+        return
+    calls = []
+    monkeypatch.setattr(_sce, "persist_ctrader_execution", lambda *a, **k: calls.append((a, k)) or None)
+
 _JESSE_QUANT = Path(__file__).resolve().parents[2] / "jesse_quant"
 if str(_JESSE_QUANT) not in sys.path:
     sys.path.insert(0, str(_JESSE_QUANT))
