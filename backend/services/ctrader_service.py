@@ -66,6 +66,8 @@ class CTraderProtocol:
         self.transport = None
         self.last_heartbeat = time.time()
         self._subscribed_spot_ids: set[int] = set()
+        # (symbolId, ProtoOATrendbarPeriod) pairs with a live trendbar stream.
+        self._subscribed_live_trendbars: set[tuple[int, int]] = set()
 
     def connectionMade(self, transport):
         self.transport = transport
@@ -115,6 +117,30 @@ class CTraderProtocol:
             logger.info(f"cTrader subscribed to spot quotes for {sorted(new_ids)}")
         except Exception as e:
             logger.error(f"cTrader spot subscription failed: {e}")
+
+    def _subscribe_live_trendbar(self, symbol_id: int, period_enum: int) -> None:
+        """ProtoOASubscribeLiveTrendbarReq (2135). Spotware then puts the
+        forming bar in ProtoOASpotEvent.trendbar. Requires a spot subscription
+        for the symbol first (see openapi-proto-messages OpenApiMessages.proto).
+        Must run on the reactor thread.
+        """
+        key = (int(symbol_id), int(period_enum))
+        if not symbol_id or key in self._subscribed_live_trendbars:
+            return
+        if int(symbol_id) not in self._subscribed_spot_ids:
+            return
+        try:
+            from ctrader_open_api.messages import OpenApiMessages_pb2 as msgs
+
+            req = msgs.ProtoOASubscribeLiveTrendbarReq()
+            req.ctidTraderAccountId = self._creds.get("account_id", 0)
+            req.symbolId = int(symbol_id)
+            req.period = int(period_enum)
+            self._send(req, 2135)
+            self._subscribed_live_trendbars.add(key)
+            logger.info("cTrader subscribed live trendbar symbolId=%s period=%s", *key)
+        except Exception as e:
+            logger.warning(f"cTrader live trendbar subscription failed: {e}")
 
     def _request_symbol_specs(self, symbol_ids):
         """Load per-symbol lotSize / minVolume. Metals are not 10M cents/lot."""
@@ -314,9 +340,10 @@ class CTraderProtocol:
                             break
                     self._service._symbol_specs[name] = spec
                     logger.info(
-                        "cTrader symbol spec %s id=%s lotSize=%s minVolume=%s stepVolume=%s",
+                        "cTrader symbol spec %s id=%s lotSize=%s minVolume=%s stepVolume=%s digits=%s pipPosition=%s",
                         name, sym.symbolId, spec["lot_size"],
                         spec["min_volume"], spec["step_volume"],
+                        spec["digits"], spec["pip_position"],
                     )
                 self._service.refresh_position_lots()
 
@@ -465,6 +492,8 @@ class CTraderProtocol:
                     "ask": ask,
                     "timestamp": int(time.time() * 1000)
                 }
+                if spot_ev.trendbar:
+                    self._service._store_live_trendbars(sym_name, spot_ev.trendbar)
 
             elif ptype == 2138:  # ProtoOAGetTrendbarsRes
                 tb_res = msgs.ProtoOAGetTrendbarsRes()
@@ -490,7 +519,7 @@ class CTraderProtocol:
                         "close": round(close_p, digits),
                         "volume": float(tb.volume or 1.0)
                     })
-                self._service._trendbar_cache[f"{sym_name}_{tb_res.period}"] = bars
+                self._service._merge_trendbar_cache(f"{sym_name}_{tb_res.period}", bars)
                 logger.info(f"cTrader received {len(bars)} trendbars for {sym_name} (period={tb_res.period})")
                 if bars:
                     self._service.note_trendbar_success(sym_name)
@@ -639,6 +668,11 @@ class CTraderService(BrokerService):
         "ADAUSD": 0.45, "LNKUSD": 12.50, "AVXUSD": 28.00, "DOGUSD": 0.15,
     }
 
+    # Spotware ProtoOATrendbarPeriod (openapi-proto-messages,
+    # OpenApiModelMessages.proto): M1=1 M2=2 M3=3 M4=4 M5=5 M10=6 M15=7
+    # M30=8 H1=9 H4=10 H12=11 D1=12 W1=13 MN1=14. The previous table skipped
+    # M10, so everything from 15M upward was one period short ("1H" came back
+    # as M30 bars with :30 timestamps).
     PERIOD_MAP = {
         "1T": 1, "10S": 1, "30S": 1,
         "1M": 1, "M1": 1,
@@ -646,22 +680,44 @@ class CTraderService(BrokerService):
         "3M": 3, "M3": 3,
         "4M": 4, "M4": 4,
         "5M": 5, "M5": 5,
-        "15M": 6, "M15": 6,
-        "30M": 7, "M30": 7,
-        "1H": 8, "H1": 8,
-        "4H": 9, "H4": 9,
-        "12H": 10, "H12": 10,
-        "1D": 11, "D1": 11,
-        "1W": 12, "W1": 12,
-        "1MO": 13, "MN1": 13
+        "10M": 6, "M10": 6,
+        "15M": 7, "M15": 7,
+        "30M": 8, "M30": 8,
+        "1H": 9, "H1": 9,
+        "4H": 10, "H4": 10,
+        "12H": 11, "H12": 11,
+        "1D": 12, "D1": 12,
+        "1W": 13, "W1": 13,
+        "1MO": 14, "MN1": 14
     }
-    # Spotware ProtoOATrendbarPeriod seconds. Unknown enums fall back to M5.
+    # Seconds per ProtoOATrendbarPeriod enum. Unknown enums fall back to M5.
     PERIOD_SECONDS = {
         1: 60, 2: 120, 3: 180, 4: 240, 5: 300,
-        6: 900, 7: 1800, 8: 3600, 9: 14400, 10: 43200,
-        11: 86400, 12: 604800, 13: 2592000,
+        6: 600, 7: 900, 8: 1800, 9: 3600, 10: 14400,
+        11: 43200, 12: 86400, 13: 604800, 14: 2592000,
     }
+    TRENDBAR_CACHE_MAX_BARS = 2000
+    # Forming bars are display-only; built up to D1 (W1/MN1 are skipped).
+    FORMING_BAR_MAX_PERIOD_SEC = 86400
+    FORMING_BAR_SPOT_MAX_AGE_MS = 120_000
     TRENDBAR_LOOKBACK_CAP_MS = 7 * 86400 * 1000
+    # H4 and longer: 7 days is only ~30 H4 / ~5 D1 bars, too little history
+    # for charts and Kronos. Spotware caps a single ProtoOAGetTrendbarsRes at
+    # 14000 bars and limits the from/to span per period (>= 1 year for
+    # H4/H12/D1); these caps stay inside both, so one request suffices for
+    # any count the routes allow (<= 1000 bars).
+    TRENDBAR_LOOKBACK_CAP_LONG_MS = 365 * 86400 * 1000
+    TRENDBAR_LOOKBACK_CAP_WEEKLY_MS = 5 * 365 * 86400 * 1000
+    TRENDBAR_MAX_BARS_PER_REQUEST = 14000
+
+    @classmethod
+    def trendbar_lookback_cap_ms(cls, period_enum: int) -> int:
+        sec = cls.PERIOD_SECONDS.get(int(period_enum), 300)
+        if sec >= 604800:
+            return cls.TRENDBAR_LOOKBACK_CAP_WEEKLY_MS
+        if sec >= 14400:
+            return cls.TRENDBAR_LOOKBACK_CAP_LONG_MS
+        return cls.TRENDBAR_LOOKBACK_CAP_MS
 
     @classmethod
     def trendbar_lookback_ms(
@@ -683,8 +739,9 @@ class CTraderService(BrokerService):
         still covers ~40 tradable bars after a Friday close / Sunday reopen.
         """
         sec = cls.PERIOD_SECONDS.get(int(period_enum), 300)
-        bars = max(int(count), 1) + 2
-        open_ms = min(bars * sec * 1000, cls.TRENDBAR_LOOKBACK_CAP_MS)
+        bars = min(max(int(count), 1) + 2, cls.TRENDBAR_MAX_BARS_PER_REQUEST)
+        cap_ms = cls.trendbar_lookback_cap_ms(period_enum)
+        open_ms = min(bars * sec * 1000, cap_ms)
         if now_ms is None:
             now_ms = int(time.time() * 1000)
         now = datetime.fromtimestamp(now_ms / 1000.0, tz=timezone.utc)
@@ -692,7 +749,7 @@ class CTraderService(BrokerService):
             open_ms,
             now=now,
             symbol=symbol,
-            cap_ms=cls.TRENDBAR_LOOKBACK_CAP_MS,
+            cap_ms=cap_ms,
         )
 
     @staticmethod
@@ -720,6 +777,10 @@ class CTraderService(BrokerService):
         self._positions: List[Dict[str, Any]] = []
         self._trendbar_cache: Dict[str, List[Dict[str, Any]]] = {}
         self._last_spots: Dict[str, Dict[str, Any]] = {}
+        # Spotware live trendbars from ProtoOASpotEvent.trendbar, by "SYM_period".
+        self._live_trendbars: Dict[str, Dict[str, Any]] = {}
+        # Bid-built forming bars (fallback when no live trendbar has arrived).
+        self._forming_bars: Dict[str, Dict[str, Any]] = {}
         self._tick_cache: Dict[str, List[Dict[str, Any]]] = {}
 
         self.balance: float = 0.0
@@ -750,6 +811,10 @@ class CTraderService(BrokerService):
         self._order_ack_lock = threading.Lock()
         self._order_ack_waiters: List[Dict[str, Any]] = []
         self._trendbar_last_req: Dict[str, float] = {}
+        # Largest ``count`` the last live request for a key asked for. A cache
+        # shorter than a new request is only "fresh" if we already asked for at
+        # least that many (the market simply has no more bars in range).
+        self._trendbar_last_req_count: Dict[str, int] = {}
         self._trendbar_req_lock = threading.Lock()
         self._trendbar_events: Dict[str, threading.Event] = {}
         self._recent_deals: Dict[str, Dict[str, Any]] = {}
@@ -998,6 +1063,62 @@ class CTraderService(BrokerService):
         if sym.startswith("XAG"):
             return Decimal("0.001")
         return Decimal("0.0001")
+
+    @classmethod
+    def order_price_digits(cls, symbol: str) -> int:
+        """Digits used to encode order SL/TP on the broker's price grid.
+
+        Only the live ProtoOASymbol is trusted here. Without it, fall back to
+        whole pips (pipPosition): a whole-pip distance is on-grid whatever the
+        broker's real digits are, whereas the generic 5-digit fallback sent
+        sub-pip relative stops that Spotware rejected as "invalid precision".
+        """
+        sym = cls.normalize_symbol_name(symbol)
+        live = cls._live_spec(sym)
+        if live.get("digits"):
+            return int(live["digits"])
+        if live.get("pip_position"):
+            return int(live["pip_position"])
+        return max(0, int(cls.pip_position_for(sym)))
+
+    @classmethod
+    def relative_price_step_units(cls, digits: int) -> int:
+        """Smallest relative SL/TP increment (1/100000 units) for *digits*."""
+        return 10 ** max(0, 5 - int(digits))
+
+    @classmethod
+    def round_price_to_grid(cls, symbol: str, price: Optional[float]) -> Optional[float]:
+        """Absolute SL/TP rounded to the order price digits (None/0 passthrough)."""
+        if not price:
+            return price
+        return float(round(float(price), cls.order_price_digits(symbol)))
+
+    def ensure_symbol_spec(self, symbol: str, symbol_id: Optional[int], timeout: float = 3.0) -> bool:
+        """Load the live ProtoOASymbol (digits/pipPosition) on demand before an order.
+
+        Specs were only fetched for metals, IC crypto and open positions, so a
+        first entry on any other pair ran on hard-coded digits. Must be called
+        off the reactor thread (place_order already blocks on reactor events).
+        """
+        name = self.normalize_symbol_name(symbol)
+        if (self._live_spec(name) or {}).get("digits"):
+            return True
+        proto = self._protocol
+        if proto is None or not symbol_id:
+            return False
+        try:
+            from twisted.internet import reactor
+
+            reactor.callFromThread(proto._request_symbol_specs, [int(symbol_id)])
+        except Exception as e:
+            logger.warning("cTrader on-demand symbol spec request failed for %s: %s", name, e)
+            return False
+        deadline = time.time() + max(0.0, float(timeout))
+        while time.time() < deadline:
+            if (self._live_spec(name) or {}).get("digits"):
+                return True
+            time.sleep(0.1)
+        return bool((self._live_spec(name) or {}).get("digits"))
 
     @classmethod
     def pip_position_for(cls, symbol: str) -> int:
@@ -2024,6 +2145,12 @@ class CTraderService(BrokerService):
                 logger.error("cTrader symbol ID not found for %s", _log_symbol(ct_symbol))
                 return {"status": "error", "error": f"Unknown symbol {_log_symbol(ct_symbol)}"}
 
+            if not self.ensure_symbol_spec(ct_symbol, symbol_id):
+                logger.warning(
+                    "cTrader live symbol spec unavailable for %s; SL/TP rounded to whole pips",
+                    _log_symbol(ct_symbol),
+                )
+
             # Spotware volume is cents of a unit. Metals use broker lotSize,
             # not the FX 10_000_000 cents/lot scale.
             raw_volume = self.lots_to_protocol_volume(
@@ -2033,7 +2160,8 @@ class CTraderService(BrokerService):
                 min_volume=self.min_volume_cents(ct_symbol),
                 step_volume=self.step_volume_cents(ct_symbol),
             )
-            digits = self.digits_for(ct_symbol)
+            # SL/TP must sit on the broker grid (live digits, else whole pips).
+            digits = self.order_price_digits(ct_symbol)
 
             order_req = msgs.ProtoOANewOrderReq()
             order_req.ctidTraderAccountId = self._account_id or 0
@@ -2045,7 +2173,7 @@ class CTraderService(BrokerService):
             # relativeStopLoss/TP are 1/100000 of a price unit, aligned to symbol digits
             if current_price and stop_loss_price:
                 sl_units = self.relative_stop_units(float(current_price), float(stop_loss_price), digits)
-                step = 10 ** max(0, 5 - int(digits))
+                step = self.relative_price_step_units(digits)
                 min_units = int(round(
                     self.min_protective_distance(ct_symbol, float(current_price))
                     * self.SPOTWARE_PRICE_SCALE
@@ -2263,10 +2391,15 @@ class CTraderService(BrokerService):
             req = msgs.ProtoOAAmendPositionSLTPReq()
             req.ctidTraderAccountId = self._account_id or 0
             req.positionId = int(position_id)
+            amend_sym = str((matched or {}).get("symbol") or "")
             if stop_loss:
-                req.stopLoss = float(stop_loss)
+                req.stopLoss = float(
+                    self.round_price_to_grid(amend_sym, stop_loss) if amend_sym else stop_loss
+                )
             if take_profit:
-                req.takeProfit = float(take_profit)
+                req.takeProfit = float(
+                    self.round_price_to_grid(amend_sym, take_profit) if amend_sym else take_profit
+                )
             payload_type = int(getattr(req, "payloadType", 0) or 2113)
             reactor.callFromThread(lambda: self._protocol._send(req, payload_type))
             logger.info(
@@ -2582,6 +2715,181 @@ class CTraderService(BrokerService):
 
         return bars
 
+    def _trendbar_cache_covers(
+        self, cache_key: str, cached: List[Dict[str, Any]], count: int
+    ) -> bool:
+        """True when the cache can answer a ``count``-bar request.
+
+        Either it already holds that many bars, or the last live request for
+        this key asked for at least ``count`` (Spotware returned all it has).
+        A short loop/chart request therefore no longer starves a later
+        400-bar forecast request for the whole cache TTL.
+        """
+        need = max(int(count), 1)
+        if len(cached) >= need:
+            return True
+        return int(self._trendbar_last_req_count.get(cache_key, 0)) >= need
+
+    def _merge_trendbar_cache(self, cache_key: str, bars: List[Dict[str, Any]]) -> None:
+        """Merge a ProtoOAGetTrendbarsRes into the cache by bar time.
+
+        Short requests (the loop asks for a handful of bars) used to replace
+        the cache, so a 200-bar chart request right after got only that short
+        tail. Rows at the same bar time are replaced by the newer response.
+        """
+        merged: Dict[int, Dict[str, Any]] = {
+            int(b.get("time") or 0): b for b in (self._trendbar_cache.get(cache_key) or [])
+        }
+        for b in bars or []:
+            merged[int(b.get("time") or 0)] = b
+        merged.pop(0, None)
+        out = [merged[t] for t in sorted(merged)]
+        self._trendbar_cache[cache_key] = out[-self.TRENDBAR_CACHE_MAX_BARS:]
+
+    def _store_live_trendbars(self, sym_name: str, trendbars: Any) -> None:
+        """Keep the latest Spotware live trendbar per symbol/period.
+
+        Same relative encoding as historical bars: low in 1/100000, open/high/
+        close as deltas from low, utcTimestampInMinutes = bar open time.
+        """
+        try:
+            digits = self.digits_for(sym_name)
+            scale = float(self.SPOTWARE_PRICE_SCALE)
+            for tb in trendbars:
+                period_enum = int(tb.period or 1)
+                low = int(tb.low or 0)
+                if low <= 0:
+                    continue
+                t = int(tb.utcTimestampInMinutes or 0) * 60
+                if t <= 0:
+                    continue
+                self._live_trendbars[f"{sym_name}_{period_enum}"] = {
+                    "time": t,
+                    "open": round((low + int(tb.deltaOpen or 0)) / scale, digits),
+                    "high": round((low + int(tb.deltaHigh or 0)) / scale, digits),
+                    "low": round(low / scale, digits),
+                    "close": round((low + int(tb.deltaClose or 0)) / scale, digits),
+                    "volume": float(tb.volume or 0),
+                    "received_ms": int(time.time() * 1000),
+                }
+        except Exception as e:
+            logger.debug("live trendbar decode skipped for %s: %s", sym_name, e)
+
+    def ensure_live_trendbar(self, symbol: str, period: str) -> None:
+        """Subscribe spots + the Spotware live trendbar for a chart symbol.
+
+        Display path only (the /ctrader/trendbars route). Call on the reactor
+        thread. No-op in dry-run, while disconnected, or for unknown symbols.
+        """
+        if self._dry_run or not self.is_connected or self._protocol is None:
+            return
+        sym = self._normalize_symbol(symbol)
+        sid = self._symbol_ids.get(sym)
+        period_enum = self.PERIOD_MAP.get(str(period).upper())
+        if not sid or not period_enum:
+            return
+        sec = self.PERIOD_SECONDS.get(int(period_enum)) or 0
+        if sec > self.FORMING_BAR_MAX_PERIOD_SEC:
+            return
+        self._protocol._subscribe_spots({int(sid)})
+        self._protocol._subscribe_live_trendbar(int(sid), int(period_enum))
+
+    @staticmethod
+    def forming_bucket_start(now_s: int, sec: int, last_closed_t: int = 0) -> int:
+        """Open time of the bar containing ``now_s``.
+
+        Anchored on the broker's own grid (last closed bar open + k*period),
+        not on UTC-epoch multiples: Spotware H4/H12/D1 bars open at 21:00 UTC
+        offsets (e.g. H4 at 01:00/05:00/...), so epoch flooring put the H4
+        forming bar at 00:00 and never overlaid the live price.
+        """
+        sec = int(sec)
+        if last_closed_t and last_closed_t > 0 and now_s >= last_closed_t:
+            return int(last_closed_t + ((now_s - last_closed_t) // sec) * sec)
+        return int(now_s) // sec * sec
+
+    def append_forming_bar(
+        self, symbol: str, period: str, bars: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Return ``bars`` plus the still-open bar. Display-only.
+
+        ProtoOAGetTrendbarsRes carries closed bars only. Preferred source is
+        Spotware's own live trendbar (ProtoOASpotEvent.trendbar after
+        ProtoOASubscribeLiveTrendbarReq). Fallback: build the bar from the
+        streamed bid (cTrader charts are bid-based). Trading callers never
+        call this. Returns ``bars`` unchanged when no fresh price exists or the
+        period is longer than H4.
+        """
+        try:
+            ct_symbol = self._normalize_symbol(symbol)
+            period_enum = self.PERIOD_MAP.get(str(period).upper(), 5)
+            sec = self.PERIOD_SECONDS.get(int(period_enum))
+            if not sec or sec > self.FORMING_BAR_MAX_PERIOD_SEC:
+                return bars
+            out = list(bars or [])
+            last = out[-1] if out else None
+            last_t = int(last.get("time") or 0) if last else 0
+            key = f"{ct_symbol}_{period_enum}"
+            now_ms = int(time.time() * 1000)
+            digits = self.digits_for(ct_symbol)
+
+            live = self._live_trendbars.get(key)
+            spot = self._last_spots.get(ct_symbol) or self._last_spots.get(
+                self.normalize_symbol_name(symbol)
+            )
+            price = None
+            spot_ms = 0
+            if spot:
+                price = spot.get("bid") or spot.get("ask")
+                spot_ms = int(spot.get("timestamp") or 0)
+            spot_fresh = bool(price) and (now_ms - spot_ms) <= self.FORMING_BAR_SPOT_MAX_AGE_MS
+
+            if live and int(live["time"]) > last_t and (
+                now_ms - int(live.get("received_ms") or 0) <= self.FORMING_BAR_SPOT_MAX_AGE_MS
+                or int(live["time"]) + sec > now_ms // 1000
+            ):
+                fb = dict(live)
+                if spot_fresh and int(fb["time"]) <= int(spot_ms / 1000) < int(fb["time"]) + sec:
+                    p = float(price)
+                    fb["close"] = p
+                    fb["high"] = max(float(fb["high"]), p)
+                    fb["low"] = min(float(fb["low"]), p)
+                source = "spotware_live_trendbar"
+            elif spot_fresh:
+                p = float(price)
+                bucket = self.forming_bucket_start(int(spot_ms / 1000), sec, last_t)
+                if last_t >= bucket:
+                    return out
+                fb = self._forming_bars.get(key)
+                if not fb or int(fb["time"]) != bucket:
+                    open_p = float(last["close"]) if last and last_t == bucket - sec else p
+                    fb = {"time": bucket, "open": open_p, "high": max(open_p, p),
+                          "low": min(open_p, p), "close": p, "volume": 0.0}
+                fb["high"] = max(float(fb["high"]), p)
+                fb["low"] = min(float(fb["low"]), p)
+                fb["close"] = p
+                self._forming_bars[key] = fb
+                source = "spot_bid"
+            else:
+                return out
+
+            t = int(fb["time"])
+            out.append({
+                "timestamp": t * 1000,
+                "time": t,
+                "open": round(float(fb["open"]), digits),
+                "high": round(float(fb["high"]), digits),
+                "low": round(float(fb["low"]), digits),
+                "close": round(float(fb["close"]), digits),
+                "volume": float(fb.get("volume") or 0.0),
+                "forming": True,
+                "forming_source": source,
+            })
+            return out
+        except Exception as e:
+            logger.debug("append_forming_bar skipped for %s %s: %s", symbol, period, e)
+            return bars
+
     def get_trendbars(
         self,
         symbol: str,
@@ -2616,12 +2924,13 @@ class CTraderService(BrokerService):
                 last = self._trendbar_last_req.get(cache_key, 0)
                 cached = self._trendbar_cache.get(cache_key) or []
                 now_req = time.time()
-                if cached and now_req - last < TRENDBAR_CACHE_TTL_SEC:
+                if (cached and now_req - last < TRENDBAR_CACHE_TTL_SEC
+                        and self._trendbar_cache_covers(cache_key, cached, count)):
                     return cached[-count:]
                 in_flight = self._trendbar_events.get(cache_key)
                 if in_flight is not None and not in_flight.is_set():
                     join_waiter = in_flight
-                elif now_req - last < TRENDBAR_CACHE_TTL_SEC:
+                elif not cached and now_req - last < TRENDBAR_CACHE_TTL_SEC:
                     return []
 
             if join_waiter is not None:
@@ -2641,12 +2950,13 @@ class CTraderService(BrokerService):
                 last = self._trendbar_last_req.get(cache_key, 0)
                 cached = self._trendbar_cache.get(cache_key) or []
                 now_req = time.time()
-                if cached and now_req - last < TRENDBAR_CACHE_TTL_SEC:
+                if (cached and now_req - last < TRENDBAR_CACHE_TTL_SEC
+                        and self._trendbar_cache_covers(cache_key, cached, count)):
                     return cached[-count:]
                 in_flight = self._trendbar_events.get(cache_key)
                 if in_flight is not None and not in_flight.is_set():
                     join_waiter = in_flight
-                elif now_req - last < TRENDBAR_CACHE_TTL_SEC:
+                elif not cached and now_req - last < TRENDBAR_CACHE_TTL_SEC:
                     return []
                 else:
                     send_waiter = threading.Event()
@@ -2654,6 +2964,7 @@ class CTraderService(BrokerService):
                     # Reserve TTL only as the sender, after we know a request
                     # will go out, so a missing catalog id cannot lock a symbol.
                     self._trendbar_last_req[cache_key] = time.time()
+                    self._trendbar_last_req_count[cache_key] = max(int(count), 1)
 
             if join_waiter is not None:
                 join_waiter.wait(timeout=2.0)

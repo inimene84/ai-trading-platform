@@ -72,11 +72,34 @@ def tf_to_binance_interval(timeframe: str) -> str:
     return mapping.get(key, "5m")
 
 
+def _bar_unix_seconds(b: Dict[str, Any]) -> Any:
+    """Bar open time as unix seconds.
+
+    cTrader rows carry ``time`` (s), some sources ``timestamp`` (ms), and
+    Binance klines only an ISO ``date``. Binance bars used to come out with
+    ``time: null``, so the Kronos chart dropped every history point and the
+    Kronos cache key had no bar date.
+    """
+    raw = b.get("time") or b.get("timestamp") or b.get("date")
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, (int, float)):
+        return int(raw / 1000) if raw > 1e12 else int(raw)
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        return raw
+
+
 def _normalize_bars(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for b in raw or []:
         out.append({
-            "time": b.get("time") or b.get("timestamp"),
+            "time": _bar_unix_seconds(b),
             "open": float(b.get("open", 0) or 0),
             "high": float(b.get("high", 0) or 0),
             "low": float(b.get("low", 0) or 0),

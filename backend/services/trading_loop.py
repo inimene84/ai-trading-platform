@@ -262,6 +262,44 @@ class TradingLoopService:
         return live_binance_orders_allowed()
 
     @staticmethod
+    def _risk_position_book(open_trades):
+        """Rows the loop's max-open-positions check should count.
+
+        Paper-parallel: the loop trades only the local Binance paper book, so
+        count those fills; the cTrader/n8n forex book has its own caps.
+        Otherwise None (unchanged: the guard's broker-scoped book).
+        """
+        if TradingLoopService._crypto_session_id() != BINANCE_PAPER_SESSION_ID:
+            return None
+        from backend.services.ledger import is_binance_paper_fill
+
+        return [t for t in open_trades if is_binance_paper_fill(t)]
+
+    @staticmethod
+    def _execution_total_open(total_all: int, own_open: int) -> int:
+        """Open-symbol count for the execution-time MAX_POSITIONS check.
+
+        Paper-parallel: the loop's own non-cTrader book (self._open_count),
+        same scope as the max-open and same-direction checks; the cTrader/n8n
+        forex legs have their own caps. Otherwise the all-book count, unchanged.
+        """
+        if TradingLoopService._crypto_session_id() == BINANCE_PAPER_SESSION_ID:
+            return int(own_open or 0)
+        return int(total_all or 0)
+
+    @staticmethod
+    def _same_direction_symbols(all_open, scoped_open, action):
+        """Distinct symbols already open in *action* for the correlation cap.
+
+        Paper-parallel counts the loop's own paper book (same scope as the
+        max-open check); otherwise the broker-scoped risk book, unchanged.
+        """
+        book = TradingLoopService._risk_position_book(all_open)
+        scope = scoped_open if book is None else book
+        label = "risk book" if book is None else "loop paper book"
+        return {t.symbol for t in scope if t.direction == action}, label
+
+    @staticmethod
     def _crypto_session_id() -> str | None:
         """Paper-parallel crypto fills use a dedicated session, not live cTrader.
 
@@ -726,7 +764,13 @@ class TradingLoopService:
         try:
             open_trades = db_risk.query(Trade).filter(Trade.status.in_(["open", "filled"])).all()
             latest_snapshot = latest_snapshot_for_risk(db_risk)
-            enforce_risk_limits(db_risk, self.risk_config, open_trades, latest_snapshot)
+            enforce_risk_limits(
+                db_risk,
+                self.risk_config,
+                open_trades,
+                latest_snapshot,
+                position_book=self._risk_position_book(open_trades),
+            )
         except RiskBreach as rb:
             logger.critical(
                 f"[RISK BREACH] {rb.reason}. LOOP STOPPED. "
@@ -1437,14 +1481,24 @@ class TradingLoopService:
                         for t in scoped_open if t.direction == "SELL"
                     )
                     # Correlation cap: distinct symbols already open in this direction
-                    _same_dir_syms = {t.symbol for t in scoped_open if t.direction == decision.action}
+                    # Paper-parallel: count only the loop's own paper book; the
+                    # cTrader/n8n forex legs are not this loop's correlation risk
+                    # and keep their own caps in signal_candidate_engine.
+                    _same_dir_syms, _dir_label = self._same_direction_symbols(
+                        all_open, scoped_open, decision.action
+                    )
                     _dir_cap = self.risk_config.max_same_direction_positions
 
+                    if len(_same_dir_syms) < _dir_cap:
+                        logger.info(
+                            f"  [ {symbol} ] same-direction check: {len(_same_dir_syms)} "
+                            f"{decision.action} in {_dir_label} (cap {_dir_cap})"
+                        )
                     if len(_same_dir_syms) >= _dir_cap:
                         logger.warning(
                             f"  [ {symbol} ] {decision.action} blocked: already "
-                            f"{len(_same_dir_syms)} {decision.action} positions (cap {_dir_cap}) "
-                            f"— correlated-exposure guard"
+                            f"{len(_same_dir_syms)} {decision.action} positions in {_dir_label} "
+                            f"(cap {_dir_cap}) — correlated-exposure guard"
                         )
                         signal_status = "rejected"
                         signal_reason = (
@@ -1499,7 +1553,10 @@ class TradingLoopService:
                     # Re-check the position cap inside the lock with the freshest count
                     max_binance_cap = effective_binance_position_cap(self.risk_config)
                     max_total_cap = self.risk_config.max_positions
-                    total_open = getattr(self, "_total_open_count", self._open_count)
+                    total_open = self._execution_total_open(
+                        getattr(self, "_total_open_count", self._open_count),
+                        self._open_count,
+                    )
                     at_binance_cap, observed, _cap = binance_book_at_cap(
                         self.risk_config,
                         db_open_count=self._open_count,

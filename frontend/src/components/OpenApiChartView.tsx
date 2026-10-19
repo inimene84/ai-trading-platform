@@ -55,6 +55,11 @@ const TIMEFRAMES = [
   { id: '1W', label: '1W' },
 ];
 
+// Poll cadence for the live candle. The backend serves closed bars from its
+// trendbar cache (refetched from Spotware at most every 45s) plus a forming
+// bar built from the spot stream, so a short poll does not add Spotware load.
+const LIVE_POLL_MS = 5000;
+
 const LAYOUTS = [
   { id: 0, label: 'Single', icon: '1' },
   { id: 1, label: 'Split H', icon: '2H' },
@@ -92,17 +97,17 @@ const OpenApiChartView: React.FC<OpenApiChartViewProps> = ({
       .catch(() => {});
   }, [activeSymbol]);
 
-  const fetchCandles = useCallback(async () => {
-    setIsLoading(true);
+  const fetchCandles = useCallback(async (silent = false) => {
+    if (!silent) setIsLoading(true);
     try {
       const res: any = await apiService.getCTraderTrendbars(activeSymbol, activeTimeframe, 200);
-      if (res && res.bars) {
+      if (res && Array.isArray(res.bars) && res.bars.length) {
         setCandleData(toLightweightBars(res.bars));
       }
     } catch (err) {
-      console.warn('Failed to fetch trendbars', err);
+      if (!silent) console.warn('Failed to fetch trendbars', err);
     } finally {
-      setIsLoading(false);
+      if (!silent) setIsLoading(false);
     }
   }, [activeSymbol, activeTimeframe]);
 
@@ -132,6 +137,13 @@ const OpenApiChartView: React.FC<OpenApiChartViewProps> = ({
 
   useEffect(() => {
     fetchCandles();
+    // The lightweight engine (the default) used to load candles once per
+    // symbol/timeframe change and never again, so the chart froze at page
+    // load. Keep it current while the tab is visible.
+    const iv = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void fetchCandles(true);
+    }, LIVE_POLL_MS);
+    return () => window.clearInterval(iv);
   }, [fetchCandles]);
 
   useEffect(() => {
@@ -187,18 +199,20 @@ const OpenApiChartView: React.FC<OpenApiChartViewProps> = ({
       liveTimerRef.current = window.setInterval(async () => {
         if (!isMounted || !chartInstanceRef.current) return;
         try {
-          const bars = await fetchBars(symbolRef.current, timeframeRef.current, 2);
+          // Ask for the same count as the initial load so the backend serves
+          // it from cache; count=2 forced a separate tiny Spotware request.
+          const bars = await fetchBars(symbolRef.current, timeframeRef.current, 200);
           const last = bars[bars.length - 1];
           if (!last) return;
           const ts = toUnixSeconds(last.time ?? last.timestamp);
           const price = Number(last.close);
           if (ts && price && typeof chart.data?.addRate === 'function') {
-            chart.data.addRate(sym, ts, price, Number(last.volume || 0));
+            chart.data.addRate(symbolRef.current || sym, ts, price, Number(last.volume || 0));
           }
         } catch {
           /* ignore live tick failures */
         }
-      }, 15000);
+      }, LIVE_POLL_MS);
     };
 
     const initChart = () => {
@@ -553,7 +567,7 @@ const OpenApiChartView: React.FC<OpenApiChartViewProps> = ({
           </div>
 
           <button
-            onClick={fetchCandles}
+            onClick={() => void fetchCandles()}
             className="p-1.5 bg-slate-900 text-slate-400 hover:text-cyan-400 hover:bg-slate-800 rounded-lg border border-slate-800 transition-colors"
             title="Refresh Candles"
           >

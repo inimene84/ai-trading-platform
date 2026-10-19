@@ -1703,6 +1703,7 @@ async def get_ctrader_trendbars(
     count: int = Query(120, ge=1, le=1000, description="Number of bars"),
     from_ts: Optional[int] = Query(None, description="Start unix timestamp in ms"),
     to_ts: Optional[int] = Query(None, description="End unix timestamp in ms"),
+    live: bool = Query(True, description="Append the display-only forming bar (Spotware live trendbar / spot bid)"),
 ):
     """
     Get historical OHLCV trendbars for cTrader charting and technical analysis.
@@ -1720,6 +1721,16 @@ async def get_ctrader_trendbars(
         to_ts=to_ts,
         count=count,
     )
+    if live and not to_ts and bars and not bars[-1].get("synthetic"):
+        # Display only: subscribe spots + Spotware live trendbar on the reactor
+        # thread (transport writes are not thread-safe), then append the
+        # forming bar. Trading callers use get_trendbars() and never see it.
+        try:
+            from twisted.internet import reactor
+            reactor.callFromThread(ctrader_broker.ensure_live_trendbar, symbol, period)
+        except Exception:
+            pass
+        bars = ctrader_broker.append_forming_bar(symbol, period, bars)
     return {
         "symbol": symbol.upper(),
         "period": period.upper(),

@@ -13,6 +13,25 @@ from backend.services.trade_dedupe import find_open_leg
 
 logger = logging.getLogger(__name__)
 
+
+def ctrader_close_grace_sec() -> float:
+    """Fill grace before an absent cTrader row may be closed (CTRADER_SYNC_CLOSE_GRACE_SEC, default 90)."""
+    import os
+
+    try:
+        return max(0.0, float(os.getenv("CTRADER_SYNC_CLOSE_GRACE_SEC", "90") or 90))
+    except (TypeError, ValueError):
+        return 90.0
+
+
+def _row_age_sec(row: Any, now: datetime) -> Optional[float]:
+    ts = getattr(row, "timestamp", None)
+    if not isinstance(ts, datetime):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (now - ts).total_seconds()
+
 _OPEN_STATUSES = ("open", "filled")
 
 _CTRADER_EXTRA_SYMBOLS = {
@@ -404,16 +423,53 @@ def reconcile_ctrader_positions(
             return {"created": created, "updated": updated, "closed": 0}
         unmatched_rows = confirmed
 
+    grace_sec = ctrader_close_grace_sec()
+    fresh_pids: Optional[set] = None
     for row in unmatched_rows:
         if row.id in matched_db_trade_ids:
             continue
 
-        # In-flight grace period: don't close newly created DB rows (<15s old) with no PID yet
-        if not row.broker_position_id and getattr(row, "timestamp", None):
-            ts = row.timestamp
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            if (now - ts).total_seconds() < 15.0:
+        # Fill grace: a just-dispatched order is persisted (with its PID from
+        # the ack) before the reconcile snapshot that contains the new position
+        # arrives. Closing it here wrote a false "Closed externally" row and a
+        # 45-minute post-loss cooldown on every fresh fill. Inside the grace
+        # window only a broker-confirmed close deal may close the row.
+        age = _row_age_sec(row, now)
+        if age is not None and age < grace_sec:
+            deal = None
+            if broker is not None and row.broker_position_id:
+                try:
+                    deal = broker.get_recent_deal(
+                        position_id=row.broker_position_id,
+                        symbol=row.symbol,
+                    )
+                except Exception:
+                    deal = None
+            if not is_ctrader_close_deal(deal):
+                logger.info(
+                    "cTrader sync: keeping trade %s (%s pos %s) open, %.0fs old inside %.0fs "
+                    "fill grace and no close deal",
+                    row.id, row.symbol, row.broker_position_id, age, grace_sec,
+                )
+                continue
+
+        # Re-check the broker's current book before closing anything.
+        if row.broker_position_id:
+            if fresh_pids is None:
+                fresh_pids = set()
+                if broker is not None:
+                    try:
+                        fresh_pids = {
+                            str(p.get("position_id") or "").strip()
+                            for p in (broker.get_positions() or [])
+                        }
+                    except Exception:
+                        fresh_pids = set()
+            if str(row.broker_position_id).strip() in fresh_pids:
+                logger.info(
+                    "cTrader sync: trade %s (%s pos %s) still in refreshed live book; not closing",
+                    row.id, row.symbol, row.broker_position_id,
+                )
                 continue
 
         row.status = "closed"
