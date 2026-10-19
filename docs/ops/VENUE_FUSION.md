@@ -13,8 +13,12 @@ Unchanged. Do **not** flip `CTRADER_INVERT_SIDE` as part of venue fusion.
 The invert was calibrated to the Sep 2026 IC demo closed book. Re-measure
 that edge on a fresh sample before turning it off.
 
-cTrader still refuses crypto symbols in `place_order` even if
-`VENUE_CRYPTO=ctrader` — that refusal is the backstop.
+`VENUE_CRYPTO` stays `binance`. The IC demo add-on is a separate flag
+(`CTRADER_CRYPTO_ENABLED`, default `false`). When it is off, cTrader still
+refuses crypto in `place_order`. When it is on **and** `CTRADER_ENV=demo`,
+mapped IC names (ETHUSD, BTCUSD, …) are evaluated and executed on cTrader
+**in addition** to the untouched Binance crypto loop. Live `CTRADER_ENV`
+keeps refusing crypto.
 
 ## Flag table
 
@@ -29,7 +33,14 @@ cTrader still refuses crypto symbols in `place_order` even if
 | `FUNDING_FILTER_MODE` | `shadow` | `off` / `shadow` / `enforce`. Veto or size-down entries whose next funding opposes the side. |
 | `FUNDING_FILTER_THRESHOLD` | `0.0005` | Absolute funding rate that counts as a veto. |
 | `FUNDING_FILTER_SIZE_MULT` | `0.5` | Size multiplier when funding opposes but is below the veto threshold. |
-| `VENUE_CRYPTO` | `binance` | Asset-class → venue. Aliases: `binance_futures`, `ctrader`, `ic`. |
+| `VENUE_CRYPTO` | `binance` | Asset-class → venue. Aliases: `binance_futures`, `ctrader`, `ic`. Does **not** enable IC crypto. |
+| `CTRADER_CRYPTO_ENABLED` | `false` | When true, evaluate/execute mapped crypto CFDs on cTrader **as well as** Binance. Default off. |
+| `CTRADER_CRYPTO_SYMBOLS` | (empty) | Optional IC / scan list (`ETHUSDT,BTC,SOLUSD`). Empty → map `TRADING_SYMBOLS` (else the built-in IC set). Unknown catalog names are skipped with a warning. |
+| `CTRADER_MAX_SPREAD_FOREX` | `2.0` | cTrader spread gate for FX (unchanged default). |
+| `CTRADER_MAX_SPREAD_METALS` | `40` | Gold/silver pip cap so XAUUSD is not blocked by the 2.0 FX gate. |
+| `CTRADER_MAX_SPREAD_CRYPTO` | `80` | IC crypto CFD pip cap. Per-symbol override: `CTRADER_MAX_SPREAD_XAUUSD`. |
+| `CTRADER_MIN_CRYPTO_STOP_TICKS` | `10` | Fallback min stop when ProtoOASymbol.minDistance is missing. |
+| `CTRADER_MIN_CRYPTO_STOP_PCT` | `0.001` | Fallback min stop as a fraction of entry (0.1%). |
 | `VENUE_FOREX` | `ctrader` | |
 | `VENUE_METALS` | `ctrader` | |
 | `VENUE_OIL` | `ctrader` | |
@@ -48,6 +59,10 @@ cTrader still refuses crypto symbols in `place_order` even if
 | `SHARED_RISK_MAX_OPEN_RISK_PCT` | `6.0` | Combined stop-risk / equity. |
 | `SHARED_RISK_MAX_DRAWDOWN_PCT` | `15.0` | Combined drawdown (only when peak+equity are supplied). |
 | `SHARED_RISK_MAX_NET_USD` | `0` | `0` disables the net-USD cap. |
+
+Shared risk also counts cTrader crypto CFD exposure (coin notional, not
+FX 100k lots) and treats the same base coin on both venues as a breach
+(`ETHUSDC` + `ETHUSD`). `enforce` blocks; `shadow` logs.
 | `BACKTEST_VENUE_COSTS` | `false` | Apply spread / swap (triple Wed FX, Fri crypto) / funding / maker-taker in backtests. |
 
 Split books (cTrader demo + Binance live) are never unioned. Shared risk

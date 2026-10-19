@@ -24,6 +24,13 @@ from backend.services.ctrader_bar_pacer import (
     fair_symbol_order,
     rate_limit_cooldown_sec,
 )
+from backend.services.ctrader_crypto import (
+    accepted_ctrader_crypto_symbols,
+    ctrader_crypto_enabled,
+    ctrader_crypto_orders_allowed,
+    map_to_ic_crypto,
+    validate_ctrader_crypto_catalog,
+)
 from backend.services.ctrader_oauth import (
     DEMO_PROTOBUF_HOST,
     LIVE_PROTOBUF_HOST,
@@ -33,6 +40,7 @@ from backend.services.ctrader_oauth import (
 )
 from backend.services.ctrader_tokens import token_store
 from backend.services.market_hours import market_hours_lookback_ms
+from backend.services.multi_asset_bars import classify_symbol
 from backend.services.trading_mode import live_ctrader_orders_allowed
 
 logger = logging.getLogger(__name__)
@@ -263,6 +271,9 @@ class CTraderProtocol:
                     len(self._service._symbol_ids),
                     self._service._symbol_ids.get("NZDJPY"),
                 )
+                if ctrader_crypto_enabled():
+                    accepted = validate_ctrader_crypto_catalog(self._service._symbol_ids.keys())
+                    logger.info("cTrader crypto catalog accepted: %s", accepted)
                 self._request_symbol_specs(self._service.priority_symbol_ids())
                 # Reconcile often arrives before this large catalog. Refresh names
                 # after IDs are unique so NZDJPY is not left labeled XAUUSD.
@@ -285,6 +296,10 @@ class CTraderProtocol:
                         "digits": int(getattr(sym, "digits", 0) or 0),
                         "pip_position": int(getattr(sym, "pipPosition", 0) or 0),
                     }
+                    for field in ("minDistance", "stopLossDistance", "slDistance"):
+                        if hasattr(sym, field):
+                            spec["min_distance"] = int(getattr(sym, field) or 0)
+                            break
                     self._service._symbol_specs[name] = spec
                     logger.info(
                         "cTrader symbol spec %s id=%s lotSize=%s minVolume=%s stepVolume=%s",
@@ -550,6 +565,15 @@ class CTraderService(BrokerService):
         "NZDJPY=X": "NZDJPY", "USDNOK=X": "USDNOK", "CHFJPY=X": "CHFJPY",
         "BTC-USD": "BTCUSD", "ETH-USD": "ETHUSD", "SOL-USD": "SOLUSD",
         "BNB-USD": "BNBUSD", "XRP-USD": "XRPUSD",
+        "BTCUSDT": "BTCUSD", "BTCUSDC": "BTCUSD",
+        "ETHUSDT": "ETHUSD", "ETHUSDC": "ETHUSD",
+        "SOLUSDT": "SOLUSD", "SOLUSDC": "SOLUSD",
+        "XRPUSDT": "XRPUSD", "XRPUSDC": "XRPUSD",
+        "ADAUSDT": "ADAUSD", "ADAUSDC": "ADAUSD",
+        "BNBUSDT": "BNBUSD", "BNBUSDC": "BNBUSD",
+        "LINKUSDT": "LNKUSD", "LINKUSDC": "LNKUSD", "LINKUSD": "LNKUSD",
+        "AVAXUSDT": "AVXUSD", "AVAXUSDC": "AVXUSD", "AVAXUSD": "AVXUSD",
+        "DOGEUSDT": "DOGUSD", "DOGEUSDC": "DOGUSD", "DOGEUSD": "DOGUSD",
     }
 
     # Standard known symbol IDs (fallback before dynamic catalog is loaded)
@@ -574,20 +598,24 @@ class CTraderService(BrokerService):
         "XAUUSD": Decimal("0.01"),   "XAGUSD": Decimal("0.001"),
         "BTCUSD": Decimal("1.0"),    "ETHUSD": Decimal("0.1"),    "SOLUSD": Decimal("0.01"),
         "BNBUSD": Decimal("0.01"),   "XRPUSD": Decimal("0.0001"),
+        "ADAUSD": Decimal("0.0001"), "LNKUSD": Decimal("0.001"),
+        "AVXUSD": Decimal("0.001"),  "DOGUSD": Decimal("0.00001"),
     }
 
     DIGITS = {
         "EURUSD": 5, "GBPUSD": 5, "AUDUSD": 5, "NZDUSD": 5, "USDCAD": 5, "USDCHF": 5,
         "EURGBP": 5, "USDJPY": 3, "EURJPY": 3, "GBPJPY": 3, "AUDJPY": 3, "CADJPY": 3,
         "CHFJPY": 3, "NZDJPY": 3, "USDNOK": 5,
-        "XAUUSD": 2, "XAGUSD": 3, "BTCUSD": 2, "ETHUSD": 2, "SOLUSD": 2, "BNBUSD": 2, "XRPUSD": 4
+        "XAUUSD": 2, "XAGUSD": 3, "BTCUSD": 2, "ETHUSD": 2, "SOLUSD": 2, "BNBUSD": 2, "XRPUSD": 4,
+        "ADAUSD": 4, "LNKUSD": 3, "AVXUSD": 3, "DOGUSD": 5,
     }
 
     PIP_POSITION = {
         "EURUSD": 4, "GBPUSD": 4, "AUDUSD": 4, "NZDUSD": 4, "USDCAD": 4, "USDCHF": 4,
         "EURGBP": 4, "USDJPY": 2, "EURJPY": 2, "GBPJPY": 2, "AUDJPY": 2, "CADJPY": 2,
         "CHFJPY": 2, "NZDJPY": 2, "USDNOK": 4,
-        "XAUUSD": 2, "XAGUSD": 2, "BTCUSD": 0, "ETHUSD": 1, "SOLUSD": 2, "BNBUSD": 2, "XRPUSD": 4
+        "XAUUSD": 2, "XAGUSD": 2, "BTCUSD": 0, "ETHUSD": 1, "SOLUSD": 2, "BNBUSD": 2, "XRPUSD": 4,
+        "ADAUSD": 4, "LNKUSD": 3, "AVXUSD": 3, "DOGUSD": 5,
     }
 
     BASE_PRICES = {
@@ -595,7 +623,8 @@ class CTraderService(BrokerService):
         "USDCAD": 1.3650, "USDCHF": 0.8850, "NZDUSD": 0.5950, "EURGBP": 0.8375,
         "EURJPY": 167.30, "GBPJPY": 199.70, "NZDJPY": 94.50, "CHFJPY": 180.00,
         "USDNOK": 9.35, "XAUUSD": 2500.00, "XAGUSD": 29.50,
-        "BTCUSD": 64500.00, "ETHUSD": 2750.00, "SOLUSD": 155.00, "BNBUSD": 570.00, "XRPUSD": 0.5850
+        "BTCUSD": 64500.00, "ETHUSD": 2750.00, "SOLUSD": 155.00, "BNBUSD": 570.00, "XRPUSD": 0.5850,
+        "ADAUSD": 0.45, "LNKUSD": 12.50, "AVXUSD": 28.00, "DOGUSD": 0.15,
     }
 
     PERIOD_MAP = {
@@ -768,12 +797,31 @@ class CTraderService(BrokerService):
         "XAGUSD": 1_000.0,
         "GOLD": 100.0,
         "SILVER": 1_000.0,
+        # IC crypto CFDs: 1.00 lot = 1 coin. Live ProtoOASymbol.lotSize wins.
+        "BTCUSD": 1.0,
+        "ETHUSD": 1.0,
+        "SOLUSD": 1.0,
+        "XRPUSD": 1.0,
+        "ADAUSD": 1.0,
+        "BNBUSD": 1.0,
+        "LNKUSD": 1.0,
+        "AVXUSD": 1.0,
+        "DOGUSD": 1.0,
     }
     MIN_VOLUME_CENTS_BY_SYMBOL: Dict[str, int] = {
         "XAUUSD": 100,     # 1 oz
         "XAGUSD": 1_000,   # 10 oz
         "GOLD": 100,
         "SILVER": 1_000,
+        "BTCUSD": 1,       # 0.01 lot × 100 cents/coin
+        "ETHUSD": 1,
+        "SOLUSD": 1,
+        "XRPUSD": 1,
+        "ADAUSD": 1,
+        "BNBUSD": 1,
+        "LNKUSD": 1,
+        "AVXUSD": 1,
+        "DOGUSD": 1,
     }
 
     @classmethod
@@ -884,11 +932,25 @@ class CTraderService(BrokerService):
         return (name or "").replace("/", "").replace("-", "").replace(" ", "").upper()
 
     @classmethod
+    def _live_spec(cls, symbol: str) -> Dict[str, Any]:
+        """Process-singleton symbol spec (empty when the catalog is not loaded)."""
+        inst = globals().get("ctrader_service")
+        if inst is None:
+            return {}
+        name = cls.normalize_symbol_name(symbol)
+        return getattr(inst, "_symbol_specs", {}).get(name) or {}
+
+    @classmethod
     def digits_for(cls, symbol: str) -> int:
         """Tick decimals for rounding. Not used to decode Spotware integers."""
         sym = cls.normalize_symbol_name(symbol)
+        live = cls._live_spec(sym)
+        if live.get("digits"):
+            return int(live["digits"])
         if sym in cls.DIGITS:
             return cls.DIGITS[sym]
+        if classify_symbol(sym) == "crypto":
+            return 2
         if sym.endswith("JPY"):
             return 3
         if sym.startswith("XAU"):
@@ -919,19 +981,49 @@ class CTraderService(BrokerService):
         return max(0, cls.digits_for(sym) - 1)
 
     @classmethod
+    def _plausible_human_price(cls, price: float, symbol: str = "") -> bool:
+        """True when *price* looks like a desk quote, not a Spotware integer."""
+        if price <= 0:
+            return False
+        name = cls.normalize_symbol_name(symbol) if symbol else ""
+        asset = classify_symbol(name) if name else ""
+        if asset == "metal" or name.startswith("XAU") or name == "GOLD":
+            if name.startswith("XAG") or name == "SILVER":
+                return 1.0 <= price <= 500.0
+            return 200.0 <= price <= 50_000.0
+        if asset == "crypto":
+            if name.startswith("BTC"):
+                return 100.0 <= price <= 2_000_000.0
+            if name.startswith("ETH"):
+                return 10.0 <= price <= 50_000.0
+            return 0.00001 <= price <= 50_000.0
+        if name.endswith("JPY"):
+            return 10.0 <= price <= 500.0
+        # FX majors / crosses
+        return 0.05 <= price <= 20.0
+
+    @classmethod
     def normalize_position_price(cls, raw: Optional[float], symbol: str = "") -> float:
-        """Decode reconcile position prices whether Spotware sent ints or floats."""
+        """Decode reconcile position prices whether Spotware sent ints or floats.
+
+        Spotware integers are always ``price * 1e5``. A threshold of 1000 used
+        to treat already-decoded gold (~4182) and crypto as scaled ints, which
+        stored XAUUSD at 0.04 and made stop math go negative.
+        """
         if raw is None:
             return 0.0
         val = float(raw)
         if val <= 0:
             return 0.0
-        # Spotware sends prices as integers scaled by 1/100000. Already-decoded
-        # floats for FX/metals sit in a narrow band (≈0.5–250).
-        if val > 1000:
-            decoded = cls.decode_spotware_price(val, symbol)
-            return float(decoded or 0.0)
-        return val
+        digits = cls.digits_for(symbol) if symbol else 5
+        decoded = val / float(cls.SPOTWARE_PRICE_SCALE)
+        human_ok = cls._plausible_human_price(val, symbol)
+        decoded_ok = cls._plausible_human_price(decoded, symbol)
+        if human_ok and not (decoded_ok and val >= cls.SPOTWARE_PRICE_SCALE):
+            return float(round(val, digits))
+        if decoded_ok:
+            return float(round(decoded, digits))
+        return float(round(val, digits)) if symbol else val
 
     @classmethod
     def decode_spotware_price(cls, raw: Optional[float], symbol: str = "") -> Optional[float]:
@@ -980,9 +1072,32 @@ class CTraderService(BrokerService):
         silently: the order fills and the stop is simply absent. M5 ATR on a
         quiet pair produced 2 pip stops, so live positions ran with no stop
         at all while the wider take-profit survived.
+
+        Crypto / metals prefer the live ProtoOASymbol minDistance (Spotware
+        1e5 units) and lot/tick specs — not the FX 10-pip assumption.
         """
+        name = cls.normalize_symbol_name(symbol)
+        live = cls._live_spec(name)
+        raw_min = live.get("min_distance")
+        if raw_min:
+            spec_dist = float(raw_min) / float(cls.SPOTWARE_PRICE_SCALE)
+            if spec_dist > 0:
+                return spec_dist
+        asset = classify_symbol(name)
+        if asset == "crypto":
+            digits = cls.digits_for(name)
+            tick = 1.0 / (10 ** max(digits, 0))
+            try:
+                ticks = float(os.getenv("CTRADER_MIN_CRYPTO_STOP_TICKS", "10") or 10)
+            except (TypeError, ValueError):
+                ticks = 10.0
+            try:
+                pct = float(os.getenv("CTRADER_MIN_CRYPTO_STOP_PCT", "0.001") or 0.001)
+            except (TypeError, ValueError):
+                pct = 0.001
+            return max(tick * max(ticks, 1.0), abs(float(entry) or 0.0) * max(pct, 0.0))
         pips = cls.MIN_FX_STOP_PIPS
-        if cls.normalize_symbol_name(symbol).endswith("JPY"):
+        if name.endswith("JPY"):
             pips = max(pips, cls.MIN_JPY_STOP_PIPS)
         return float(cls.pip_size_for(symbol)) * pips
 
@@ -1736,19 +1851,32 @@ class CTraderService(BrokerService):
         # Resolve argument aliases
         raw_sym = symbol or kwargs.get("yfinance_symbol", "")
         ct_symbol = self._normalize_symbol(raw_sym)
-        from backend.services.multi_asset_bars import classify_symbol
         if classify_symbol(raw_sym or ct_symbol) == "crypto":
-            logger.error(
-                "cTrader refusing crypto symbol %s — crypto orders must use "
-                "binance_futures_live, not the default cTrader session",
-                raw_sym or ct_symbol,
-            )
-            return {
-                "status": "error",
-                "error": (
-                    f"crypto symbol {raw_sym or ct_symbol} is not a cTrader market"
-                ),
-            }
+            mapped = map_to_ic_crypto(raw_sym or ct_symbol) or ct_symbol
+            if not ctrader_crypto_orders_allowed():
+                logger.error(
+                    "cTrader refusing crypto symbol %s — enable "
+                    "CTRADER_CRYPTO_ENABLED on CTRADER_ENV=demo "
+                    "(live stays refused; Binance keeps the crypto loop)",
+                    raw_sym or ct_symbol,
+                )
+                return {
+                    "status": "error",
+                    "error": (
+                        f"crypto symbol {raw_sym or ct_symbol} is not a cTrader market"
+                    ),
+                }
+            accepted = set(accepted_ctrader_crypto_symbols())
+            if accepted and mapped not in accepted:
+                logger.warning(
+                    "cTrader skipping unknown crypto symbol %s (not in live catalog)",
+                    mapped,
+                )
+                return {
+                    "status": "error",
+                    "error": f"crypto symbol {mapped} is not in the cTrader catalog",
+                }
+            ct_symbol = mapped
         side = "BUY" if direction.upper() in ("BUY", "LONG") else "SELL"
         lots = volume if volume is not None else (quantity if quantity is not None else 1.0)
 
@@ -2203,15 +2331,17 @@ class CTraderService(BrokerService):
             base_price = 154.20 if ct_symbol.endswith("JPY") else 1.0
 
         # Determine base and quote assets
-        if len(ct_symbol) == 6 and not any(ct_symbol.startswith(k) for k in ("BTC", "ETH", "SOL", "BNB", "XRP", "XAU", "XAG")):
-            base_asset = ct_symbol[:3]
-            quote_asset = ct_symbol[3:]
-        elif any(ct_symbol.startswith(k) for k in ("BTC", "ETH", "SOL", "BNB", "XRP")):
+        if classify_symbol(ct_symbol) == "crypto" or any(
+            ct_symbol.startswith(k) for k in ("BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "LNK", "AVX", "DOG")
+        ):
             base_asset = ct_symbol.replace("USD", "")
             quote_asset = "USD"
-        elif ct_symbol in ("XAUUSD", "XAGUSD"):
+        elif ct_symbol in ("XAUUSD", "XAGUSD") or ct_symbol.startswith(("XAU", "XAG")):
             base_asset = ct_symbol[:3]
             quote_asset = "USD"
+        elif len(ct_symbol) == 6:
+            base_asset = ct_symbol[:3]
+            quote_asset = ct_symbol[3:]
         else:
             base_asset = ct_symbol
             quote_asset = "USD"

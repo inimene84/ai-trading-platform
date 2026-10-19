@@ -15,9 +15,21 @@ from backend.services.market_hours import (
 
 def test_crypto_always_open_on_weekend():
     saturday = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)  # Saturday
-    for symbol in ("BTCUSDT", "ETHUSDC", "BTC-USD", "SOL-USD"):
+    for symbol in ("BTCUSDT", "ETHUSDC", "BTC-USD", "SOL-USD", "ETHUSD", "BTCUSD"):
         assert is_crypto_symbol(symbol) is True
         assert is_venue_open(symbol, saturday) is True
+
+
+def test_ic_crypto_respects_daily_break_not_weekend():
+    saturday = datetime(2026, 9, 12, 21, 15, tzinfo=timezone.utc)
+    wed_break = datetime(2026, 9, 16, 21, 15, tzinfo=timezone.utc)
+    wed_open = datetime(2026, 9, 16, 14, 0, tzinfo=timezone.utc)
+    assert is_venue_open("ETHUSD", saturday) is True
+    assert entry_cutoff_blocks("ETHUSD", saturday, minutes=30) is False
+    assert entry_cutoff_blocks("ETHUSD", wed_break, minutes=30) is True
+    assert entry_cutoff_blocks("ETHUSD", wed_open, minutes=30) is False
+    # Binance perps still never take the IC daily break.
+    assert entry_cutoff_blocks("ETHUSDT", wed_break, minutes=30) is False
 
 
 def test_forex_and_metals_closed_saturday():

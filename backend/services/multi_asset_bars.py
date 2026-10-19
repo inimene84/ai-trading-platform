@@ -17,10 +17,19 @@ _FOREX_MAJORS = {
 }
 _METALS = {"XAUUSD", "XAGUSD", "GOLD", "SILVER", "XPTUSD", "XPDUSD"}
 _OIL = {"USOIL", "UKOIL", "WTI", "BRENT", "CL=F", "BZ=F"}
+# IC Markets crypto CFDs are 6-letter XXXUSD names. Without this set they
+# collapse to the forex heuristic (BTCUSD → "forex") and inherit FX pips.
+_IC_CRYPTO_CFD = {
+    "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "ADAUSD", "BNBUSD",
+    "LNKUSD", "AVXUSD", "DOGUSD",
+    "LINKUSD", "AVAXUSD", "DOGEUSD",
+}
 
 
 def classify_symbol(symbol: str) -> AssetClass:
     sym = symbol.upper().replace("/", "").replace("-", "").strip()
+    if sym.endswith("=X"):
+        sym = sym[:-2]
     if sym in _METALS or sym.startswith("XAU") or sym.startswith("XAG"):
         return "metal"
     if sym in _OIL or (sym.endswith("=F") and sym.startswith(("CL", "BZ"))):
@@ -29,6 +38,8 @@ def classify_symbol(symbol: str) -> AssetClass:
     # OPUSDT / ARBUSDT / APTUSDT are 6 alpha chars and were sent to
     # yfinance as OPUSDT=X (404 spam + wrong asset class).
     if any(sym.endswith(sfx) for sfx in _CRYPTO_SUFFIXES):
+        return "crypto"
+    if sym in _IC_CRYPTO_CFD:
         return "crypto"
     if sym.endswith("USD") and len(sym) > 6:
         return "crypto"

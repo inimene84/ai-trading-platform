@@ -232,6 +232,8 @@ def test_usdcad_classified_as_forex_not_crypto():
     """USDCAD must not match USDC substring and route to cTrader."""
     assert classify_symbol("USDCAD") == "forex"
     assert classify_symbol("BTCUSDT") == "crypto"
+    assert classify_symbol("BTCUSD") == "crypto"
+    assert classify_symbol("ETHUSD") == "crypto"
 
 
 def test_six_letter_usdt_perps_are_crypto_not_forex():

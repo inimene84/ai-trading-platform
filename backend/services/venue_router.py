@@ -1,11 +1,9 @@
 """Asset-class → venue table for dual-broker QuantumTrade.
 
 Crypto stays on Binance USDC-M futures (24/7). Forex and metals stay on
-cTrader (IC Markets) during sessions. The mapping is env-driven so a later
-IC crypto experiment can flip ``VENUE_CRYPTO`` without a code change.
-
-Defaults match today's hard-coded scan routing. The existing cTrader
-crypto-order refusal in ``ctrader_service.place_order`` remains the backstop.
+cTrader (IC Markets) during sessions. ``VENUE_CRYPTO`` stays ``binance``;
+the IC demo crypto add-on is ``CTRADER_CRYPTO_ENABLED`` (default off) and
+does not change this table.
 
 ``CTRADER_INVERT_SIDE`` is unchanged here. Re-measure that edge before
 turning it off — see ``docs/ops/VENUE_FUSION.md``.
@@ -62,7 +60,11 @@ def venue_for_symbol(symbol: str) -> VenueName:
 
 def describe_venue_table() -> dict[str, str]:
     """Env snapshot for /status and tests — no I/O."""
-    return {
+    from backend.services.ctrader_crypto import ctrader_crypto_enabled
+
+    table = {
         asset: venue_for_asset_class(asset)
         for asset in ("crypto", "forex", "metal", "oil", "index", "stock")
     }
+    table["ctrader_crypto_enabled"] = "true" if ctrader_crypto_enabled() else "false"
+    return table

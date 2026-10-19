@@ -20,6 +20,7 @@ import logging
 import os
 from typing import Any, Optional
 
+from backend.services.ctrader_crypto import crypto_base_asset
 from backend.services.equity_scope import (
     binance_money_mode,
     compose_balance_payload,
@@ -32,10 +33,12 @@ logger = logging.getLogger(__name__)
 
 
 def _is_fx_trade(trade: Any) -> bool:
+    symbol = str(getattr(trade, "symbol", "") or "").upper().replace("/", "").replace("_", "")
+    if classify_symbol(symbol) == "crypto":
+        return False
     broker = str(getattr(trade, "broker", "") or getattr(trade, "exchange", "") or "").lower()
     if broker in {"ctrader", "ctrader:paper", "icmarkets", "ic"}:
         return True
-    symbol = str(getattr(trade, "symbol", "") or "").upper().replace("/", "").replace("_", "")
     return len(symbol) == 6 and symbol.isalpha()
 
 
@@ -157,6 +160,36 @@ def _open_risk_usd(trade: Any) -> float:
     return distance * qty_f
 
 
+def _overlapping_crypto_bases(binance_trades: list[Any], ctrader_trades: list[Any]) -> list[str]:
+    left = {
+        base
+        for t in binance_trades
+        if (base := crypto_base_asset(str(getattr(t, "symbol", "") or "")))
+    }
+    right = {
+        base
+        for t in ctrader_trades
+        if (base := crypto_base_asset(str(getattr(t, "symbol", "") or "")))
+    }
+    return sorted(left & right)
+
+
+def _apply_overlap_action(result: dict[str, Any], overlap: list[str]) -> None:
+    result["overlapping_bases"] = overlap
+    if not overlap:
+        return
+    msg = "same base coin open on Binance and cTrader: " + ", ".join(overlap)
+    would = list(result.get("would_breaches") or [])
+    if msg not in would:
+        would.append(msg)
+    result["would_breaches"] = would
+    if result.get("mode") == "enforce":
+        result["breaches"] = list(would)
+        result["action"] = "block"
+    elif result.get("mode") == "shadow":
+        logger.warning("[SHARED RISK][shadow] would block: %s", msg)
+
+
 def net_usd_direction(trades: list[Any]) -> float:
     """Signed USD-direction exposure: +USD (long-dollar) / −USD (short-dollar).
 
@@ -225,7 +258,15 @@ def evaluate_shared_risk(
         "would_breaches": [],
         "warning": None,
         "action": "allow",
+        "ctrader_crypto_exposure_usd": sum(
+            _trade_exposure_usdt(t)
+            for t in ctrader_trades
+            if classify_symbol(str(getattr(t, "symbol", "") or "")) == "crypto"
+        ),
+        "overlapping_bases": [],
     }
+    overlap = _overlapping_crypto_bases(binance_trades, ctrader_trades)
+    result["overlapping_bases"] = overlap
     if mode == "off":
         result["warning"] = "shared_risk_off"
         return result
@@ -237,6 +278,7 @@ def evaluate_shared_risk(
             "Reporting both books; not combining. Existing per-venue caps still apply."
         )
         logger.warning(result["warning"])
+        _apply_overlap_action(result, overlap)
         return result
 
     all_trades = list(open_trades or [])
@@ -296,6 +338,12 @@ def evaluate_shared_risk(
     if max_net_usd > 0 and abs(net_usd) > max_net_usd:
         would.append(
             f"shared net USD exposure exceeded: {net_usd:.2f} (cap ±{max_net_usd:.2f})"
+        )
+
+    combined["overlapping_bases"] = overlap
+    if overlap:
+        would.append(
+            "same base coin open on Binance and cTrader: " + ", ".join(overlap)
         )
 
     result["would_breaches"] = would

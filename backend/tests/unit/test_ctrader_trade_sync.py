@@ -21,6 +21,27 @@ def _session():
     return sessionmaker(bind=engine)()
 
 
+def test_synced_live_book_row_uses_ctrader_env_mode(monkeypatch):
+    monkeypatch.setenv("CTRADER_ENV", "demo")
+    db = _session()
+    created = upsert_ctrader_live_trades(
+        db,
+        [{
+            "symbol": "XAUUSD",
+            "side": "BUY",
+            "quantity": 0.01,
+            "entry_price": 4182.50,
+            "position_id": "gold-1",
+            "broker": "ctrader",
+        }],
+    )
+    assert created == 1
+    row = db.query(Trade).one()
+    assert row.mode == "demo"
+    assert row.entry_price == pytest.approx(4182.50)
+    assert row.notes == "Synced from cTrader live book"
+
+
 def test_upsert_creates_open_trade_for_live_ctrader_position():
     db = _session()
     live = [

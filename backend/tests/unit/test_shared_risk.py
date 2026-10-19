@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from backend.services.risk_guard import RiskBreach, enforce_risk_limits
 from backend.services.risk_config import RiskConfig
 from backend.services.shared_risk import (
@@ -118,6 +120,35 @@ def test_per_venue_cap_still_fires_when_shared_is_shadow(db_session, monkeypatch
     ]
     with __import__("pytest").raises(RiskBreach, match="Max open positions exceeded"):
         enforce_risk_limits(db_session, cfg, trades, None)
+
+
+def test_ctrader_crypto_exposure_is_coin_notional_not_fx_lots(monkeypatch):
+    monkeypatch.setenv("SHARED_RISK_MODE", "shadow")
+    monkeypatch.setenv("TRADING_MODE", "paper")
+    result = evaluate_shared_risk([
+        _trade(symbol="ETHUSD", broker="ctrader", quantity=0.1, entry_price=3000.0, stop_loss=2970.0),
+    ], combined_equity=10_000)
+    # 0.1 coin * $3000 = $300, not 0.1 * 100_000 FX units.
+    assert result["ctrader_crypto_exposure_usd"] == pytest.approx(300.0)
+    assert result["books"]["ctrader"]["exposure_usd"] == pytest.approx(300.0)
+
+
+def test_same_base_coin_blocks_in_enforce_logs_in_shadow(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("SHARED_RISK_MODE", "shadow")
+    trades = [
+        _trade(symbol="ETHUSDC", broker="binance_futures", quantity=0.1, entry_price=3000),
+        _trade(symbol="ETHUSD", broker="ctrader", quantity=0.1, entry_price=3000, stop_loss=2970),
+    ]
+    shadow = evaluate_shared_risk(trades, combined_equity=10_000)
+    assert shadow["overlapping_bases"] == ["ETH"]
+    assert shadow["action"] == "allow"
+    assert any("ETH" in b for b in shadow["would_breaches"])
+
+    monkeypatch.setenv("SHARED_RISK_MODE", "enforce")
+    enforced = evaluate_shared_risk(trades, combined_equity=10_000)
+    assert enforced["action"] == "block"
+    assert any("same base coin" in b for b in enforced["breaches"])
 
 
 def test_off_mode_skips_combined_math(monkeypatch):

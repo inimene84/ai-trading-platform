@@ -13,6 +13,12 @@ import uuid
 from typing import Dict, Any, List, Optional, Set
 from datetime import datetime, timezone
 
+from backend.services.ctrader_crypto import (
+    accepted_ctrader_crypto_symbols,
+    broker_for_scan_symbol,
+    ctrader_crypto_enabled,
+    max_spread_pips_for_symbol,
+)
 from backend.services.ctrader_service import CTraderService, ctrader_service
 from backend.services.ctrader_trade_sync import (
     persist_ctrader_execution,
@@ -29,7 +35,6 @@ from backend.services.trading_mode import live_ctrader_orders_allowed
 from backend.services.symbol_aliases import same_crypto_perp_leg
 from backend.services.position_caps import live_binance_position_count
 from backend.services.market_hours import evaluate_entry_cutoff, is_venue_open
-from backend.services.venue_router import venue_for_symbol
 from backend.services.funding_filter import (
     apply_size_mult,
     evaluate_funding_filter,
@@ -1306,19 +1311,36 @@ class SignalCandidateEngine:
 
         if broker == "ctrader":
             spec = ctrader_service.get_symbol_specification(symbol)
-            pip_size = spec.get("pip_size", 0.0001)
-            stop_pips = max(stop_distance / pip_size, 5.0)
+            asset = classify_symbol(symbol)
+            if asset == "crypto":
+                units = float(spec.get("lot_size") or 1.0)
+                lots = risk_amount / max(stop_distance * units, 1e-9)
+                lot_cents = float(ctrader_service.lot_size_cents(symbol) or 100.0)
+                min_vol = float(spec.get("min_volume") or 1.0)
+                step_vol = float(spec.get("step_volume") or 1.0)
+                min_lots = (min_vol / lot_cents) if lot_cents else 0.01
+                step_lots = (step_vol / lot_cents) if lot_cents else min_lots
+                lots = max(min_lots, lots)
+                if step_lots > 0:
+                    lots = round(round(lots / step_lots) * step_lots, 8)
+                max_lots = float(self.execution_config.get("max_ctrader_lots") or 0)
+                if max_lots > 0:
+                    lots = min(lots, max_lots)
+                stop_pips = stop_distance / max(float(spec.get("pip_size") or 1.0), 1e-9)
+            else:
+                pip_size = spec.get("pip_size", 0.0001)
+                stop_pips = max(stop_distance / pip_size, 5.0)
 
-            # pip_value for 1.0 standard lot
-            calc_1lot = ctrader_service.calculate_pip_margin(symbol, 1.0, entry_price, 100.0, "USD")
-            pip_val_1lot = calc_1lot.get("pip_value", 10.0)
+                # pip_value for 1.0 standard lot
+                calc_1lot = ctrader_service.calculate_pip_margin(symbol, 1.0, entry_price, 100.0, "USD")
+                pip_val_1lot = calc_1lot.get("pip_value", 10.0)
 
-            # lots = risk_amount / (stop_pips * pip_val_1lot)
-            lots = round(risk_amount / max(stop_pips * pip_val_1lot, 0.1), 2)
-            if classify_symbol(symbol) == "metal":
-                metal_cap = float(self.execution_config.get("max_metal_lots") or 0.01)
-                lots = min(lots, metal_cap)
-            lots = max(0.01, min(lots, 10.0))
+                # lots = risk_amount / (stop_pips * pip_val_1lot)
+                lots = round(risk_amount / max(stop_pips * pip_val_1lot, 0.1), 2)
+                if asset == "metal":
+                    metal_cap = float(self.execution_config.get("max_metal_lots") or 0.01)
+                    lots = min(lots, metal_cap)
+                lots = max(0.01, min(lots, 10.0))
 
             calc_final = ctrader_service.calculate_pip_margin(symbol, lots, entry_price, 100.0, "USD")
             return {
@@ -1364,6 +1386,10 @@ class SignalCandidateEngine:
             ]
         else:
             universe = list(universe)
+        if ctrader_crypto_enabled() and not self.execution_config.get("forex_only"):
+            extra = [s for s in accepted_ctrader_crypto_symbols() if s not in universe]
+            if extra:
+                universe = list(universe) + extra
         universe = ctrader_service.order_symbols_for_scan(universe)
 
         self._equity_cache.clear()
@@ -1385,7 +1411,7 @@ class SignalCandidateEngine:
                     continue
                 if self.execution_config.get("forex_only") and asset_class == "crypto":
                     continue
-                broker = venue_for_symbol(sym)
+                broker = broker_for_scan_symbol(sym)
                 if broker == "ctrader" and self._ctrader_venue_closed(sym):
                     continue
                 if broker == "ctrader" and self._ctrader_entry_cutoff(sym):
@@ -2048,10 +2074,11 @@ class SignalCandidateEngine:
                 ),
             }
 
-        # Spread gate: with 10-30 pip stops, a 2+ pip spread is 7-20% of risk
-        # paid upfront. max_spread_pips existed in config but was never enforced.
+        # Spread gate: per-asset-class limits (FX default 2.0 unchanged).
+        # Gold and crypto CFDs used to inherit the forex 2-pip cap.
         if cand.get("broker") == "ctrader":
-            max_spread = float(self.timing_config.get("max_spread_pips") or 0)
+            forex_default = float(self.timing_config.get("max_spread_pips") or 2.0)
+            max_spread = max_spread_pips_for_symbol(str(cand.get("symbol") or ""), forex_default)
             if max_spread > 0:
                 try:
                     spread = ctrader_service.get_spread_pips(str(cand.get("symbol") or ""))
