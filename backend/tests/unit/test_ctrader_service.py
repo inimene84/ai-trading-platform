@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.brokers.base import BrokerService
-from backend.services.ctrader_service import CTraderProtocol, CTraderService, ctrader_broker
+from backend.services.ctrader_service import CTraderProtocol, CTraderService, _log_symbol, ctrader_broker
 from backend.services.ctrader_tokens import CTraderTokenStore
 
 
@@ -719,6 +719,11 @@ def test_authenticated_drop_does_reconnect():
     proto._service = svc
     proto.connectionLost("socket closed")
     svc._schedule_reconnect.assert_called_once()
+
+
+def test_log_symbol_strips_crlf():
+    assert _log_symbol("ETHUSD\nERROR:root:forged") == "ETHUSD\\nERROR:root:forged"
+    assert "\n" not in _log_symbol("BTCUSD\r\nBUY")
 
 
 def test_place_order_refuses_crypto_by_default():

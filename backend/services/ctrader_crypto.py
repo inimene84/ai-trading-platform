@@ -17,6 +17,7 @@ from typing import Iterable, Optional
 from backend.services.equity_scope import ctrader_env
 from backend.services.multi_asset_bars import classify_symbol
 from backend.services.symbol_aliases import crypto_perp_base
+from backend.utils.safe_errors import sanitize_log_text
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,7 @@ def validate_ctrader_crypto_catalog(known_names: Optional[Iterable[str]] = None)
                 unknown.add(name)
                 logger.warning(
                     "cTrader crypto symbol %s is not in the live catalog — skipping",
-                    name,
+                    sanitize_log_text(name).replace("\r", "").replace("\n", ""),
                 )
         else:
             # Defaults ship BTC/ETH/SOL/XRP/BNB. ADA/LNK/AVX/DOG wait for the catalog.
@@ -210,7 +211,7 @@ def validate_ctrader_crypto_catalog(known_names: Optional[Iterable[str]] = None)
                 unknown.add(name)
                 logger.warning(
                     "cTrader crypto symbol %s has no catalog entry yet — skipping until startup validation",
-                    name,
+                    sanitize_log_text(name).replace("\r", "").replace("\n", ""),
                 )
     _accepted_catalog = set(accepted)
     _unknown_catalog = unknown

@@ -42,8 +42,14 @@ from backend.services.ctrader_tokens import token_store
 from backend.services.market_hours import market_hours_lookback_ms
 from backend.services.multi_asset_bars import classify_symbol
 from backend.services.trading_mode import live_ctrader_orders_allowed
+from backend.utils.safe_errors import sanitize_log_text
 
 logger = logging.getLogger(__name__)
+
+
+def _log_symbol(symbol: Any) -> str:
+    """Strip CR/LF from a symbol before it is written to a log record."""
+    return sanitize_log_text(str(symbol or "")).replace("\r", "").replace("\n", "")[:32]
 
 
 class CTraderProtocol:
@@ -1858,23 +1864,23 @@ class CTraderService(BrokerService):
                     "cTrader refusing crypto symbol %s — enable "
                     "CTRADER_CRYPTO_ENABLED on CTRADER_ENV=demo "
                     "(live stays refused; Binance keeps the crypto loop)",
-                    raw_sym or ct_symbol,
+                    _log_symbol(raw_sym or ct_symbol),
                 )
                 return {
                     "status": "error",
                     "error": (
-                        f"crypto symbol {raw_sym or ct_symbol} is not a cTrader market"
+                        f"crypto symbol {_log_symbol(raw_sym or ct_symbol)} is not a cTrader market"
                     ),
                 }
             accepted = set(accepted_ctrader_crypto_symbols())
             if accepted and mapped not in accepted:
                 logger.warning(
                     "cTrader skipping unknown crypto symbol %s (not in live catalog)",
-                    mapped,
+                    _log_symbol(mapped),
                 )
                 return {
                     "status": "error",
-                    "error": f"crypto symbol {mapped} is not in the cTrader catalog",
+                    "error": f"crypto symbol {_log_symbol(mapped)} is not in the cTrader catalog",
                 }
             ct_symbol = mapped
         side = "BUY" if direction.upper() in ("BUY", "LONG") else "SELL"
