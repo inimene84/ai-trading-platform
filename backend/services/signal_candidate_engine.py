@@ -17,6 +17,9 @@ from backend.services.ctrader_crypto import (
     accepted_ctrader_crypto_symbols,
     broker_for_scan_symbol,
     ctrader_crypto_enabled,
+    ctrader_crypto_orders_allowed,
+    is_ic_crypto_symbol,
+    map_to_ic_crypto,
     max_spread_pips_for_symbol,
 )
 from backend.services.ctrader_service import CTraderService, ctrader_service
@@ -222,6 +225,14 @@ class SignalCandidateEngine:
         if asset == "forex":
             return True
         if asset == "metal" and self.execution_config.get("include_metals"):
+            return True
+        # n8n polls ready-for-execution with forex_only=true. Demo IC crypto
+        # CFDs must still execute when the add-on is on; live / flag-off stay out.
+        if (
+            asset == "crypto"
+            and ctrader_crypto_orders_allowed()
+            and map_to_ic_crypto(str(cand.get("symbol", "")))
+        ):
             return True
         return False
 
@@ -1386,7 +1397,9 @@ class SignalCandidateEngine:
             ]
         else:
             universe = list(universe)
-        if ctrader_crypto_enabled() and not self.execution_config.get("forex_only"):
+        if ctrader_crypto_enabled() and (
+            not self.execution_config.get("forex_only") or ctrader_crypto_orders_allowed()
+        ):
             extra = [s for s in accepted_ctrader_crypto_symbols() if s not in universe]
             if extra:
                 universe = list(universe) + extra
@@ -1410,7 +1423,8 @@ class SignalCandidateEngine:
                 if asset_class == "metal" and not self.execution_config.get("include_metals"):
                     continue
                 if self.execution_config.get("forex_only") and asset_class == "crypto":
-                    continue
+                    if not (ctrader_crypto_orders_allowed() and is_ic_crypto_symbol(sym)):
+                        continue
                 broker = broker_for_scan_symbol(sym)
                 if broker == "ctrader" and self._ctrader_venue_closed(sym):
                     continue

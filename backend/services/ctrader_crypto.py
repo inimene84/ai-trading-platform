@@ -73,6 +73,7 @@ _IC_SHORT_TO_BASE: dict[str, str] = {
     "AVX": "AVAX",
     "DOG": "DOGE",
 }
+_IC_BASE_TO_SHORT: dict[str, str] = {full: short for short, full in _IC_SHORT_TO_BASE.items()}
 
 # Sensible per-asset-class spread caps (pips of that symbol's pip size).
 # Forex stays at the historical 2.0. Gold ~20-40 cents = 20-40 XAU pips.
@@ -86,6 +87,8 @@ _TRUE = {"1", "true", "yes", "on"}
 # Last catalog validation outcome (startup / reconnect). None = not validated yet.
 _accepted_catalog: Optional[set[str]] = None
 _unknown_catalog: set[str] = set()
+# canonical IC name → live ProtoOA symbolName that matched (may be an alias).
+_resolved_catalog: dict[str, str] = {}
 
 
 def _truthy(name: str, default: str = "false") -> bool:
@@ -96,7 +99,77 @@ def _norm_symbol(symbol: str) -> str:
     name = (symbol or "").upper().replace("/", "").replace("-", "").replace("_", "").strip()
     if name.endswith("=X"):
         name = name[:-2]
-    return name
+    return name.rstrip(".")
+
+
+def _catalog_key(name: str) -> str:
+    """Live-catalog compare key: strip slashes, dashes, spaces, trailing dots."""
+    return (name or "").upper().replace("/", "").replace("-", "").replace(" ", "").strip().rstrip(".")
+
+
+def ic_crypto_alias_variants(symbol: str) -> list[str]:
+    """Common IC Markets catalog spellings for a mapped crypto CFD.
+
+    IC may list ``XRPUSD.`` (trailing dot), ``AVAXUSD`` instead of ``AVXUSD``,
+    or only one of the short/full LINK/DOGE codes. Callers try these against
+    the live ProtoOA list and skip names that still do not match.
+    """
+    name = _catalog_key(symbol)
+    if not name:
+        return []
+    variants: list[str] = []
+
+    def _add(raw: str) -> None:
+        key = _catalog_key(raw)
+        if not key or key in variants:
+            return
+        variants.append(key)
+        dotted = f"{key}."
+        if dotted not in variants:
+            variants.append(dotted)
+
+    _add(name)
+    mapped = SCAN_TO_IC_CRYPTO.get(name)
+    if mapped:
+        _add(mapped)
+    if name.endswith("USD") and len(name) > 3:
+        base = name[:-3]
+        if base in _IC_SHORT_TO_BASE:
+            _add(f"{_IC_SHORT_TO_BASE[base]}USD")
+        if base in _IC_BASE_TO_SHORT:
+            _add(f"{_IC_BASE_TO_SHORT[base]}USD")
+        mapped_base = SCAN_TO_IC_CRYPTO.get(base)
+        if mapped_base:
+            _add(mapped_base)
+    return variants
+
+
+def resolve_ic_crypto_catalog_name(symbol: str, known_names: Iterable[str]) -> Optional[str]:
+    """Return the live catalog name that matches *symbol*, or None (fail-soft)."""
+    known_map: dict[str, str] = {}
+    for raw in known_names or []:
+        original = str(raw or "").strip()
+        if not original:
+            continue
+        key = _catalog_key(original)
+        if not key:
+            continue
+        # Prefer the dotted-stripped form so it matches normalize_catalog_name.
+        known_map.setdefault(key, key)
+        known_map.setdefault(original.upper(), key)
+    if not known_map:
+        return None
+    for variant in ic_crypto_alias_variants(symbol):
+        resolved = known_map.get(variant) or known_map.get(_catalog_key(variant))
+        if resolved:
+            return resolved
+    return None
+
+
+def resolved_ic_crypto_name(symbol: str) -> str:
+    """Canonical → last live catalog name from validation (identity if unseen)."""
+    key = _norm_symbol(symbol)
+    return _resolved_catalog.get(key, key)
 
 
 def ctrader_crypto_enabled() -> bool:
@@ -184,15 +257,28 @@ def validate_ctrader_crypto_catalog(known_names: Optional[Iterable[str]] = None)
     Unknown names are skipped with a warning. An empty *known_names* means
     the live ProtoOASymbolsListRes has not arrived — accept nothing
     (fail-closed). Default symbol IDs are not a catalog.
+
+    Matching is alias-aware: ``AVXUSD`` can resolve to ``AVAXUSD``, and
+    ``XRPUSD`` can resolve to ``XRPUSD.``. The canonical requested name is
+    accepted; the live spelling is stored for order lookup.
     """
-    global _accepted_catalog, _unknown_catalog
+    global _accepted_catalog, _unknown_catalog, _resolved_catalog
     wanted = requested_ctrader_crypto_symbols()
-    known = {str(n or "").upper().replace("/", "").replace("-", "") for n in (known_names or []) if n}
+    known_list = [str(n) for n in (known_names or []) if n]
     accepted: list[str] = []
     unknown: set[str] = set()
+    resolved: dict[str, str] = {}
     for name in wanted:
-        if known and name in known:
+        live = resolve_ic_crypto_catalog_name(name, known_list) if known_list else None
+        if live:
             accepted.append(name)
+            resolved[name] = live
+            if live != name:
+                logger.info(
+                    "cTrader crypto %s resolved to live catalog name %s",
+                    sanitize_log_text(name).replace("\r", "").replace("\n", ""),
+                    sanitize_log_text(live).replace("\r", "").replace("\n", ""),
+                )
         else:
             unknown.add(name)
             logger.warning(
@@ -201,6 +287,7 @@ def validate_ctrader_crypto_catalog(known_names: Optional[Iterable[str]] = None)
             )
     _accepted_catalog = set(accepted)
     _unknown_catalog = unknown
+    _resolved_catalog = resolved
     return accepted
 
 
@@ -219,9 +306,10 @@ def accepted_ctrader_crypto_symbols() -> list[str]:
 
 def reset_ctrader_crypto_catalog_cache() -> None:
     """Test helper — forget the last catalog validation."""
-    global _accepted_catalog, _unknown_catalog
+    global _accepted_catalog, _unknown_catalog, _resolved_catalog
     _accepted_catalog = None
     _unknown_catalog = set()
+    _resolved_catalog = {}
 
 
 def broker_for_scan_symbol(symbol: str) -> str:
