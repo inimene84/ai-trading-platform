@@ -7,10 +7,13 @@ from backend.services.ctrader_crypto import (
     ctrader_crypto_enabled,
     ctrader_crypto_orders_allowed,
     ctrader_trade_mode,
+    ic_crypto_alias_variants,
     is_ic_crypto_symbol,
     map_to_ic_crypto,
     max_spread_pips_for_symbol,
     reset_ctrader_crypto_catalog_cache,
+    resolve_ic_crypto_catalog_name,
+    resolved_ic_crypto_name,
     validate_ctrader_crypto_catalog,
 )
 from backend.services.multi_asset_bars import classify_symbol
@@ -52,6 +55,8 @@ def test_ic_names_classify_as_crypto_not_forex():
     for sym in ("BTCUSD", "ETHUSD", "LNKUSD", "AVXUSD", "DOGUSD", "ADAUSD"):
         assert classify_symbol(sym) == "crypto"
         assert is_ic_crypto_symbol(sym) is True
+    assert classify_symbol("XRPUSD.") == "crypto"
+    assert classify_symbol("AVAXUSD") == "crypto"
     assert classify_symbol("EURUSD") == "forex"
     assert classify_symbol("USDCAD") == "forex"
     assert is_ic_crypto_symbol("ETHUSDT") is False
@@ -77,6 +82,36 @@ def test_catalog_skips_unknown_names(monkeypatch):
     accepted = validate_ctrader_crypto_catalog({"ETHUSD", "SOLUSD", "BTCUSD"})
     assert accepted == ["ETHUSD", "SOLUSD"]
     assert "NOTACOIN" not in accepted
+    reset_ctrader_crypto_catalog_cache()
+
+
+def test_ic_crypto_alias_variants_cover_ic_spellings():
+    xrp = ic_crypto_alias_variants("XRPUSD")
+    assert "XRPUSD" in xrp
+    assert "XRPUSD." in xrp
+    avax = ic_crypto_alias_variants("AVXUSD")
+    assert "AVXUSD" in avax
+    assert "AVAXUSD" in avax
+    bnb = ic_crypto_alias_variants("BNBUSD")
+    assert "BNBUSD" in bnb
+    assert "BNBUSD." in bnb
+
+
+def test_catalog_resolves_ic_aliases_and_skips_unknown(monkeypatch, caplog):
+    reset_ctrader_crypto_catalog_cache()
+    monkeypatch.setenv("CTRADER_CRYPTO_SYMBOLS", "XRPUSD,BNBUSD,AVXUSD,ETHUSD")
+    with caplog.at_level("INFO"):
+        accepted = validate_ctrader_crypto_catalog({"XRPUSD.", "AVAXUSD", "ETHUSD"})
+    assert accepted == ["XRPUSD", "AVXUSD", "ETHUSD"]
+    assert "BNBUSD" not in accepted
+    assert resolve_ic_crypto_catalog_name("XRPUSD", {"XRPUSD."}) == "XRPUSD"
+    assert resolve_ic_crypto_catalog_name("AVXUSD", {"AVAXUSD"}) == "AVAXUSD"
+    assert resolve_ic_crypto_catalog_name("BNBUSD", {"ETHUSD"}) is None
+    assert resolved_ic_crypto_name("XRPUSD") == "XRPUSD"
+    assert resolved_ic_crypto_name("AVXUSD") == "AVAXUSD"
+    assert "XRPUSD resolved to live catalog name XRPUSD" not in caplog.text
+    assert "AVXUSD resolved to live catalog name AVAXUSD" in caplog.text
+    assert "BNBUSD is not in the live catalog" in caplog.text
     reset_ctrader_crypto_catalog_cache()
 
 

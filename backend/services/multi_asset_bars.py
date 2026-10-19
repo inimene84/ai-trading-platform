@@ -27,7 +27,7 @@ _IC_CRYPTO_CFD = {
 
 
 def classify_symbol(symbol: str) -> AssetClass:
-    sym = symbol.upper().replace("/", "").replace("-", "").strip()
+    sym = symbol.upper().replace("/", "").replace("-", "").strip().rstrip(".")
     if sym.endswith("=X"):
         sym = sym[:-2]
     if sym in _METALS or sym.startswith("XAU") or sym.startswith("XAG"):

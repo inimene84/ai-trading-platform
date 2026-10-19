@@ -26,10 +26,13 @@ from backend.services.ctrader_bar_pacer import (
     rate_limit_cooldown_sec,
 )
 from backend.services.ctrader_crypto import (
+    IC_CRYPTO_SYMBOLS,
     accepted_ctrader_crypto_symbols,
     ctrader_crypto_enabled,
     ctrader_crypto_orders_allowed,
+    ic_crypto_alias_variants,
     map_to_ic_crypto,
+    resolve_ic_crypto_catalog_name,
     validate_ctrader_crypto_catalog,
 )
 from backend.services.ctrader_oauth import (
@@ -273,6 +276,7 @@ class CTraderProtocol:
                     sym_map,
                 )
                 self._service._live_catalog_names = set(sym_map.keys())
+                self._service.apply_ic_crypto_symbol_aliases()
                 self._service.relabel_cached_symbols()
                 logger.info(
                     "cTrader dynamic symbol catalog updated: %s instruments (NZDJPY id=%s)",
@@ -950,8 +954,8 @@ class CTraderService(BrokerService):
 
     @staticmethod
     def normalize_catalog_name(name: str) -> str:
-        """IC Markets light-symbol names may be 'NZD/JPY' rather than 'NZDJPY'."""
-        return (name or "").replace("/", "").replace("-", "").replace(" ", "").upper()
+        """IC Markets light-symbol names may be 'NZD/JPY' or 'XRPUSD.' rather than 'NZDJPY'."""
+        return (name or "").replace("/", "").replace("-", "").replace(" ", "").upper().rstrip(".")
 
     @classmethod
     def _live_spec(cls, symbol: str) -> Dict[str, Any]:
@@ -1257,6 +1261,48 @@ class CTraderService(BrokerService):
 
         return clamped_stop_loss, clamped_take_profit
 
+    def apply_ic_crypto_symbol_aliases(self) -> None:
+        """Register short/full/dotted IC crypto names onto the live catalog ids.
+
+        Fail-soft: names that still do not match stay unregistered so later
+        lookups skip them instead of sending an unknown symbolId.
+        """
+        known = set(self._live_catalog_names or ())
+        if not known:
+            return
+        catalog = dict(self._symbol_ids)
+        for canonical in IC_CRYPTO_SYMBOLS:
+            live = resolve_ic_crypto_catalog_name(canonical, known)
+            if not live:
+                continue
+            sid = catalog.get(live)
+            if not sid:
+                continue
+            for variant in ic_crypto_alias_variants(canonical):
+                key = variant.rstrip(".")
+                if key and key not in self._symbol_ids:
+                    self._symbol_ids[key] = sid
+            if live != canonical:
+                logger.info(
+                    "cTrader crypto %s resolved to live catalog name %s (id=%s)",
+                    _log_symbol(canonical),
+                    _log_symbol(live),
+                    sid,
+                )
+
+    def symbol_id_for(self, symbol: str) -> Optional[int]:
+        """Catalog id for a requested name, trying IC crypto aliases."""
+        name = self._normalize_symbol(symbol)
+        if not name:
+            return None
+        sid = self._symbol_ids.get(name)
+        if sid:
+            return int(sid)
+        live = resolve_ic_crypto_catalog_name(name, self._symbol_ids.keys())
+        if live and live in self._symbol_ids:
+            return int(self._symbol_ids[live])
+        return None
+
     @staticmethod
     def merge_symbol_catalog(
         defaults: Dict[str, int],
@@ -1286,7 +1332,7 @@ class CTraderService(BrokerService):
                 wanted.add(int(sid))
         if ctrader_crypto_enabled():
             for name in accepted_ctrader_crypto_symbols():
-                sid = self._symbol_ids.get(name)
+                sid = self.symbol_id_for(name)
                 if sid:
                     wanted.add(int(sid))
         for pos in self._positions:
@@ -1332,10 +1378,13 @@ class CTraderService(BrokerService):
             sid = int(symbol_id)
         except (TypeError, ValueError):
             return str(symbol_id)
-        for name, mapped in self._symbol_ids.items():
-            if mapped == sid:
+        matches = [name for name, mapped in self._symbol_ids.items() if mapped == sid]
+        if not matches:
+            return str(sid)
+        for name in matches:
+            if name in IC_CRYPTO_SYMBOLS:
                 return name
-        return str(sid)
+        return matches[0]
 
     @property
     def is_connected(self) -> bool:
@@ -1671,8 +1720,7 @@ class CTraderService(BrokerService):
             return
         wanted: set[int] = set()
         for raw_sym in symbols:
-            sym = self._normalize_symbol(raw_sym)
-            sid = self._symbol_ids.get(sym)
+            sid = self.symbol_id_for(raw_sym)
             if sid:
                 wanted.add(int(sid))
         if wanted:
@@ -1892,8 +1940,13 @@ class CTraderService(BrokerService):
         # Resolve argument aliases
         raw_sym = symbol or kwargs.get("yfinance_symbol", "")
         ct_symbol = self._normalize_symbol(raw_sym)
-        if classify_symbol(raw_sym or ct_symbol) == "crypto":
-            mapped = map_to_ic_crypto(raw_sym or ct_symbol) or ct_symbol
+        mapped_crypto = map_to_ic_crypto(raw_sym or ct_symbol)
+        if (
+            mapped_crypto
+            or classify_symbol(ct_symbol) == "crypto"
+            or classify_symbol(raw_sym or ct_symbol) == "crypto"
+        ):
+            mapped = mapped_crypto or ct_symbol
             if not ctrader_crypto_orders_allowed():
                 logger.error(
                     "cTrader refusing crypto symbol %s — enable "
@@ -1966,10 +2019,10 @@ class CTraderService(BrokerService):
             from ctrader_open_api.messages import OpenApiMessages_pb2 as msgs
             from twisted.internet import reactor
 
-            symbol_id = self._symbol_ids.get(ct_symbol)
+            symbol_id = self.symbol_id_for(ct_symbol)
             if not symbol_id:
-                logger.error(f"cTrader symbol ID not found for {ct_symbol}")
-                return {"status": "error", "error": f"Unknown symbol {ct_symbol}"}
+                logger.error("cTrader symbol ID not found for %s", _log_symbol(ct_symbol))
+                return {"status": "error", "error": f"Unknown symbol {_log_symbol(ct_symbol)}"}
 
             # Spotware volume is cents of a unit. Metals use broker lotSize,
             # not the FX 10_000_000 cents/lot scale.
@@ -2390,7 +2443,7 @@ class CTraderService(BrokerService):
         return {
             "symbol": ct_symbol,
             "raw_symbol": symbol,
-            "symbol_id": self._symbol_ids.get(ct_symbol, 0),
+            "symbol_id": self.symbol_id_for(ct_symbol) or 0,
             "digits": digits,
             "pip_position": pip_pos,
             "pip_size": pip_size,
@@ -2576,7 +2629,7 @@ class CTraderService(BrokerService):
                 cached = self._trendbar_cache.get(cache_key) or []
                 return cached[-count:] if cached else []
 
-            sym_id = self._symbol_ids.get(ct_symbol)
+            sym_id = self.symbol_id_for(ct_symbol)
             if not sym_id:
                 logger.warning(
                     "No cTrader symbol id for %s; skipping live trendbar request",

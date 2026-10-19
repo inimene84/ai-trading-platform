@@ -433,29 +433,29 @@ async def test_execute_candidate_skips_closed_venue_without_placing_order():
     mock_place.assert_not_called()
 
 
+def _ready_candidate(cid: str, symbol: str, broker: str, now_ts: int) -> dict:
+    return {
+        "id": cid,
+        "symbol": symbol,
+        "broker": broker,
+        "status": CandidateStatus.READY,
+        "confidence": 0.9,
+        "earliest_exec_at": now_ts - 5,
+        "latest_exec_at": now_ts + 600,
+    }
+
+
 def test_get_ready_signals_forex_only_excludes_crypto():
     now_ts = int(time.time())
     previous = dict(signal_candidate_engine.candidates)
     signal_candidate_engine.candidates.clear()
     try:
-        signal_candidate_engine.candidates["fx-ready"] = {
-            "id": "fx-ready",
-            "symbol": "EURUSD",
-            "broker": "ctrader",
-            "status": CandidateStatus.READY,
-            "confidence": 0.9,
-            "earliest_exec_at": now_ts - 5,
-            "latest_exec_at": now_ts + 600,
-        }
-        signal_candidate_engine.candidates["cr-ready"] = {
-            "id": "cr-ready",
-            "symbol": "BTCUSDT",
-            "broker": "binance_futures",
-            "status": CandidateStatus.READY,
-            "confidence": 0.99,
-            "earliest_exec_at": now_ts - 5,
-            "latest_exec_at": now_ts + 600,
-        }
+        signal_candidate_engine.candidates["fx-ready"] = _ready_candidate(
+            "fx-ready", "EURUSD", "ctrader", now_ts
+        )
+        signal_candidate_engine.candidates["cr-ready"] = _ready_candidate(
+            "cr-ready", "BTCUSDT", "binance_futures", now_ts
+        )
 
         with patch.object(
             signal_candidate_engine, "_open_ctrader_position_count", return_value=0
@@ -467,6 +467,107 @@ def test_get_ready_signals_forex_only_excludes_crypto():
         ids = {c["id"] for c in ready}
         assert "fx-ready" in ids
         assert "cr-ready" not in ids
+    finally:
+        signal_candidate_engine.candidates = previous
+
+
+def test_get_ready_signals_forex_only_includes_demo_ctrader_crypto(monkeypatch):
+    monkeypatch.setenv("CTRADER_CRYPTO_ENABLED", "true")
+    monkeypatch.setenv("CTRADER_ENV", "demo")
+    now_ts = int(time.time())
+    previous = dict(signal_candidate_engine.candidates)
+    signal_candidate_engine.candidates.clear()
+    try:
+        signal_candidate_engine.candidates["fx-ready"] = _ready_candidate(
+            "fx-ready", "EURUSD", "ctrader", now_ts
+        )
+        signal_candidate_engine.candidates["eth-ready"] = _ready_candidate(
+            "eth-ready", "ETHUSD", "ctrader", now_ts
+        )
+        signal_candidate_engine.candidates["sol-ready"] = _ready_candidate(
+            "sol-ready", "SOLUSD", "ctrader", now_ts
+        )
+        signal_candidate_engine.candidates["lnk-ready"] = _ready_candidate(
+            "lnk-ready", "LNKUSD", "ctrader", now_ts
+        )
+        signal_candidate_engine.candidates["bin-ready"] = _ready_candidate(
+            "bin-ready", "BTCUSDT", "binance_futures", now_ts
+        )
+
+        with patch.dict(
+            signal_candidate_engine.execution_config,
+            {
+                "max_open_ctrader_positions": 10,
+                "max_ready_per_poll": 10,
+                "max_same_base": 0,
+                "max_currency_exposure": 0,
+            },
+        ), patch.object(
+            signal_candidate_engine, "_open_ctrader_position_count", return_value=0
+        ), patch.object(
+            signal_candidate_engine, "_open_ctrader_symbols", return_value=set()
+        ):
+            ready = signal_candidate_engine.get_ready_signals(now_ts, forex_only=True, limit=10)
+
+        ids = {c["id"] for c in ready}
+        assert ids >= {"fx-ready", "eth-ready", "sol-ready", "lnk-ready"}
+        assert "bin-ready" not in ids
+    finally:
+        signal_candidate_engine.candidates = previous
+
+
+def test_get_ready_signals_forex_only_excludes_ctrader_crypto_when_flag_off(monkeypatch):
+    monkeypatch.setenv("CTRADER_CRYPTO_ENABLED", "false")
+    monkeypatch.setenv("CTRADER_ENV", "demo")
+    now_ts = int(time.time())
+    previous = dict(signal_candidate_engine.candidates)
+    signal_candidate_engine.candidates.clear()
+    try:
+        signal_candidate_engine.candidates["fx-ready"] = _ready_candidate(
+            "fx-ready", "EURUSD", "ctrader", now_ts
+        )
+        signal_candidate_engine.candidates["eth-ready"] = _ready_candidate(
+            "eth-ready", "ETHUSD", "ctrader", now_ts
+        )
+
+        with patch.object(
+            signal_candidate_engine, "_open_ctrader_position_count", return_value=0
+        ), patch.object(
+            signal_candidate_engine, "_open_ctrader_symbols", return_value=set()
+        ):
+            ready = signal_candidate_engine.get_ready_signals(now_ts, forex_only=True, limit=5)
+
+        ids = {c["id"] for c in ready}
+        assert "fx-ready" in ids
+        assert "eth-ready" not in ids
+    finally:
+        signal_candidate_engine.candidates = previous
+
+
+def test_get_ready_signals_forex_only_excludes_ctrader_crypto_when_env_live(monkeypatch):
+    monkeypatch.setenv("CTRADER_CRYPTO_ENABLED", "true")
+    monkeypatch.setenv("CTRADER_ENV", "live")
+    now_ts = int(time.time())
+    previous = dict(signal_candidate_engine.candidates)
+    signal_candidate_engine.candidates.clear()
+    try:
+        signal_candidate_engine.candidates["fx-ready"] = _ready_candidate(
+            "fx-ready", "EURUSD", "ctrader", now_ts
+        )
+        signal_candidate_engine.candidates["eth-ready"] = _ready_candidate(
+            "eth-ready", "ETHUSD", "ctrader", now_ts
+        )
+
+        with patch.object(
+            signal_candidate_engine, "_open_ctrader_position_count", return_value=0
+        ), patch.object(
+            signal_candidate_engine, "_open_ctrader_symbols", return_value=set()
+        ):
+            ready = signal_candidate_engine.get_ready_signals(now_ts, forex_only=True, limit=5)
+
+        ids = {c["id"] for c in ready}
+        assert "fx-ready" in ids
+        assert "eth-ready" not in ids
     finally:
         signal_candidate_engine.candidates = previous
 

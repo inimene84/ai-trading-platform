@@ -38,6 +38,8 @@ def test_symbol_normalization():
     assert svc._normalize_symbol("LINKUSDT") == "LNKUSD"
     assert svc._normalize_symbol("USDJPY=X") == "USDJPY"
     assert svc._normalize_symbol("EURUSD") == "EURUSD"
+    assert CTraderService.normalize_catalog_name("XRPUSD.") == "XRPUSD"
+    assert CTraderService.normalize_catalog_name("NZD/JPY") == "NZDJPY"
 
 
 def test_paper_order_execution():
@@ -738,6 +740,20 @@ def test_log_symbol_strips_crlf():
     assert "\n" not in _log_symbol("BTCUSD\r\nBUY")
 
 
+def test_symbol_id_for_resolves_ic_crypto_aliases():
+    svc = CTraderService()
+    svc._symbol_ids = {"AVAXUSD": 501, "XRPUSD": 502, "ETHUSD": 503}
+    svc._live_catalog_names = {"AVAXUSD", "XRPUSD", "ETHUSD"}
+    svc.apply_ic_crypto_symbol_aliases()
+    assert svc.symbol_id_for("AVXUSD") == 501
+    assert svc.symbol_id_for("AVAXUSD") == 501
+    assert svc.symbol_id_for("XRPUSD.") == 502
+    assert svc.symbol_id_for("XRPUSD") == 502
+    assert svc.symbol_id_for("BNBUSD") is None
+    assert svc.symbol_id_for("ETHUSD") == 503
+    assert svc.symbol_name_for_id(501) == "AVXUSD"
+
+
 def test_place_order_refuses_crypto_by_default():
     svc = CTraderService()
     res = svc.place_order(symbol="ETHUSDT", direction="BUY", quantity=0.1, price=3500.0)
@@ -752,6 +768,9 @@ def test_place_order_refuses_crypto_on_live_even_when_enabled(monkeypatch):
     res = svc.place_order(symbol="ETHUSD", direction="BUY", quantity=0.1, price=3500.0)
     assert res["status"] == "error"
     assert "crypto" in res["error"]
+    dotted = svc.place_order(symbol="XRPUSD.", direction="BUY", quantity=1.0, price=0.58)
+    assert dotted["status"] == "error"
+    assert "crypto" in dotted["error"]
 
 
 def test_place_order_allows_mapped_crypto_on_demo_when_enabled(monkeypatch):
