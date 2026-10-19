@@ -46,6 +46,28 @@ from backend.services.funding_filter import (
 
 logger = logging.getLogger(__name__)
 
+# Broker rejects that will fail identically on every retry of the same order.
+PERMANENT_REJECT_MARKERS = (
+    "INVALID_REQUEST",
+    "INVALID PRECISION",
+    "TRADING_BAD_STOPS",
+    "TRADING_BAD_VOLUME",
+    "STOP LOSS TOO CLOSE TO ENTRY TO ENCODE",
+)
+
+
+def is_permanent_broker_reject(text: str) -> bool:
+    up = str(text or "").upper()
+    return any(marker in up for marker in PERMANENT_REJECT_MARKERS)
+
+
+def signal_reject_cooldown_sec() -> int:
+    """Per-candidate pause after a permanent reject (SIGNAL_REJECT_COOLDOWN_SEC, default 900)."""
+    try:
+        return max(0, int(float(os.getenv("SIGNAL_REJECT_COOLDOWN_SEC", "900") or 900)))
+    except (TypeError, ValueError):
+        return 900
+
 
 class TimingMode:
     PRE_EVENT = "PRE_EVENT"
@@ -1773,6 +1795,8 @@ class SignalCandidateEngine:
                 if cand["status"] == CandidateStatus.PENDING:
                     cand["status"] = CandidateStatus.READY
                 if cand["status"] == CandidateStatus.READY:
+                    if float(cand.get("reject_cooldown_until") or 0) > current_ts:
+                        continue
                     ready.append(cand)
 
         self.prune_candidates(current_ts)
@@ -1985,6 +2009,17 @@ class SignalCandidateEngine:
                 "skipped": True,
                 "error": f"Symbol {cand_sym} is in post-loss cooldown.",
             }
+        reject_until = float(cand.get("reject_cooldown_until") or 0)
+        if not force and reject_until > now_ts:
+            return {
+                "success": False,
+                "skipped": True,
+                "candidate_id": candidate_id,
+                "error": (
+                    f"REJECT_COOLDOWN — broker permanently rejected this order; "
+                    f"retry in {int(reject_until - now_ts)}s."
+                ),
+            }
 
         if self.execution_config.get("forex_only") and cand.get("broker") == "binance_futures":
             return {
@@ -2131,6 +2166,7 @@ class SignalCandidateEngine:
                 if max_lots > 0:
                     qty = min(float(qty), max_lots)
             side = cand["direction"].upper()
+            err_text = ""
 
             if cand["broker"] == "ctrader":
                 if live_ctrader_orders_allowed():
@@ -2255,6 +2291,16 @@ class SignalCandidateEngine:
                 logger.warning(
                     f"Candidate {candidate_id} execution failed ({cand['broker']}): {msg}"
                 )
+                reject_detail = f"{err_text} {msg}"
+                cool = signal_reject_cooldown_sec()
+                if cool > 0 and is_permanent_broker_reject(reject_detail):
+                    cand["reject_count"] = int(cand.get("reject_count") or 0) + 1
+                    cand["reject_cooldown_until"] = int(time.time()) + cool
+                    cand["last_reject_reason"] = (err_text or msg)[:300]
+                    logger.warning(
+                        f"[{cand_sym}] Candidate {candidate_id} permanent broker reject "
+                        f"#{cand['reject_count']}; not retrying for {cool}s: {err_text or msg}"
+                    )
 
             return {
                 "success": success,

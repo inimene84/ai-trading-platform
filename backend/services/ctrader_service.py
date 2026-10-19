@@ -340,9 +340,10 @@ class CTraderProtocol:
                             break
                     self._service._symbol_specs[name] = spec
                     logger.info(
-                        "cTrader symbol spec %s id=%s lotSize=%s minVolume=%s stepVolume=%s",
+                        "cTrader symbol spec %s id=%s lotSize=%s minVolume=%s stepVolume=%s digits=%s pipPosition=%s",
                         name, sym.symbolId, spec["lot_size"],
                         spec["min_volume"], spec["step_volume"],
+                        spec["digits"], spec["pip_position"],
                     )
                 self._service.refresh_position_lots()
 
@@ -1062,6 +1063,62 @@ class CTraderService(BrokerService):
         if sym.startswith("XAG"):
             return Decimal("0.001")
         return Decimal("0.0001")
+
+    @classmethod
+    def order_price_digits(cls, symbol: str) -> int:
+        """Digits used to encode order SL/TP on the broker's price grid.
+
+        Only the live ProtoOASymbol is trusted here. Without it, fall back to
+        whole pips (pipPosition): a whole-pip distance is on-grid whatever the
+        broker's real digits are, whereas the generic 5-digit fallback sent
+        sub-pip relative stops that Spotware rejected as "invalid precision".
+        """
+        sym = cls.normalize_symbol_name(symbol)
+        live = cls._live_spec(sym)
+        if live.get("digits"):
+            return int(live["digits"])
+        if live.get("pip_position"):
+            return int(live["pip_position"])
+        return max(0, int(cls.pip_position_for(sym)))
+
+    @classmethod
+    def relative_price_step_units(cls, digits: int) -> int:
+        """Smallest relative SL/TP increment (1/100000 units) for *digits*."""
+        return 10 ** max(0, 5 - int(digits))
+
+    @classmethod
+    def round_price_to_grid(cls, symbol: str, price: Optional[float]) -> Optional[float]:
+        """Absolute SL/TP rounded to the order price digits (None/0 passthrough)."""
+        if not price:
+            return price
+        return float(round(float(price), cls.order_price_digits(symbol)))
+
+    def ensure_symbol_spec(self, symbol: str, symbol_id: Optional[int], timeout: float = 3.0) -> bool:
+        """Load the live ProtoOASymbol (digits/pipPosition) on demand before an order.
+
+        Specs were only fetched for metals, IC crypto and open positions, so a
+        first entry on any other pair ran on hard-coded digits. Must be called
+        off the reactor thread (place_order already blocks on reactor events).
+        """
+        name = self.normalize_symbol_name(symbol)
+        if (self._live_spec(name) or {}).get("digits"):
+            return True
+        proto = self._protocol
+        if proto is None or not symbol_id:
+            return False
+        try:
+            from twisted.internet import reactor
+
+            reactor.callFromThread(proto._request_symbol_specs, [int(symbol_id)])
+        except Exception as e:
+            logger.warning("cTrader on-demand symbol spec request failed for %s: %s", name, e)
+            return False
+        deadline = time.time() + max(0.0, float(timeout))
+        while time.time() < deadline:
+            if (self._live_spec(name) or {}).get("digits"):
+                return True
+            time.sleep(0.1)
+        return bool((self._live_spec(name) or {}).get("digits"))
 
     @classmethod
     def pip_position_for(cls, symbol: str) -> int:
@@ -2088,6 +2145,12 @@ class CTraderService(BrokerService):
                 logger.error("cTrader symbol ID not found for %s", _log_symbol(ct_symbol))
                 return {"status": "error", "error": f"Unknown symbol {_log_symbol(ct_symbol)}"}
 
+            if not self.ensure_symbol_spec(ct_symbol, symbol_id):
+                logger.warning(
+                    "cTrader live symbol spec unavailable for %s; SL/TP rounded to whole pips",
+                    _log_symbol(ct_symbol),
+                )
+
             # Spotware volume is cents of a unit. Metals use broker lotSize,
             # not the FX 10_000_000 cents/lot scale.
             raw_volume = self.lots_to_protocol_volume(
@@ -2097,7 +2160,8 @@ class CTraderService(BrokerService):
                 min_volume=self.min_volume_cents(ct_symbol),
                 step_volume=self.step_volume_cents(ct_symbol),
             )
-            digits = self.digits_for(ct_symbol)
+            # SL/TP must sit on the broker grid (live digits, else whole pips).
+            digits = self.order_price_digits(ct_symbol)
 
             order_req = msgs.ProtoOANewOrderReq()
             order_req.ctidTraderAccountId = self._account_id or 0
@@ -2109,7 +2173,7 @@ class CTraderService(BrokerService):
             # relativeStopLoss/TP are 1/100000 of a price unit, aligned to symbol digits
             if current_price and stop_loss_price:
                 sl_units = self.relative_stop_units(float(current_price), float(stop_loss_price), digits)
-                step = 10 ** max(0, 5 - int(digits))
+                step = self.relative_price_step_units(digits)
                 min_units = int(round(
                     self.min_protective_distance(ct_symbol, float(current_price))
                     * self.SPOTWARE_PRICE_SCALE
@@ -2327,10 +2391,15 @@ class CTraderService(BrokerService):
             req = msgs.ProtoOAAmendPositionSLTPReq()
             req.ctidTraderAccountId = self._account_id or 0
             req.positionId = int(position_id)
+            amend_sym = str((matched or {}).get("symbol") or "")
             if stop_loss:
-                req.stopLoss = float(stop_loss)
+                req.stopLoss = float(
+                    self.round_price_to_grid(amend_sym, stop_loss) if amend_sym else stop_loss
+                )
             if take_profit:
-                req.takeProfit = float(take_profit)
+                req.takeProfit = float(
+                    self.round_price_to_grid(amend_sym, take_profit) if amend_sym else take_profit
+                )
             payload_type = int(getattr(req, "payloadType", 0) or 2113)
             reactor.callFromThread(lambda: self._protocol._send(req, payload_type))
             logger.info(
