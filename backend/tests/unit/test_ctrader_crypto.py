@@ -80,13 +80,21 @@ def test_catalog_skips_unknown_names(monkeypatch):
     reset_ctrader_crypto_catalog_cache()
 
 
-def test_accepted_defaults_without_catalog(monkeypatch):
+def test_accepted_fail_closed_without_live_catalog(monkeypatch):
+    """Default IDs are not a catalog — no live ProtoOASymbolsListRes means empty."""
     reset_ctrader_crypto_catalog_cache()
     monkeypatch.setenv("CTRADER_CRYPTO_SYMBOLS", "BTC,ETH,ADA")
     accepted = accepted_ctrader_crypto_symbols()
-    assert "BTCUSD" in accepted
-    assert "ETHUSD" in accepted
-    assert "ADAUSD" not in accepted  # not in static default ids
+    assert accepted == []
+    reset_ctrader_crypto_catalog_cache()
+
+
+def test_catalog_ignores_default_ids_not_in_live_book(monkeypatch):
+    reset_ctrader_crypto_catalog_cache()
+    monkeypatch.setenv("CTRADER_CRYPTO_SYMBOLS", "ETHUSDT,BTC")
+    # Live book has FX only; default BTCUSD:36 must not count as accepted.
+    accepted = validate_ctrader_crypto_catalog({"EURUSD", "XAUUSD"})
+    assert accepted == []
     reset_ctrader_crypto_catalog_cache()
 
 

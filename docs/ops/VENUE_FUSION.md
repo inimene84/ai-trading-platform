@@ -35,7 +35,7 @@ keeps refusing crypto.
 | `FUNDING_FILTER_SIZE_MULT` | `0.5` | Size multiplier when funding opposes but is below the veto threshold. |
 | `VENUE_CRYPTO` | `binance` | Asset-class → venue. Aliases: `binance_futures`, `ctrader`, `ic`. Does **not** enable IC crypto. |
 | `CTRADER_CRYPTO_ENABLED` | `false` | When true, evaluate/execute mapped crypto CFDs on cTrader **as well as** Binance. Default off. |
-| `CTRADER_CRYPTO_SYMBOLS` | (empty) | Optional IC / scan list (`ETHUSDT,BTC,SOLUSD`). Empty → map `TRADING_SYMBOLS` (else the built-in IC set). Unknown catalog names are skipped with a warning. |
+| `CTRADER_CRYPTO_SYMBOLS` | (empty) | Optional IC / scan list (`ETHUSDT,BTC,SOLUSD`). Empty → map `TRADING_SYMBOLS` (else the built-in IC set). Only names present in the live `ProtoOASymbolsListRes` are accepted; unknown / not-yet-loaded names are skipped with a warning. |
 | `CTRADER_MAX_SPREAD_FOREX` | `2.0` | cTrader spread gate for FX (unchanged default). |
 | `CTRADER_MAX_SPREAD_METALS` | `40` | Gold/silver pip cap so XAUUSD is not blocked by the 2.0 FX gate. |
 | `CTRADER_MAX_SPREAD_CRYPTO` | `80` | IC crypto CFD pip cap. Per-symbol override: `CTRADER_MAX_SPREAD_XAUUSD`. |

@@ -272,6 +272,7 @@ class CTraderProtocol:
                     dict(self._service.DEFAULT_SYMBOL_IDS),
                     sym_map,
                 )
+                self._service._live_catalog_names = set(sym_map.keys())
                 self._service.relabel_cached_symbols()
                 logger.info(
                     "cTrader dynamic symbol catalog updated: %s instruments (NZDJPY id=%s)",
@@ -279,7 +280,7 @@ class CTraderProtocol:
                     self._service._symbol_ids.get("NZDJPY"),
                 )
                 if ctrader_crypto_enabled():
-                    accepted = validate_ctrader_crypto_catalog(self._service._symbol_ids.keys())
+                    accepted = validate_ctrader_crypto_catalog(self._service._live_catalog_names)
                     logger.info("cTrader crypto catalog accepted: %s", accepted)
                 self._request_symbol_specs(self._service.priority_symbol_ids())
                 # Reconcile often arrives before this large catalog. Refresh names
@@ -710,6 +711,7 @@ class CTraderService(BrokerService):
         self._auth_event = threading.Event()
         self._account_id: Optional[int] = None
         self._symbol_ids: Dict[str, int] = dict(self.DEFAULT_SYMBOL_IDS)
+        self._live_catalog_names: set[str] = set()
         self._symbol_specs: Dict[str, Dict[str, Any]] = {}
         self._positions: List[Dict[str, Any]] = []
         self._trendbar_cache: Dict[str, List[Dict[str, Any]]] = {}

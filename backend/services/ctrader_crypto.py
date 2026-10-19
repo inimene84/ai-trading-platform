@@ -182,8 +182,8 @@ def validate_ctrader_crypto_catalog(known_names: Optional[Iterable[str]] = None)
     """Intersect requested IC names with the live (or default) cTrader catalog.
 
     Unknown names are skipped with a warning. An empty *known_names* means
-    "catalog not loaded" — accept names that appear in the static default
-    map and still warn on the rest.
+    the live ProtoOASymbolsListRes has not arrived — accept nothing
+    (fail-closed). Default symbol IDs are not a catalog.
     """
     global _accepted_catalog, _unknown_catalog
     wanted = requested_ctrader_crypto_symbols()
@@ -191,28 +191,14 @@ def validate_ctrader_crypto_catalog(known_names: Optional[Iterable[str]] = None)
     accepted: list[str] = []
     unknown: set[str] = set()
     for name in wanted:
-        if known:
-            if name in known:
-                accepted.append(name)
-            else:
-                unknown.add(name)
-                logger.warning(
-                    "cTrader crypto symbol %s is not in the live catalog — skipping",
-                    sanitize_log_text(name).replace("\r", "").replace("\n", ""),
-                )
+        if known and name in known:
+            accepted.append(name)
         else:
-            # Defaults ship BTC/ETH/SOL/XRP/BNB. ADA/LNK/AVX/DOG wait for the catalog.
-            from backend.services.ctrader_service import CTraderService
-
-            defaults = set(CTraderService.DEFAULT_SYMBOL_IDS)
-            if name in defaults or name in {"BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "BNBUSD"}:
-                accepted.append(name)
-            else:
-                unknown.add(name)
-                logger.warning(
-                    "cTrader crypto symbol %s has no catalog entry yet — skipping until startup validation",
-                    sanitize_log_text(name).replace("\r", "").replace("\n", ""),
-                )
+            unknown.add(name)
+            logger.warning(
+                "cTrader crypto symbol %s is not in the live catalog — skipping",
+                sanitize_log_text(name).replace("\r", "").replace("\n", ""),
+            )
     _accepted_catalog = set(accepted)
     _unknown_catalog = unknown
     return accepted
@@ -224,7 +210,7 @@ def accepted_ctrader_crypto_symbols() -> list[str]:
         try:
             from backend.services.ctrader_service import ctrader_service
 
-            known = set(getattr(ctrader_service, "_symbol_ids", {}) or {})
+            known = set(getattr(ctrader_service, "_live_catalog_names", {}) or {})
         except Exception:
             known = set()
         return validate_ctrader_crypto_catalog(known or None)
