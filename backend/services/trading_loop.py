@@ -276,6 +276,18 @@ class TradingLoopService:
         return [t for t in open_trades if is_binance_paper_fill(t)]
 
     @staticmethod
+    def _same_direction_symbols(all_open, scoped_open, action):
+        """Distinct symbols already open in *action* for the correlation cap.
+
+        Paper-parallel counts the loop's own paper book (same scope as the
+        max-open check); otherwise the broker-scoped risk book, unchanged.
+        """
+        book = TradingLoopService._risk_position_book(all_open)
+        scope = scoped_open if book is None else book
+        label = "risk book" if book is None else "loop paper book"
+        return {t.symbol for t in scope if t.direction == action}, label
+
+    @staticmethod
     def _crypto_session_id() -> str | None:
         """Paper-parallel crypto fills use a dedicated session, not live cTrader.
 
@@ -1457,14 +1469,24 @@ class TradingLoopService:
                         for t in scoped_open if t.direction == "SELL"
                     )
                     # Correlation cap: distinct symbols already open in this direction
-                    _same_dir_syms = {t.symbol for t in scoped_open if t.direction == decision.action}
+                    # Paper-parallel: count only the loop's own paper book; the
+                    # cTrader/n8n forex legs are not this loop's correlation risk
+                    # and keep their own caps in signal_candidate_engine.
+                    _same_dir_syms, _dir_label = self._same_direction_symbols(
+                        all_open, scoped_open, decision.action
+                    )
                     _dir_cap = self.risk_config.max_same_direction_positions
 
+                    if len(_same_dir_syms) < _dir_cap:
+                        logger.info(
+                            f"  [ {symbol} ] same-direction check: {len(_same_dir_syms)} "
+                            f"{decision.action} in {_dir_label} (cap {_dir_cap})"
+                        )
                     if len(_same_dir_syms) >= _dir_cap:
                         logger.warning(
                             f"  [ {symbol} ] {decision.action} blocked: already "
-                            f"{len(_same_dir_syms)} {decision.action} positions (cap {_dir_cap}) "
-                            f"— correlated-exposure guard"
+                            f"{len(_same_dir_syms)} {decision.action} positions in {_dir_label} "
+                            f"(cap {_dir_cap}) — correlated-exposure guard"
                         )
                         signal_status = "rejected"
                         signal_reason = (
