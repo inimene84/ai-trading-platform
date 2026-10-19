@@ -22,7 +22,9 @@ from backend.services.jesse_ml_gates import (
     calculate_fractional_kelly,
     clip_kelly_for_thin_book,
     empirical_payoff_ratio,
+    net_theoretical_payoff_ratio,
 )
+from backend.services import kelly_stats
 from backend.services.ml_uncertainty_guard import stuck_uncertainty
 from backend.services.position_caps import effective_binance_position_cap
 from backend.services.kronos_gate import apply_kronos_gate
@@ -39,6 +41,27 @@ from backend.strategies.combined import CombinedStrategy
 from backend.strategies.market_regime import MarketRegimeDetector
 
 logger = logging.getLogger(__name__)
+
+
+def kelly_zero_policy() -> str:
+    """What a Kelly multiplier of 0 (no edge) does to a new entry.
+
+    skip     — no entry (default). Kelly 0 means the model sees no edge.
+    min_size — enter at the venue minimum notional only.
+    Before Oct 19 a 0 failed open to full base/risk sizing.
+    """
+    raw = (os.getenv("KELLY_ZERO_POLICY", "skip") or "skip").strip().lower()
+    return "min_size" if raw in {"min_size", "min", "minimum"} else "skip"
+
+
+def default_stats_modes(venue: str) -> tuple[str, ...]:
+    """Trade.mode values that count as real outcomes for ``venue`` now."""
+    from backend.services.equity_scope import binance_money_mode
+
+    if venue == "binance_futures":
+        return ("live",) if binance_money_mode() == "live_cash" else ("paper",)
+    # cTrader broker fills are recorded as live (old demo) or demo (new demo).
+    return ("live", "demo")
 
 
 def jesse_ml_no_model_policy() -> str:
@@ -253,6 +276,11 @@ class DecisionEngine:
         # Available cash/margin and session leverage (paper 1x vs Binance 10x).
         self.account_available: float = 0.0
         self.account_leverage: float = 1.0
+        # Venue whose closed trades feed the empirical Kelly b (set by the loop:
+        # the crypto loop trades Binance even when ACTIVE_BROKER is cTrader).
+        self.stats_venue: Optional[str] = None
+        self.stats_modes: Optional[Tuple[str, ...]] = None
+        self._last_kelly_stats: Optional[kelly_stats.ScopedPnlStats] = None
 
     def _record_eval(
         self,
@@ -857,7 +885,9 @@ class DecisionEngine:
                         if promo is not None and promo.shadow:
                             # SHADOW: load artifact, log preds, size=0 from this model.
                             log_shadow_prediction(promo, symbol, ml_res)
-                            setattr(signal, "kelly_multiplier", 0.0)
+                            # Shadow model contributes no sizing. None (not 0.0):
+                            # 0 now means "no edge -> skip" in _create_entry_decision.
+                            setattr(signal, "kelly_multiplier", None)
                             self.last_evaluation["shadow_ml"] = {
                                 "signal": ml_res.get("signal"),
                                 "confidence": ml_res.get("confidence"),
@@ -1158,39 +1188,39 @@ class DecisionEngine:
                     }
         return decision
 
-    def _partition_pnl_stats(self) -> Tuple[int, float, float]:
-        """Closed-trade count, average win, and average |loss| for the active book partition."""
-        closed_count = 0
-        avg_win = 0.0
-        avg_loss_abs = 0.0
+    def _stats_venue_for(self, symbol: str) -> str:
+        if self.stats_venue:
+            return kelly_stats.venue_for_broker(self.stats_venue)
         try:
-            db = SessionLocal()
-            try:
-                active_broker = risk_broker_name().lower()
-                current_mode = get_trading_mode().value if hasattr(get_trading_mode(), "value") else str(get_trading_mode())
-                closed_filter = Trade.status.in_(["closed", "exit"])
-                q = db.query(Trade).filter(closed_filter)
-                q = q.filter(
-                    or_(
-                        Trade.strategy.is_(None),
-                        ~Trade.strategy.in_(sorted(RECONCILIATION_STRATEGIES)),
-                    )
-                )
-                if active_broker == "ctrader":
-                    q = q.filter(Trade.broker.in_(["ctrader", "ctrader:paper", "ic", "icmarkets"]))
-                elif active_broker in {"binance", "binance_futures"}:
-                    q = q.filter(Trade.broker.in_(["binance", "binance_futures", "binanceusdm"]))
-                q = q.filter(Trade.mode == current_mode.lower())
-                closed_count = q.with_entities(func.count(Trade.id)).scalar() or 0
-                avg_win = q.filter(Trade.pnl > 0).with_entities(func.avg(Trade.pnl)).scalar() or 0.0
-                avg_loss_abs = (
-                    q.filter(Trade.pnl < 0).with_entities(func.avg(func.abs(Trade.pnl))).scalar() or 0.0
-                )
-            finally:
-                db.close()
+            from backend.services.ctrader_crypto import broker_for_scan_symbol
+
+            return kelly_stats.venue_for_broker(broker_for_scan_symbol(symbol))
+        except Exception:
+            from backend.services.multi_asset_bars import classify_symbol
+
+            return "binance_futures" if classify_symbol(symbol) == "crypto" else "ctrader"
+
+    def _partition_pnl_stats(self, symbol: Optional[str] = None) -> Tuple[int, float, float]:
+        """Closed-trade count, avg win and avg |loss| for this symbol's venue.
+
+        Scoped to the venue that takes the order and to the instrument
+        (asset-class fallback), excluding test/simulated, void, reconciliation,
+        null/zero-P&L and corrupt-price rows. A thin sample returns a count
+        below ``KELLY_STATS_MIN_SAMPLE`` so the caller uses the conservative b.
+        """
+        self._last_kelly_stats = None
+        if not symbol:
+            return 0, 0.0, 0.0
+        try:
+            venue = self._stats_venue_for(symbol)
+            modes = self.stats_modes or default_stats_modes(venue)
+            rows = kelly_stats.load_closed_rows(venue)
+            st = kelly_stats.compute_scoped_stats(rows, symbol=symbol, venue=venue, modes=modes)
+            self._last_kelly_stats = st
+            return int(st.closed_count), float(st.avg_win), float(st.avg_loss_abs)
         except Exception as e:
-            logger.debug(f"Could not query partition PnL stats: {e}")
-        return int(closed_count), float(avg_win or 0.0), float(avg_loss_abs or 0.0)
+            logger.debug(f"Could not query scoped PnL stats for {symbol}: {e}")
+            return 0, 0.0, 0.0
 
     def _create_entry_decision(self, symbol: str, bars: List[Dict[str, Any]], signal: Any, direction: str, is_pyramid: bool, regime: str = "UNKNOWN") -> Optional[Decision]:
         current_price = bars[-1]["close"]
@@ -1211,17 +1241,39 @@ class DecisionEngine:
         kelly_mult = getattr(signal, "kelly_multiplier", None)
         win_prob = getattr(signal, "kelly_win_prob", None)
 
-        closed_count, avg_win, avg_loss_abs = self._partition_pnl_stats()
-        payoff_b = empirical_payoff_ratio(avg_win, avg_loss_abs, closed_count)
+        closed_count, avg_win, avg_loss_abs = self._partition_pnl_stats(symbol=symbol)
+        fallback_b = min(net_theoretical_payoff_ratio(), kelly_stats.kelly_fallback_payoff_cap())
+        payoff_b = empirical_payoff_ratio(
+            avg_win, avg_loss_abs, closed_count,
+            fallback=fallback_b, min_closed=kelly_stats.kelly_stats_min_sample(),
+        )
+        _st = getattr(self, "_last_kelly_stats", None)
+        _scope = _st.describe() if _st is not None else f"closed={closed_count}"
 
         if win_prob is not None and float(win_prob) > 0:
             recomputed = calculate_fractional_kelly(float(win_prob), payoff_ratio=payoff_b)
             kelly_mult = float(recomputed["size_multiplier"])
             logger.info(
                 f"[{symbol}] Empirical Kelly b={payoff_b:.2f} "
-                f"(geometry fallback={STRATEGY_PAYOFF_RATIO:.2f}, closed={closed_count}) "
+                f"(thin-book fallback={fallback_b:.2f}; {_scope}) "
                 f"-> multiplier={kelly_mult:.3f}x"
             )
+
+        # Kelly 0 = no edge. Skip the entry (default) or take the venue
+        # minimum; never fall through to full base/risk sizing.
+        kelly_min_size = False
+        if kelly_mult is not None and float(kelly_mult) <= 0:
+            if kelly_zero_policy() == "min_size":
+                kelly_min_size = True
+                logger.info(f"[{symbol}] Kelly 0 (no edge) -> minimum size (KELLY_ZERO_POLICY=min_size; {_scope})")
+            else:
+                logger.info(f"[{symbol}] Kelly 0 (no edge) -> SKIP entry (KELLY_ZERO_POLICY=skip; {_scope})")
+                self._record_eval(
+                    symbol, direction, getattr(signal, "confidence", 0.0),
+                    f"SKIP (Kelly 0: no edge; {_scope})",
+                    entry=entry_price, sl=sl, tp=tp,
+                )
+                return None
 
         if kelly_mult is not None and kelly_mult > 0:
             kelly_mult, was_clipped = clip_kelly_for_thin_book(float(kelly_mult), closed_count)
@@ -1237,7 +1289,9 @@ class DecisionEngine:
             logger.info(f"[{symbol}] Base notional scaled by Fractional Kelly ({kelly_mult:.2f}x) -> {trade_usdt:.2f} USDT")
 
         notional = trade_usdt
-        if (not is_pyramid and getattr(self.config, "equity_sizing_enabled", False)
+        if kelly_min_size:
+            notional = 0.0  # floored to the venue minimum below
+        elif (not is_pyramid and getattr(self.config, "equity_sizing_enabled", False)
                 and self.account_equity > 0 and sl and entry_price > 0):
             per_unit_risk = abs(entry_price - sl)
             if per_unit_risk > 0:
@@ -1300,6 +1354,8 @@ class DecisionEngine:
         # BTC uses $100 flat to match Binance min notional requirement.
         _bn_min = 100.0 if 'BTC' in symbol else 20.0
         live = get_trading_mode() == TradingMode.LIVE
+        if kelly_min_size:
+            notional = _bn_min
         notional, reject = apply_hard_notional_caps(
             notional,
             trade_usdt=float(self.config.trade_usdt_amount),

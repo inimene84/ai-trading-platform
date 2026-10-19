@@ -165,7 +165,9 @@ async def test_empty_snapshot_quarantines_paper_ghost_rows():
 
 
 @pytest.mark.asyncio
-async def test_sync_adopts_and_protects_orphan_exchange_leg():
+async def test_sync_adopts_and_protects_orphan_exchange_leg(monkeypatch):
+    # Adoption is opt-in since Oct 19 (BINANCE_ORPHAN_ADOPTION=false default).
+    monkeypatch.setenv("BINANCE_ORPHAN_ADOPTION", "true")
     db = _db_with([])
     broker = MagicMock()
     broker.get_positions.return_value = [{

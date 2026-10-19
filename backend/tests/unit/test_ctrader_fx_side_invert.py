@@ -19,6 +19,14 @@ from backend.services.signal_candidate_engine import (
 from backend.services.ctrader_service import CTraderService
 
 
+@pytest.fixture(autouse=True)
+def _no_loser_blocklists(monkeypatch):
+    """Side-invert fixtures use MOMENTUM_TREND_PULSE / XAUUSD; the Oct 19
+    blocklists are covered in test_kelly_losers_20261019.py."""
+    monkeypatch.setenv("CTRADER_DISABLED_STRATEGIES", "none")
+    monkeypatch.setenv("CTRADER_SYMBOL_BLOCKLIST", "none")
+
+
 def test_log_safe_strips_crlf():
     assert SignalCandidateEngine._log_safe("EURUSD\nBUY\r") == "EURUSDBUY"
     assert SignalCandidateEngine._log_safe(None) == ""

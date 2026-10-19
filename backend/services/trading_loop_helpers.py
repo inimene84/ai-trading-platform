@@ -444,6 +444,19 @@ class BrokerPositionSyncService:
                     db_keys.add(live_key)
                     updated += 1
                     continue
+                from backend.services.entry_blocklists import binance_orphan_adoption_enabled
+
+                if not binance_orphan_adoption_enabled():
+                    # Oct 19: adopted outside-the-loop legs (CELR/AGT/AKE/...)
+                    # were the main live-Binance loss. Leave them unmanaged by
+                    # the loop; never place orders for them from here.
+                    logger.critical(
+                        f"  [ {symbol} ] exchange leg opened outside the loop "
+                        f"(qty={qty} side={direction_hint}) — NOT adopted "
+                        "(BINANCE_ORPHAN_ADOPTION=false); manage it manually"
+                    )
+                    db_keys.add(live_key)
+                    continue
                 entry = float(bp.get("entry_price") or bp.get("entryPrice") or 0)
                 if entry <= 0:
                     logger.critical(

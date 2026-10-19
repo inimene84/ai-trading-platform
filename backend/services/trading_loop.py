@@ -322,14 +322,30 @@ class TradingLoopService:
         return get_active_broker_name()
 
     @staticmethod
-    def _paper_balance_payload(cash: float, equity: float, margin_used: float = 0.0) -> dict:
+    def _paper_balance_payload(
+        cash: float, equity: float, margin_used: float = 0.0, source: str = "paper_book",
+    ) -> dict:
         return {
             "balance": cash,
             "available": cash,
             "equity": equity,
             "margin_used": margin_used,
             "broker": "paper_trading",
+            # paper_book | paper_book_db | paper_balance_default
+            "equity_source": source,
         }
+
+    @staticmethod
+    def _sizing_equity(balance: dict, equity: float) -> float:
+        """Equity used for risk sizing.
+
+        Real book only: the live broker account, or the paper book in paper
+        mode. The PAPER_BALANCE default ($100k) is not a book — sizing falls
+        back to the fixed trade_usdt notional instead (equity 0).
+        """
+        if (balance or {}).get("equity_source") == "paper_balance_default":
+            return 0.0
+        return float(equity or 0.0)
 
     def _last_paper_book_from_db(self) -> dict | None:
         """Most recent persisted paper book, if it still has cash."""
@@ -344,7 +360,7 @@ class TradingLoopService:
                     return None
                 margin = float(row.margin_used or 0.0)
                 return self._paper_balance_payload(
-                    cash, paper_reported_equity(cash, margin), margin
+                    cash, paper_reported_equity(cash, margin), margin, source="paper_book_db"
                 )
             finally:
                 db.close()
@@ -375,7 +391,14 @@ class TradingLoopService:
             if last_book:
                 return last_book
             starting = paper_starting_balance()
-            return self._paper_balance_payload(starting, starting, 0.0)
+            logger.warning(
+                "No paper book found; PAPER_BALANCE default $%.0f is display-only — "
+                "risk sizing uses the fixed trade_usdt notional",
+                starting,
+            )
+            return self._paper_balance_payload(
+                starting, starting, 0.0, source="paper_balance_default"
+            )
         books: list[dict] = []
         try:
             if hasattr(ctrader_broker, "get_balance"):
@@ -1380,7 +1403,9 @@ class TradingLoopService:
 
             # 3b2. Blacklisted symbols with an open leg: manage exits only —
             # no new entry and no pyramid add.
-            if symbol.upper() in self.risk_config.symbol_blacklist:
+            from backend.services.entry_blocklists import is_binance_blocked_symbol
+
+            if symbol.upper() in self.risk_config.symbol_blacklist or is_binance_blocked_symbol(symbol):
                 self._check_sl_tp(db, symbol, bars)
                 db.commit()
                 return {"signals": 0, "trades": 0}
@@ -1406,8 +1431,17 @@ class TradingLoopService:
                 self.risk_config,
                 regime_detector=self._regime_detector_for(symbol),
             )
-            decision_engine.account_equity = getattr(self, "_cycle_equity", 0.0)
-            decision_engine.account_available = getattr(self, "_cycle_available", 0.0)
+            _sizing_eq = self._sizing_equity(
+                getattr(self, "_cycle_balance", {}) or {}, getattr(self, "_cycle_equity", 0.0)
+            )
+            decision_engine.account_equity = _sizing_eq
+            decision_engine.account_available = (
+                getattr(self, "_cycle_available", 0.0) if _sizing_eq > 0 else 0.0
+            )
+            # Kelly stats come from the venue this loop actually trades.
+            decision_engine.stats_venue = self._crypto_broker_name()
+            if get_trading_mode() == TradingMode.PAPER or self._crypto_session_id():
+                decision_engine.stats_modes = ("paper",)
             if get_trading_mode() == TradingMode.PAPER or self._crypto_session_id():
                 decision_engine.account_leverage = paper_leverage_for_broker(
                     self._crypto_broker_name()
@@ -2027,7 +2061,12 @@ class TradingLoopService:
         Fails OPEN: if the volume snapshot is unavailable we keep all symbols
         rather than halting trading.
         """
-        blacklist = self.risk_config.symbol_blacklist
+        from backend.services.entry_blocklists import is_binance_blocked_symbol
+
+        # SYMBOL_BLACKLIST plus the small-cap base blocklist (BINANCE_BASE_BLOCKLIST).
+        blacklist = set(self.risk_config.symbol_blacklist) | {
+            s.upper() for s in symbols if is_binance_blocked_symbol(s)
+        }
         min_vol = float(self.risk_config.min_24h_quote_volume_usdt or 0)
 
         # Open positions must keep flowing through management even if blacklisted
