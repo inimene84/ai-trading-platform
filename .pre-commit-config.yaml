@@ -1,0 +1,40 @@
+# Pre-commit hooks for ai-trading-platform.
+# Install once:   pip install pre-commit && pre-commit install
+# Run on all files: pre-commit run --all-files
+#
+# The ggshield hook blocks commits that contain secrets (the GitGuardian
+# scanner used in CI). It needs a GitGuardian API key the first time:
+#   pip install ggshield && ggshield auth login        # or
+#   export GITGUARDIAN_API_KEY=...                      # in your shell / .env
+repos:
+  # --- Secret scanning (primary gate) -----------------------------------
+  - repo: https://github.com/gitguardian/ggshield
+    rev: v1.34.0
+    hooks:
+      - id: ggshield
+        language_version: python3
+        stages: [pre-commit]
+
+  # --- Secondary, offline secret heuristics -----------------------------
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: |
+          (?x)^(
+            poetry\.lock|
+            .*\.lock|
+            .*/__pycache__/.*
+          )$
+
+  # --- General hygiene ---------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: detect-private-key
