@@ -1,4 +1,6 @@
 import asyncio
+import json
+import logging
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -6,6 +8,7 @@ import pytest
 
 from backend.llm.router import (
     LLMChainExhausted,
+    LLMNonAnswer,
     ModelConfig,
     _OMNIROUTE_TIMEOUT_FLOOR,
     _invoke_provider,
@@ -17,6 +20,7 @@ from backend.llm.router import (
     get_llm_router_status,
     resolve_kie_route,
     sanitize_provider_config,
+    unusable_llm_reason,
 )
 from backend.services.persona_adapter import (
     _LLM_UNAVAILABLE_PREFIX,
@@ -66,6 +70,20 @@ def test_classify_http_500_is_retryable():
 def test_classify_http_400_fails_over():
     assert classify_llm_error(_status_error(400, "bad model")) == "failover"
     assert classify_llm_error(_status_error(401)) == "failover"
+
+
+def test_classify_http_402_fails_over_without_retry():
+    assert classify_llm_error(_status_error(402, "Payment Required")) == "failover"
+
+
+def test_classify_http_404_fails_over():
+    assert classify_llm_error(_status_error(404, "model not found")) == "failover"
+
+
+def test_classify_non_answer_and_json_errors_fail_over():
+    assert classify_llm_error(LLMNonAnswer("omniroute", "boilerplate")) == "failover"
+    assert classify_llm_error(ValueError("Could not parse JSON from LLM response")) == "failover"
+    assert classify_llm_error(json.JSONDecodeError("Expecting value", "x", 0)) == "failover"
 
 
 def test_sanitize_remaps_dead_kie_catalog_on_omniroute(monkeypatch):
@@ -273,12 +291,12 @@ async def test_dead_catalog_model_is_not_sent_to_omniroute(monkeypatch):
 
     async def fake_invoke(cfg, *args, **kwargs):
         seen.append(cfg.name)
-        return "ok"
+        return "omni-ok-content"
 
     with patch("backend.llm.router._invoke_provider", new=fake_invoke):
         text = await call_llm_resilient("persona_analysis", prompt="hi")
 
-    assert text == "ok"
+    assert text == "omni-ok-content"
     assert seen == ["auto/fast"]
 
 
@@ -331,12 +349,12 @@ async def test_connect_error_fails_over_immediately(monkeypatch):
         calls.append(cfg.provider)
         if cfg.provider == "omniroute":
             raise httpx.ConnectError("connection refused")
-        return "kie-ok"
+        return "kie-ok-content"
 
     with patch("backend.llm.router._invoke_provider", new=fake_invoke):
         text = await call_llm_resilient("persona_analysis", prompt="hi")
 
-    assert text == "kie-ok"
+    assert text == "kie-ok-content"
     assert calls == ["omniroute", "kie"]
 
 
@@ -794,5 +812,204 @@ def test_sanitize_remaps_kie_family_ids_on_omniroute(monkeypatch):
 def test_sanitize_skips_invalid_kie_slug():
     cfg = ModelConfig(name="gemini-bad slug?", provider="kie", api_key_env="KIE_API_KEY")
     assert sanitize_provider_config(cfg, "persona_analysis") is None
+
+
+def test_unusable_llm_reason_flags_signup_boilerplate():
+    assert unusable_llm_reason("Sign up and repeat your request.") == "boilerplate"
+    assert unusable_llm_reason("Please log in to continue.") == "boilerplate"
+    assert unusable_llm_reason("Rate limit exceeded") == "boilerplate"
+    assert unusable_llm_reason("") == "empty"
+    assert unusable_llm_reason("   ") == "empty"
+    assert unusable_llm_reason("ok") == "too_short"
+    assert unusable_llm_reason("n/a", expect_json=True) == "too_short"
+
+
+def test_unusable_llm_reason_keeps_real_answers():
+    analysis = (
+        "BTC trend remains intact; funding is mild. If the exchange rate limit "
+        "hits, create an account on a backup venue rather than chasing the breakout."
+    )
+    assert unusable_llm_reason(analysis) is None
+    assert unusable_llm_reason("Hold — recreate an account only after the close.") is None
+    assert unusable_llm_reason('{"signal":"buy","confidence":70}') is None
+    assert unusable_llm_reason('{"ok": true}', expect_json=True) is None
+    assert unusable_llm_reason('{"signal":"hold","reason":"quota exceeded"}') is None
+
+
+@pytest.mark.asyncio
+async def test_signup_boilerplate_fails_over_to_next_provider(monkeypatch, caplog):
+    omni = _cfg("omniroute", "auto/fast")
+    kie = _cfg("kie", "gpt-5-6-luna")
+    _patch_chain(monkeypatch, ("Primary (OmniRoute)", omni), ("Fallback 1 (KieAI)", kie))
+
+    calls: list[str] = []
+
+    async def fake_invoke(cfg, *args, **kwargs):
+        calls.append(cfg.provider)
+        if cfg.provider == "omniroute":
+            return "Sign up and repeat your request."
+        return "kie-ok-content"
+
+    caplog.set_level(logging.WARNING)
+    with patch("backend.llm.router._invoke_provider", new=fake_invoke):
+        text = await call_llm_resilient("persona_analysis", prompt="hi")
+
+    assert text == "kie-ok-content"
+    assert calls == ["omniroute", "kie"]
+    assert any("provider=omniroute" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("junk", ["  \n  ", "ok"])
+async def test_empty_and_too_short_replies_fail_over(monkeypatch, junk):
+    omni = _cfg("omniroute", "auto/fast")
+    kie = _cfg("kie", "gpt-5-6-luna")
+    _patch_chain(monkeypatch, ("Primary (OmniRoute)", omni), ("Fallback 1 (KieAI)", kie))
+
+    calls: list[str] = []
+
+    async def fake_invoke(cfg, *args, **kwargs):
+        calls.append(cfg.provider)
+        if cfg.provider == "omniroute":
+            return junk
+        return "kie-ok-content"
+
+    with patch("backend.llm.router._invoke_provider", new=fake_invoke):
+        text = await call_llm_resilient("general", prompt="hi")
+
+    assert text == "kie-ok-content"
+    assert calls == ["omniroute", "kie"]
+
+
+@pytest.mark.asyncio
+async def test_unparseable_json_when_expected_fails_over(monkeypatch, caplog):
+    omni = _cfg("omniroute", "auto/fast")
+    kie = _cfg("kie", "gpt-5-6-luna")
+    _patch_chain(monkeypatch, ("Primary (OmniRoute)", omni), ("Fallback 1 (KieAI)", kie))
+
+    calls: list[str] = []
+
+    async def fake_invoke(cfg, *args, **kwargs):
+        calls.append(cfg.provider)
+        if cfg.provider == "omniroute":
+            return "Here is my take: buy the dip because momentum looks fine."
+        return '{"signal": "neutral", "confidence": 40}'
+
+    caplog.set_level(logging.WARNING)
+    with patch("backend.llm.router._invoke_provider", new=fake_invoke):
+        text = await call_llm_resilient("persona_analysis", prompt="hi", response_json=True)
+
+    parsed = json.loads(text)
+    assert parsed["signal"] == "neutral"
+    assert calls == ["omniroute", "kie"]
+    assert any("unparseable_json" in rec.getMessage() and "omniroute" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_xai_http_404_fails_over_without_retry(monkeypatch):
+    xai = _cfg("xai", "grok-4-1-fast-reasoning")
+    openai = _cfg("openai", "gpt-4o-mini")
+    _patch_chain(monkeypatch, ("Fallback 3 (xAI)", xai), ("Fallback 4 (OpenAI)", openai))
+
+    calls: list[str] = []
+
+    async def fake_invoke(cfg, *args, **kwargs):
+        calls.append(cfg.provider)
+        if cfg.provider == "xai":
+            raise _status_error(404, "model not found")
+        return "openai-ok-content"
+
+    with patch("backend.llm.router._invoke_provider", new=fake_invoke):
+        text = await call_llm_resilient("general", prompt="hi")
+
+    assert text == "openai-ok-content"
+    assert calls == ["xai", "openai"]
+
+
+@pytest.mark.asyncio
+async def test_kie_unparseable_json_body_raises_non_answer(monkeypatch):
+    class BadJsonResp:
+        is_success = True
+        status_code = 200
+        text = "<html>Internal error</html>"
+        headers = {}
+
+        def json(self):
+            raise json.JSONDecodeError("Expecting value", self.text, 0)
+
+        @property
+        def request(self):
+            return httpx.Request("POST", "https://api.kie.ai/codex/v1/responses")
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            return BadJsonResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    with pytest.raises(LLMNonAnswer, match="unparseable_json") as exc_info:
+        await _invoke_provider(
+            _kie_cfg("gpt-5-6-luna"), "k" * 32, "hello", "sys", 0.3, 128, False, timeout=5
+        )
+    assert exc_info.value.provider == "kie"
+    assert exc_info.value.reason == "unparseable_json"
+
+
+@pytest.mark.asyncio
+async def test_kie_json_parse_failure_fails_over(monkeypatch, caplog):
+    kie = _cfg("kie", "gpt-5-6-luna")
+    openrouter = _cfg("openrouter", "anthropic/claude-sonnet-5")
+    _patch_chain(monkeypatch, ("Fallback 1 (KieAI)", kie), ("Fallback 2 (OpenRouter)", openrouter))
+
+    calls: list[str] = []
+
+    async def fake_invoke(cfg, *args, **kwargs):
+        calls.append(cfg.provider)
+        if cfg.provider == "kie":
+            raise LLMNonAnswer("kie", "unparseable_json", preview="<html>")
+        return "openrouter-ok"
+
+    caplog.set_level(logging.WARNING)
+    with patch("backend.llm.router._invoke_provider", new=fake_invoke):
+        text = await call_llm_resilient("general", prompt="hi")
+
+    assert text == "openrouter-ok"
+    assert calls == ["kie", "openrouter"]
+    assert any("kie" in rec.getMessage().lower() for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_http_402_does_not_retry_openrouter_on_first_call(monkeypatch):
+    from backend.services.provider_credit_circuit import credit_circuit
+
+    credit_circuit.reset()
+    monkeypatch.setenv("LLM_CREDIT_CIRCUIT_SECONDS", "1800")
+    openrouter = _cfg("openrouter", "openai/gpt-4o-mini")
+    openai = _cfg("openai", "gpt-4o-mini")
+    _patch_chain(monkeypatch, ("Fallback 2 (OpenRouter)", openrouter), ("Fallback 4 (OpenAI)", openai))
+
+    calls: list[str] = []
+
+    async def fake_invoke(cfg, *args, **kwargs):
+        calls.append(cfg.provider)
+        if cfg.provider == "openrouter":
+            raise _status_error(402, "Payment Required")
+        return "openai-ok-content"
+
+    with patch("backend.llm.router._invoke_provider", new=fake_invoke):
+        text = await call_llm_resilient("general", prompt="hi")
+
+    assert text == "openai-ok-content"
+    assert calls.count("openrouter") == 1
+    assert credit_circuit.is_open("openrouter") is True
+    credit_circuit.reset()
 
 
