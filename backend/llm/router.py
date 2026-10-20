@@ -229,6 +229,16 @@ class LLMChainExhausted(RuntimeError):
     """Raised when every configured LLM provider failed within the chain budget."""
 
 
+class LLMNonAnswer(ValueError):
+    """HTTP success but the body is boilerplate, empty, or otherwise unusable."""
+
+    def __init__(self, provider: str, reason: str, preview: str = "") -> None:
+        self.provider = provider
+        self.reason = reason
+        self.preview = preview
+        super().__init__(f"non-answer from {provider}: {reason}")
+
+
 # Last-error summary for /trading/status — no response bodies, no keys.
 _llm_router_status: dict[str, Any] = {
     "degraded": False,
@@ -321,8 +331,47 @@ _PROVIDER_TIMEOUT_DEFAULTS = {
 }
 
 _RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+_CREDIT_STATUS = frozenset({402})  # Payment Required — trip cooldown, never retry
 _TIMEOUT_ERRORS = (httpx.TimeoutException, TimeoutError, asyncio.TimeoutError)
 _CONNECT_ERRORS = (httpx.ConnectError, httpx.NetworkError)
+
+# Minimum collapsed length for a plaintext reply to count as an answer.
+# Short stubs like "ok" are not useful to the persona/analysis callers.
+_MIN_USABLE_CHARS = 8
+
+# OmniRoute auto/fast often lands on perplexity-web, which returns this (and
+# cousins) as HTTP 200 message content. Matching is bulk-of-message only so a
+# long analysis that mentions "rate limit" in passing is not rejected.
+_NON_ANSWER_PHRASES = (
+    "sign up and repeat your request",
+    "sign in and repeat your request",
+    "please sign up",
+    "please sign in",
+    "please log in",
+    "please login",
+    "log in to continue",
+    "login to continue",
+    "sign in to continue",
+    "sign up to continue",
+    "create an account",
+    "create a free account",
+    "register to continue",
+    "rate limit exceeded",
+    "rate limit reached",
+    "too many requests",
+    "you have been rate limited",
+    "quota exceeded",
+    "insufficient credits",
+    "insufficient credit",
+    "payment required",
+    "upgrade your plan",
+    "subscribe to continue",
+    "add a payment method",
+    "out of credits",
+    "free tier limit",
+    "daily limit reached",
+    "monthly limit reached",
+)
 
 
 def _env_float(name: str, default: float, *, allow_zero: bool = False) -> float:
@@ -393,6 +442,8 @@ def _http_status_code(exc: BaseException) -> Optional[int]:
 
 def _error_summary(exc: BaseException) -> str:
     """Short, body-free error label for logs and raised chain failures."""
+    if isinstance(exc, LLMNonAnswer):
+        return f"LLMNonAnswer {exc.reason}"
     status = _http_status_code(exc)
     if status is not None:
         return f"{type(exc).__name__} HTTP {status}"
@@ -417,16 +468,85 @@ def classify_llm_error(exc: BaseException) -> Literal["retry", "failover"]:
 
     Timeouts and connection failures fail over immediately (do not burn the cycle
     on a dead primary). HTTP 5xx / 429 get one short retry, then the next provider.
+    HTTP 402 (Payment Required) and junk/non-answers fail over immediately so the
+    chain can move on; 402 also trips the credit-circuit cooldown.
     Other 4xx skip remaining retries for this provider.
     """
+    if isinstance(exc, (LLMNonAnswer, json.JSONDecodeError, ValueError)):
+        return "failover"
     if isinstance(exc, _TIMEOUT_ERRORS) or isinstance(exc, _CONNECT_ERRORS):
         return "failover"
     status = _http_status_code(exc)
+    if status in _CREDIT_STATUS:
+        return "failover"
     if status is None:
         return "retry"
     if status in _RETRYABLE_STATUS:
         return "retry"
     return "failover"
+
+
+def _normalize_llm_text(text: str) -> str:
+    stripped = re.sub(r"<think>.*?</think>", "", str(text or ""), flags=re.DOTALL)
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
+def unusable_llm_reason(text: str, *, expect_json: bool = False) -> Optional[str]:
+    """Return a short reason if *text* is not a usable model answer, else None."""
+    normalized = _normalize_llm_text(text)
+    if not normalized:
+        return "empty"
+    looks_json = normalized.lstrip().startswith(("{", "[", "`"))
+    if not looks_json:
+        collapsed = re.sub(r"[^a-z0-9]+", " ", normalized.lower()).strip()
+        padded = f" {collapsed} "
+        for phrase in _NON_ANSWER_PHRASES:
+            phrase_c = re.sub(r"[^a-z0-9]+", " ", phrase).strip()
+            needle = f" {phrase_c} "
+            if needle not in padded:
+                continue
+            remainder = padded.replace(needle, " ", 1)
+            remainder = re.sub(r"\s+", "", remainder)
+            # Phrase dominates the message. A long analysis that mentions
+            # "rate limit" or "create an account" in passing keeps a long remainder.
+            if len(remainder) <= 24:
+                return "boilerplate"
+    if expect_json:
+        if not looks_json and len(normalized) < _MIN_USABLE_CHARS:
+            return "too_short"
+        return None
+    if len(normalized) < _MIN_USABLE_CHARS:
+        return "too_short"
+    return None
+
+
+def reject_unusable_llm_text(text: str, provider: str, *, expect_json: bool = False) -> str:
+    """Return *text* unchanged, or raise LLMNonAnswer for junk/empty replies."""
+    reason = unusable_llm_reason(text, expect_json=expect_json)
+    if reason is None:
+        return text
+    preview = _normalize_llm_text(text)[:80]
+    logger.warning(
+        "LLM Router: treating response as failure (%s) provider=%s preview=%r",
+        reason,
+        provider,
+        preview,
+    )
+    raise LLMNonAnswer(provider, reason, preview=preview)
+
+
+def _response_json(resp: httpx.Response, provider: str) -> Any:
+    """Parse a provider body as JSON, or fail as a non-answer (triggers fallback)."""
+    try:
+        return resp.json()
+    except json.JSONDecodeError as exc:
+        preview = (resp.text or "")[:80]
+        logger.warning(
+            "LLM Router: treating response as failure (unparseable_json) provider=%s preview=%r",
+            provider,
+            preview,
+        )
+        raise LLMNonAnswer(provider, "unparseable_json", preview=preview) from exc
 
 
 def _omniroute_preset_for_task(task_type: str) -> str:
@@ -918,19 +1038,15 @@ async def _invoke_provider(
                 return content
 
             # Standard JSON response
-            try:
-                data = resp.json()
-            except Exception:
-                raise ValueError(
-                    f"OmniRoute returned non-JSON body (status={resp.status_code})"
-                )
-            choices = data.get("choices", [])
-            if not choices:
-                raise ValueError(f"OmniRoute returned no choices: {data}")
+            data = _response_json(resp, "omniroute")
+            choices = data.get("choices", []) if isinstance(data, dict) else []
+            if not choices or not isinstance(choices[0], dict):
+                raise LLMNonAnswer("omniroute", "unparseable_json", preview=str(data)[:80])
             msg = choices[0].get("message", {})
-            content = msg.get("content") or msg.get("reasoning_content") or ""
-            if not content:
-                raise ValueError("OmniRoute returned empty content in message")
+            content = ""
+            if isinstance(msg, dict):
+                content = msg.get("content") or msg.get("reasoning_content") or ""
+            reject_unusable_llm_text(content, "omniroute", expect_json=response_json)
             used_model = data.get("model", cfg.name)
             logger.info(f"OmniRoute: success via model={used_model} provider={data.get('provider', '?')}")
             return content
@@ -964,7 +1080,15 @@ async def _invoke_provider(
             resp = await client.post(f"{base_url.rstrip('/')}/chat/completions", headers=headers, json=payload)
             if not resp.is_success:
                 _raise_http_status(resp, prov)
-            return resp.json()["choices"][0]["message"]["content"]
+            data = _response_json(resp, prov)
+            try:
+                msg = data["choices"][0]["message"]
+                if not isinstance(msg, dict):
+                    raise LLMNonAnswer(prov, "unparseable_json", preview=str(data)[:80])
+                content = msg.get("content") or msg.get("reasoning_content") or ""
+            except (KeyError, IndexError, TypeError, AttributeError) as exc:
+                raise LLMNonAnswer(prov, "unparseable_json", preview=str(data)[:80]) from exc
+            return content
             
     elif prov == "kie":
         # docs.kie.ai: each family has its own path (Claude / Codex / Gemini / Grok / GPT-5.2).
@@ -994,7 +1118,7 @@ async def _invoke_provider(
                     resp = await client.post(url, headers=headers, json=payload)
                     if not resp.is_success:
                         _raise_http_status(resp, prov)
-                    data = resp.json()
+                    data = _response_json(resp, prov)
                     text = _extract_kie_claude_text(data)
                     if response_json:
                         stripped = text.lstrip()
@@ -1016,7 +1140,7 @@ async def _invoke_provider(
                 resp = await client.post(url, headers=headers, json=payload)
                 if not resp.is_success:
                     _raise_http_status(resp, prov)
-                return _extract_kie_responses_text(resp.json())
+                return _extract_kie_responses_text(_response_json(resp, prov))
 
         if route.kind == "openai_chat":
             payload = _kie_chat_completions_payload(
@@ -1026,7 +1150,7 @@ async def _invoke_provider(
                 resp = await client.post(url, headers=headers, json=payload)
                 if not resp.is_success:
                     _raise_http_status(resp, prov)
-                return _extract_kie_chat_text(resp.json())
+                return _extract_kie_chat_text(_response_json(resp, prov))
 
         _assert_never_kie_kind(route.kind)
 
@@ -1057,7 +1181,7 @@ async def _invoke_provider(
                 resp = await client.post(url, headers=headers, json=payload)
                 if not resp.is_success:
                     _raise_http_status(resp, prov)
-                data = resp.json()
+                data = _response_json(resp, prov)
                 text = ""
                 for block in data.get("content", []):
                     if block.get("type") == "text":
@@ -1212,8 +1336,20 @@ async def call_llm_resilient_meta(
                         ),
                         timeout=timeout + 0.75,
                     )
+                    reject_unusable_llm_text(text, cfg.provider, expect_json=response_json)
                     if response_json:
-                        parsed = _clean_and_parse_json(text)
+                        try:
+                            parsed = _clean_and_parse_json(text)
+                        except (ValueError, json.JSONDecodeError) as parse_err:
+                            logger.warning(
+                                "LLM Router: treating response as failure (unparseable_json) provider=%s",
+                                cfg.provider,
+                            )
+                            raise LLMNonAnswer(
+                                cfg.provider,
+                                "unparseable_json",
+                                preview=_normalize_llm_text(text)[:80],
+                            ) from parse_err
                         text = json.dumps(parsed)
                     logger.info("LLM Router: Success using %s", attempt_name)
                     _record_llm_success(task_type, cfg.provider, cfg.name)
@@ -1276,8 +1412,11 @@ async def call_llm_resilient(
     1. Acquires a semaphore to limit concurrency.
     2. Tries the primary model once; timeouts/connect errors fail over immediately.
     3. HTTP 5xx / 429 get one short retry, then the next fallback.
-    4. Stops when the chain budget is exhausted so the trading loop is not stalled.
-    5. Cleans and parses output (removing <think> tags, extracting JSON if requested).
+    4. Junk/non-answers (signup/login boilerplate, empty/too-short, unparseable JSON)
+       fail over immediately with a warning that names the provider.
+    5. HTTP 402 trips the credit-circuit cooldown so OpenRouter is not hammered.
+    6. Stops when the chain budget is exhausted so the trading loop is not stalled.
+    7. Cleans and parses output (removing <think> tags, extracting JSON if requested).
     """
     text, _ = await call_llm_resilient_meta(
         task_type=task_type,
