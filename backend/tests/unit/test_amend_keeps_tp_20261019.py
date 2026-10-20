@@ -5,6 +5,8 @@ removed at the broker. 2026-10-19: the exit manager trailed GBPAUD SELL
 298227173 to SL 1.90827 with tp=None and the broker TP (1.90469) vanished.
 """
 import asyncio
+import sys
+import types
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -16,8 +18,59 @@ from backend.services.ctrader_service import CTraderService
 from backend.services.ctrader_weekend_protect import apply_weekend_protect
 
 
+class _FakeAmendPositionSLTPReq:
+    """Spotware proto stand-in: optional legs are absent until assigned.
+
+    CI installs ``backend/requirements.txt`` only. ``ctrader_open_api`` is
+    added in the production image (Dockerfile ``--no-deps``; it pins
+    protobuf 3.20). ``HasField`` must match protobuf so omitted TP/SL
+    assertions stay meaningful.
+    """
+
+    def __init__(self):
+        object.__setattr__(self, "_set", set())
+        self.ctidTraderAccountId = 0
+        self.positionId = 0
+        self.payloadType = 2113
+
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        if name in {"stopLoss", "takeProfit"}:
+            object.__getattribute__(self, "_set").add(name)
+
+    def HasField(self, name: str) -> bool:
+        return name in object.__getattribute__(self, "_set")
+
+
+def _install_amend_sdk_stub(monkeypatch) -> None:
+    messages = types.ModuleType("ctrader_open_api.messages.OpenApiMessages_pb2")
+    messages.ProtoOAAmendPositionSLTPReq = _FakeAmendPositionSLTPReq
+    package = types.ModuleType("ctrader_open_api.messages")
+    package.OpenApiMessages_pb2 = messages
+    root = types.ModuleType("ctrader_open_api")
+    root.messages = package
+    for name, mod in (
+        ("ctrader_open_api", root),
+        ("ctrader_open_api.messages", package),
+        ("ctrader_open_api.messages.OpenApiMessages_pb2", messages),
+    ):
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    # Inject the reactor the same way as test_min_stop_distance: a real
+    # Twisted reactor.callFromThread only runs the callable if the reactor
+    # thread is already looping (VPS image) and is a no-op / error in CI.
+    reactor = SimpleNamespace(callFromThread=lambda fn, *a, **k: fn(*a, **k))
+    internet = types.ModuleType("twisted.internet")
+    internet.reactor = reactor
+    twisted = types.ModuleType("twisted")
+    twisted.internet = internet
+    monkeypatch.setitem(sys.modules, "twisted", twisted)
+    monkeypatch.setitem(sys.modules, "twisted.internet", internet)
+
+
 def _svc(monkeypatch, pos, db_levels=None, mark=1.90608):
     monkeypatch.setenv("TRADING_MODE", "live")
+    _install_amend_sdk_stub(monkeypatch)
     svc = CTraderService()
     svc._dry_run = False
     svc._connected = True
@@ -35,8 +88,6 @@ def _svc(monkeypatch, pos, db_levels=None, mark=1.90608):
         return dict(db_levels or {})
 
     monkeypatch.setattr(CTraderService, "_db_protection_for", staticmethod(_db))
-    import twisted.internet.reactor as reactor
-    monkeypatch.setattr(reactor, "callFromThread", lambda fn, *a, **k: fn(*a, **k), raising=False)
     return svc, db_calls
 
 
