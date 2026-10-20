@@ -81,6 +81,9 @@ class ConfigUpdateRequest(BaseModel):
 class ModifyPositionRequest(BaseModel):
     stop_loss: Optional[float] = Field(default=None, gt=0)
     take_profit: Optional[float] = Field(default=None, gt=0)
+    # cTrader amend only: remove a leg on purpose. An omitted leg is kept.
+    clear_stop_loss: bool = False
+    clear_take_profit: bool = False
 
 
 class LiveOrderRequest(BaseModel):
@@ -1920,10 +1923,25 @@ async def close_ctrader_live_position(
 
 @router.put("/ctrader/positions/{position_id}/amend")
 async def amend_ctrader_live_position(position_id: str, body: ModifyPositionRequest):
-    """Set absolute SL/TP on a live cTrader position. Send both legs; SL-only clears TP."""
+    """Set absolute SL/TP on a live cTrader position.
+
+    An omitted leg keeps the position's existing level (the Spotware amend
+    would otherwise remove it). Use clear_stop_loss / clear_take_profit to
+    remove a leg explicitly.
+    """
     from backend.services.ctrader_service import ctrader_broker
-    if body.stop_loss is None and body.take_profit is None:
-        raise HTTPException(status_code=400, detail="Provide stop_loss and/or take_profit")
+    if (
+        body.stop_loss is None and body.take_profit is None
+        and not body.clear_stop_loss and not body.clear_take_profit
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Provide stop_loss and/or take_profit (or clear_stop_loss / clear_take_profit)",
+        )
+    if body.clear_stop_loss and body.stop_loss is not None:
+        raise HTTPException(status_code=400, detail="stop_loss and clear_stop_loss are exclusive")
+    if body.clear_take_profit and body.take_profit is not None:
+        raise HTTPException(status_code=400, detail="take_profit and clear_take_profit are exclusive")
     if not ctrader_broker.is_connected and not ctrader_broker.dry_run:
         raise HTTPException(status_code=400, detail="cTrader is not connected")
     matched = next(
@@ -1948,6 +1966,8 @@ async def amend_ctrader_live_position(position_id: str, body: ModifyPositionRequ
             raise HTTPException(status_code=400, detail="Refusing SELL take-profit at/above mark")
     res = ctrader_broker.amend_position_sltp(
         position_id, stop_loss=sl, take_profit=tp,
+        clear_stop_loss=body.clear_stop_loss,
+        clear_take_profit=body.clear_take_profit,
     )
     if res.get("status") == "error":
         raise HTTPException(status_code=502, detail=res.get("error") or "cTrader amend failed")

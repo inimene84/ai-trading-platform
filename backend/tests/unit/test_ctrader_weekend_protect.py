@@ -79,7 +79,7 @@ def test_tighten_moves_winner_to_break_even(monkeypatch):
     broker.amend_position_sltp.return_value = {"status": "sent"}
     plan = apply_weekend_protect([pos], broker, now=FRIDAY_20_30)
     assert plan["actions"][0]["detail"] == "tighten_to_break_even"
-    broker.amend_position_sltp.assert_called_once_with("p3", stop_loss=1.1000)
+    broker.amend_position_sltp.assert_called_once_with("p3", stop_loss=1.1000, take_profit=None)
 
 
 def test_crypto_positions_are_ignored_on_friday():
