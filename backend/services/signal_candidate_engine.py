@@ -43,6 +43,7 @@ from backend.services.funding_filter import (
     evaluate_funding_filter,
     fetch_funding_rate,
 )
+from backend.services.portfolio_risk_manager import evaluate_entry, positions_from_objects
 
 from backend.services.entry_blocklists import entry_block_reason
 logger = logging.getLogger(__name__)
@@ -649,6 +650,38 @@ class SignalCandidateEngine:
                 f"committed ${committed:.2f} + new ${incoming:.2f} > "
                 f"{max_risk_pct}% of ${equity:.2f} equity (${budget:.2f})."
             )
+        return None
+
+    def _portfolio_risk_manager_breach(self, cand: Dict[str, Any]) -> Optional[str]:
+        """Deterministic PortfolioRiskManager gate (cluster / DD / funding / shadow)."""
+        sizing = cand.get("sizing") or {}
+        proposed = float(sizing.get("notional") or 0.0)
+        if proposed <= 0:
+            qty = float(sizing.get("quantity") or sizing.get("lots") or 0.0)
+            px = float(cand.get("entry_price") or 0.0)
+            proposed = abs(qty * px)
+        broker = str(cand.get("broker") or "")
+        equity = self._resolve_equity(broker)
+        open_pos = []
+        if broker == "binance_futures":
+            found = self._try_open_binance_positions()
+            if found is None:
+                return "PORTFOLIO_RISK — could not read Binance positions (fail-closed)"
+            open_pos = positions_from_objects(found)
+        verdict = evaluate_entry(
+            symbol=str(cand.get("symbol") or ""),
+            side=str(cand.get("direction") or ""),
+            equity=equity,
+            proposed_notional=proposed,
+            open_positions=open_pos,
+            funding_rate=(cand.get("funding_filter") or {}).get("funding_rate"),
+            strategy=str(cand.get("strategy") or ""),
+            timeframe=str(cand.get("timeframe") or cand.get("tf") or ""),
+        )
+        if not verdict.allow:
+            return f"PORTFOLIO_RISK — {'; '.join(verdict.reasons)}"
+        if proposed > 0 and 0 < verdict.sized_notional < proposed and cand.get("sizing"):
+            cand["sizing"] = apply_size_mult(cand["sizing"], verdict.sized_notional / proposed)
         return None
 
     def _binance_position_cap_breach(self, symbol: str) -> Optional[str]:
@@ -2073,6 +2106,15 @@ class SignalCandidateEngine:
                 cand["sizing"] = apply_size_mult(
                     cand["sizing"], float(funding_meta.get("size_mult") or 1.0),
                 )
+        if not force:
+            prm_block = self._portfolio_risk_manager_breach(cand)
+            if prm_block:
+                return {
+                    "success": False,
+                    "skipped": True,
+                    "candidate_id": candidate_id,
+                    "error": prm_block,
+                }
         if not force and self.is_symbol_cooling_down(cand_sym):
             return {
                 "success": False,

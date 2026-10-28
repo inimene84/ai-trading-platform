@@ -62,6 +62,11 @@ from backend.services.position_caps import (
     effective_binance_position_cap,
     live_binance_position_count,
 )
+from backend.services.portfolio_risk_manager import (
+    evaluate_entry,
+    positions_from_objects,
+)
+from backend.services.risk_guard import _peak_risk_equity
 from backend.services.trade_dedupe import aggregate_symbol_pnl
 from backend.services.symbol_aliases import (
     first_matching_open,
@@ -153,6 +158,7 @@ class TradingLoopService:
         # Cycle-level cache for exchange positions (populated once per cycle,
         # avoids calling get_positions() per symbol which returns ALL positions)
         self._cycle_positions: list = []
+        self._cycle_positions_ok = True
         # Semaphore: stagger symbol processing to bound Binance API bursts.
         # Default concurrency=1 with SYMBOL_BATCH_PAUSE_SEC=45 → one coin every ~45s
         # (20 symbols ≈ 15+ min per cycle). Env-tunable without rebuild.
@@ -346,6 +352,58 @@ class TradingLoopService:
         if (balance or {}).get("equity_source") == "paper_balance_default":
             return 0.0
         return float(equity or 0.0)
+
+    def _refresh_cycle_peak_equity(self, current: float) -> float:
+        """Best-effort 30-day snapshot peak. Missing history → current (no DD)."""
+        current_f = float(current or 0.0)
+        try:
+            db = SessionLocal()
+            try:
+                cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+                return float(_peak_risk_equity(db, cutoff, current_f) or current_f)
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.debug("30d peak equity unavailable: %s", exc)
+            return current_f
+
+    def _apply_portfolio_risk_manager(self, *, symbol, decision, bars, db, funding_rate):
+        """Size / veto a new entry. Returns (blocked, sized_qty_or_None, reason)."""
+        proposed = float(decision.quantity or 0.0) * float(decision.entry_price or 0.0)
+        if getattr(self, "_cycle_positions_ok", True) is False:
+            return True, None, "could not read exchange positions (fail-closed)"
+        live_pos = getattr(self, "_cycle_positions", None)
+        if live_pos is not None:
+            open_pos = positions_from_objects(live_pos)
+        else:
+            try:
+                open_pos = positions_from_objects(
+                    db.query(Trade).filter(Trade.status.in_(["open", "filled"])).all()
+                )
+            except Exception:
+                return True, None, "could not read open positions (fail-closed)"
+        verdict = evaluate_entry(
+            symbol=symbol,
+            side=getattr(decision, "action", ""),
+            equity=float(getattr(self, "_cycle_equity", 0.0) or 0.0),
+            proposed_notional=proposed,
+            bars=bars,
+            open_positions=open_pos,
+            peak_equity=float(getattr(self, "_cycle_peak_equity", 0.0) or 0.0) or None,
+            funding_rate=funding_rate,
+            strategy=getattr(self, "_strategy_name", "") or "combined",
+            timeframe=self._entry_bar_interval(),
+            reduce_only=False,
+        )
+        if not verdict.allow:
+            return True, None, "; ".join(verdict.reasons)
+        sized_qty = None
+        px = float(decision.entry_price or 0.0)
+        if px > 0 and verdict.sized_notional > 0 and proposed > 0:
+            new_qty = verdict.sized_notional / px
+            if new_qty < float(decision.quantity or 0.0) - 1e-12:
+                sized_qty = new_qty
+        return False, sized_qty, ""
 
     def _last_paper_book_from_db(self) -> dict | None:
         """Most recent persisted paper book, if it still has cash."""
@@ -842,6 +900,8 @@ class TradingLoopService:
             self._cycle_available = 0.0
             self._cycle_margin_used = 0.0
 
+        self._cycle_peak_equity = self._refresh_cycle_peak_equity(self._cycle_equity)
+
         if kill_switch_verified:
             try:
                 _kill_floor = self.risk_config.kill_floor_usdt
@@ -979,11 +1039,14 @@ class TradingLoopService:
         if self._is_live_binance():
             try:
                 self._cycle_positions = binance_futures_broker.get_positions(raise_on_error=True)
+                self._cycle_positions_ok = True
             except Exception as _pos_e:
                 logger.warning(f"Could not cache exchange positions: {_pos_e}")
                 self._cycle_positions = []
+                self._cycle_positions_ok = False
         else:
             self._cycle_positions = self._paper_cycle_positions()
+            self._cycle_positions_ok = True
 
         # ── STEP 1A: Position Manager — Review ALL open positions for exits ──
         _exits_triggered = 0
@@ -1638,6 +1701,26 @@ class TradingLoopService:
                         signal_status = "rejected"
                         signal_reason = f"{signal_reason} | margin gate"
                         decision = None
+
+                    if decision and not is_flatten_action(getattr(decision, "action", "")):
+                        blocked, sized_qty, prm_reason = self._apply_portfolio_risk_manager(
+                            symbol=symbol,
+                            decision=decision,
+                            bars=bars,
+                            db=db,
+                            funding_rate=current_funding_rate,
+                        )
+                        if blocked:
+                            logger.warning(
+                                "  [ %s ] PortfolioRiskManager blocked: %s",
+                                symbol,
+                                prm_reason,
+                            )
+                            signal_status = "rejected"
+                            signal_reason = f"{signal_reason} | PRM {prm_reason}"
+                            decision = None
+                        elif sized_qty is not None:
+                            decision.quantity = sized_qty
 
                     if decision:
                         ut = UnifiedTrading()

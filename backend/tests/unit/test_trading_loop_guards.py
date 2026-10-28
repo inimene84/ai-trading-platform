@@ -572,3 +572,58 @@ def test_check_sl_tp_no_hit_leaves_trade_open():
 
     assert trade.status != "closed"
     UT.return_value.place_order.assert_not_called()
+
+
+def test_portfolio_risk_manager_blocks_high_funding_long():
+    loop = _loop()
+    loop._cycle_equity = 10_000.0
+    loop._cycle_peak_equity = 10_000.0
+    loop._cycle_positions = []
+    decision = SimpleNamespace(action="BUY", quantity=0.01, entry_price=100.0)
+    blocked, qty, reason = loop._apply_portfolio_risk_manager(
+        symbol="BTCUSDT",
+        decision=decision,
+        bars=[{"close": 100.0}] * 30,
+        db=MagicMock(),
+        funding_rate=0.0005,
+    )
+    assert blocked is True
+    assert qty is None
+    assert "funding" in reason
+
+
+def test_portfolio_risk_manager_fail_closed_when_book_unreadable():
+    loop = _loop()
+    loop._cycle_equity = 10_000.0
+    loop._cycle_peak_equity = 10_000.0
+    loop._cycle_positions = []
+    loop._cycle_positions_ok = False
+    decision = SimpleNamespace(action="BUY", quantity=0.01, entry_price=100.0)
+    blocked, qty, reason = loop._apply_portfolio_risk_manager(
+        symbol="BTCUSDT",
+        decision=decision,
+        bars=[{"close": 100.0}] * 30,
+        db=MagicMock(),
+        funding_rate=0.0,
+    )
+    assert blocked is True
+    assert qty is None
+    assert "fail-closed" in reason
+
+
+def test_portfolio_risk_manager_sizes_down_on_soft_drawdown():
+    loop = _loop()
+    loop._cycle_equity = 9_200.0
+    loop._cycle_peak_equity = 10_000.0
+    loop._cycle_positions = []
+    decision = SimpleNamespace(action="BUY", quantity=1.0, entry_price=100.0)
+    blocked, qty, reason = loop._apply_portfolio_risk_manager(
+        symbol="ETHUSDT",
+        decision=decision,
+        bars=[{"close": 100.0 + (i % 2)} for i in range(80)],
+        db=MagicMock(),
+        funding_rate=0.0,
+    )
+    assert blocked is False
+    assert qty is not None
+    assert qty < 1.0
