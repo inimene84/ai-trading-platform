@@ -19,6 +19,12 @@ from backend.services.binance_futures_service import binance_futures_broker
 from backend.services.binance_websocket import binance_ws
 from backend.services.trading_loop import trading_loop, get_active_broker_name
 
+# Phase 2–3 bloat is intentionally NOT imported on the live path (Task 1.1):
+# backend.portfolio.self_driving_portfolio, backend.services.finmem_engine,
+# backend.services.almgren_chriss, backend.audit.vcp_v12,
+# backend.routes.rebuild_architecture_routes. Those files are absent from this
+# tree; FINMEM stays research/postmortem-only and is unwired from opinion_layer.
+
 from backend.security import admin_auth_enabled, is_sensitive_request, validate_admin_request
 # Load environment variables
 load_dotenv()

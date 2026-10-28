@@ -1,6 +1,10 @@
 """
 Combined Strategy — runs all strategies and votes.
 
+Phase 2–3 allocators (SelfDrivingPortfolio, FINMEM engine, Almgren-Chriss,
+VCP sidecar) are not imported here. Live path is the three technical
+strategies + regime weights only.
+
 v2 — Regime-Aware Weights
 --------------------------
 Previous bug: fixed weights (trend=0.50, mean_rev=0.20, breakout=0.30) applied

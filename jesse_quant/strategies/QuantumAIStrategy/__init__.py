@@ -2,16 +2,21 @@ from jesse.strategies import Strategy, cached
 import jesse.indicators as ta
 from jesse import utils
 
+try:
+    from equity_allowlist import ALLOWED_EQUITY_BASES, is_allowed_equity_symbol
+except ImportError:  # backend / repo-root PYTHONPATH
+    from jesse_quant.equity_allowlist import ALLOWED_EQUITY_BASES, is_allowed_equity_symbol
+
 
 class QuantumAIStrategy(Strategy):
     """
-    QuantumTrade Long-Only Trend Riding Strategy (for Crypto Bull Regimes)
-    - Macro Filter: Price > 200 EMA (Trend alignment)
-    - Entry: Pullback to 20/50 EMA with RSI dip (buying value in an uptrend)
-    - Take Profit: 3.5 ATR (letting winners run)
-    - Trailing Lock: Locks SL to break-even once 1.2 ATR profit is achieved
-    - Zero Shorts: Eliminates counter-trend liquidation risk during bull markets
+    QuantumTrade long-only trend rider — US tech equities only.
+
+    Task 1.2: ALLOWED_EQUITY_BASES = {NVDA, MSFT, AAPL}. Crypto and FX
+    are rejected in should_long so this strategy cannot bleed on those books.
     """
+
+    ALLOWED_EQUITY_BASES = ALLOWED_EQUITY_BASES
 
     def __init__(self):
         super().__init__()
@@ -55,6 +60,8 @@ class QuantumAIStrategy(Strategy):
         return ta.atr(self.candles, 14)
 
     def should_long(self) -> bool:
+        if not is_allowed_equity_symbol(getattr(self, "symbol", "")):
+            return False
         # Strong bull trend: Price > EMA 200 and EMA 50 > EMA 200
         is_bull_regime = self.price > self.ema_slow and self.ema_mid > self.ema_slow
         
@@ -83,6 +90,8 @@ class QuantumAIStrategy(Strategy):
         return float(min(0.0015, max(0.0003, 0.0003 * vol_mult)))
 
     def go_long(self):
+        if not is_allowed_equity_symbol(getattr(self, "symbol", "")):
+            return
         qty = utils.size_to_qty(self.balance * 0.35, self.price, fee_rate=self.fee_rate)
         sl_mult = self.hp["sl_atr_mult"] if hasattr(self, "hp") and "sl_atr_mult" in self.hp else 1.75
         tp_mult = self.hp["tp_atr_mult"] if hasattr(self, "hp") and "tp_atr_mult" in self.hp else 5.5
