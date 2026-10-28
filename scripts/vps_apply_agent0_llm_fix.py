@@ -1,4 +1,8 @@
-"""Comprehensive Agent Zero LLM fix & self-heal setup on VPS."""
+"""Comprehensive Agent Zero LLM fix & self-heal setup on VPS.
+
+Model catalog updates should go through ``scripts/vps_apply_agent0_kie_models.py``
+(family-aware proxy + Astra/Fable presets). This script still repairs keys.
+"""
 
 import subprocess
 import tempfile
@@ -56,7 +60,7 @@ PROVIDERS_TO_SET = {
         'name': 'Kie.ai Claude',
         'litellm_provider': 'openai',
         'models_list': {
-            'list': ['claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-opus-4-6']
+            'list': ['claude-fable-5-1', 'claude-fable-5', 'claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-opus-4-6']
         },
         'kwargs': {
             'a0_api_mode': 'chat',
@@ -68,7 +72,7 @@ PROVIDERS_TO_SET = {
         'name': 'Kie.ai GPT Codex',
         'litellm_provider': 'openai',
         'models_list': {
-            'list': ['gpt-5.4-codex', 'gpt-5.1-codex', 'gpt-5-2']
+            'list': ['gpt-6-astra', 'gpt-5-6-luna', 'gpt-5-6-sol', 'gpt-5-6-terra', 'gpt-5-2', 'gpt-5.4-codex', 'gpt-5.1-codex']
         },
         'kwargs': {
             'a0_api_mode': 'chat',
@@ -80,7 +84,7 @@ PROVIDERS_TO_SET = {
         'name': 'Kie.ai proxy',
         'litellm_provider': 'openai',
         'models_list': {
-            'list': ['claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-opus-4-6', 'gpt-5.4-codex', 'gpt-5.1-codex', 'gpt-5-2']
+            'list': ['claude-fable-5-1', 'claude-fable-5', 'claude-sonnet-5', 'claude-opus-5', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-opus-4-6', 'gpt-6-astra', 'gpt-5-6-luna', 'gpt-5-6-sol', 'gpt-5.4-codex', 'gpt-5.1-codex', 'gpt-5-2']
         },
         'kwargs': {
             'a0_api_mode': 'chat',
@@ -253,8 +257,11 @@ if presets_path.exists():
     print('Updated presets.yaml')
 
 config_path = Path('/var/lib/docker/volumes/agent-zero_a0-data/_data/plugins/_model_config/config.json')
-config_path.write_text(json.dumps({'model_preset': 'Kie.ai Sonnet'}, indent=2), encoding='utf-8')
-print('Updated config.json with active preset Kie.ai Sonnet')
+if not config_path.exists():
+    config_path.write_text(json.dumps({'model_preset': 'Kie.ai Sonnet'}, indent=2), encoding='utf-8')
+    print('Seeded config.json with Kie.ai Sonnet')
+else:
+    print('Left existing model_preset unchanged')
 
 print('\\n=== 6. Updating fix-kieai-provider.sh ===')
 fix_sh = Path('/var/lib/docker/volumes/agent-zero_a0-data/_data/fix-kieai-provider.sh')
