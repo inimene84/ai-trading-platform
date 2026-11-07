@@ -5,20 +5,31 @@ Features:
 - Encrypted / structured persistent store for rotating refresh tokens.
 - Proactive token renewal before the 30-day expiration window (< 5 days remaining).
 - Resilient fallback from persistent volume/file to environment variables.
+- Cooldown, single-flight lock, and no fallback POST after an ambiguous timeout
+  so a single-use Spotware refresh token is not reused.
 """
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 import httpx
 
+from backend.services.ctrader_oauth import token_urls as _ctrader_token_urls
+
 logger = logging.getLogger(__name__)
 
-from backend.services.ctrader_oauth import token_urls as _ctrader_token_urls
 TOKENS_FILE = Path("data/ctrader_tokens.json")
+
+# Spotware refresh tokens are single-use. After a timeout it is unknown whether
+# the primary endpoint already rotated the token, so we must not POST it again.
+REFRESH_COOLDOWN_SEC = 600.0
+REFRESH_HTTP_TIMEOUT_SEC = 30.0
+DEFAULT_EXPIRES_IN_SEC = 2592000  # ~30 days
+PROACTIVE_REFRESH_REMAINING_SEC = 432000  # 5 days
 
 
 def _ensure_dir():
@@ -31,6 +42,8 @@ class CTraderTokenStore:
     def __init__(self, file_path: Path = TOKENS_FILE):
         self.file_path = file_path
         self._memory_cache: Optional[Dict[str, Any]] = None
+        self._last_refresh_attempt_ts: float = 0.0
+        self._refresh_lock = threading.Lock()
 
     def get_tokens(self) -> Dict[str, Any]:
         """Load the latest valid token set."""
@@ -61,7 +74,7 @@ class CTraderTokenStore:
             "client_secret": client_secret,
             "account_id": int(account_id) if account_id.isdigit() else 0,
             "updated_at": int(time.time()),
-            "expires_in": 2592000,  # default ~30 days
+            "expires_in": DEFAULT_EXPIRES_IN_SEC,  # default ~30 days
         }
         self._memory_cache = tokens
         return dict(tokens)
@@ -78,10 +91,21 @@ class CTraderTokenStore:
         except Exception as e:
             logger.error(f"Failed to save cTrader tokens to disk: {e}")
 
+    def _needs_refresh(self, tokens: Dict[str, Any], force: bool, now: int) -> bool:
+        updated_at = tokens.get("updated_at", now)
+        expires_in = tokens.get("expires_in", DEFAULT_EXPIRES_IN_SEC)
+        time_elapsed = now - updated_at
+        return bool(force) or (time_elapsed > (expires_in - PROACTIVE_REFRESH_REMAINING_SEC))
+
     def refresh_if_needed(self, force: bool = False) -> Optional[str]:
         """
         Check if token needs refresh (less than 5 days remaining or forced).
         Returns active access_token or None.
+
+        Refresh POSTs are serialized on ``_refresh_lock`` (single-flight) and
+        rate-limited by ``REFRESH_COOLDOWN_SEC`` after any attempt, including
+        timeouts, so concurrent connect/has_credentials callers cannot reuse a
+        single-use Spotware refresh token.
         """
         tokens = self.get_tokens()
         client_id = tokens.get("client_id") or os.getenv("CTRADER_CLIENT_ID", "")
@@ -92,15 +116,37 @@ class CTraderTokenStore:
             return tokens.get("access_token")
 
         now = int(time.time())
-        updated_at = tokens.get("updated_at", now)
-        expires_in = tokens.get("expires_in", 2592000)
-        # Refresh if 25 days old or forced
-        time_elapsed = now - updated_at
-        should_refresh = force or (time_elapsed > (expires_in - 432000))  # 5 days before expiry
-
-        if not should_refresh:
+        if not self._needs_refresh(tokens, force, now):
             return tokens.get("access_token")
 
+        with self._refresh_lock:
+            tokens = self.get_tokens()
+            client_id = tokens.get("client_id") or os.getenv("CTRADER_CLIENT_ID", "")
+            client_secret = tokens.get("client_secret") or os.getenv("CTRADER_CLIENT_SECRET", "")
+            refresh_token = tokens.get("refresh_token") or os.getenv("CTRADER_REFRESH_TOKEN", "")
+            if not refresh_token or not client_id or not client_secret:
+                return tokens.get("access_token")
+            now = int(time.time())
+            if not self._needs_refresh(tokens, force, now):
+                return tokens.get("access_token")
+            since_attempt = time.time() - self._last_refresh_attempt_ts
+            if since_attempt < REFRESH_COOLDOWN_SEC:
+                logger.warning(
+                    "cTrader token refresh skipped (within %.0fs cooldown window)",
+                    REFRESH_COOLDOWN_SEC,
+                )
+                return tokens.get("access_token")
+            self._last_refresh_attempt_ts = time.time()
+            return self._refresh_via_oauth(tokens, client_id, client_secret, refresh_token, now)
+
+    def _refresh_via_oauth(
+        self,
+        tokens: Dict[str, Any],
+        client_id: str,
+        client_secret: str,
+        refresh_token: str,
+        now: int,
+    ) -> Optional[str]:
         logger.info("cTrader token rotation: renewing access token via Spotware OAuth...")
         payload = {
             "grant_type": "refresh_token",
@@ -110,12 +156,12 @@ class CTraderTokenStore:
         }
         for token_url in _ctrader_token_urls():
             try:
-                resp = httpx.post(token_url, data=payload, timeout=15.0)
+                resp = httpx.post(token_url, data=payload, timeout=REFRESH_HTTP_TIMEOUT_SEC)
                 data = resp.json()
                 if resp.status_code == 200 and not data.get("errorCode"):
                     new_access = data.get("accessToken") or data.get("access_token")
                     new_refresh = data.get("refreshToken") or data.get("refresh_token") or refresh_token
-                    expires = data.get("expiresIn") or data.get("expires_in") or 2592000
+                    expires = data.get("expiresIn") or data.get("expires_in") or DEFAULT_EXPIRES_IN_SEC
                     if not new_access:
                         continue
                     tokens["access_token"] = new_access
@@ -131,6 +177,15 @@ class CTraderTokenStore:
                     resp.status_code,
                     data.get("description") or resp.text[:200],
                 )
+            except httpx.TimeoutException as e:
+                # Ambiguous: Spotware may already have rotated the single-use
+                # refresh token. Do not POST it to a fallback URL.
+                logger.error(
+                    "cTrader token refresh timed out on %s (aborting fallback to avoid single-use token reuse): %s",
+                    token_url,
+                    e,
+                )
+                break
             except Exception as e:
                 logger.error(f"cTrader token refresh network error ({token_url}): {e}")
 

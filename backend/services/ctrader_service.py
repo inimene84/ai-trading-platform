@@ -1554,9 +1554,13 @@ class CTraderService(BrokerService):
 
     @staticmethod
     def should_force_token_refresh(last_error: str) -> bool:
-        """Refresh OAuth when Spotware rejected routing or the access token."""
+        """Refresh OAuth only when Spotware explicitly rejected or expired the access token.
+
+        CANT_ROUTE is Spotware maintenance / routing — burning a single-use
+        refresh token does not restore the route.
+        """
         err = str(last_error or "")
-        return "CANT_ROUTE" in err or "ACCESS_TOKEN_INVALID" in err
+        return "ACCESS_TOKEN_INVALID" in err or "OA_AUTH_TOKEN_EXPIRED" in err
 
     @staticmethod
     def sanitized_host_override(
