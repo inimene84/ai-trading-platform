@@ -144,6 +144,51 @@ def test_cooldown_also_blocks_proactive_refresh_after_timeout(tmp_path):
     assert posts == [PRIMARY]
 
 
+def test_request_may_have_reached_spotware_classification():
+    reached = CTraderTokenStore.request_may_have_reached_spotware
+    assert reached(got_response=True) is True
+    assert reached(exc=httpx.ReadTimeout("read timed out")) is True
+    assert reached(exc=httpx.WriteTimeout("write timed out")) is True
+    assert reached(exc=httpx.TimeoutException("timed out")) is True
+    assert reached(exc=httpx.ConnectError("connection refused")) is False
+    assert reached(exc=httpx.ConnectTimeout("connect timed out")) is False
+    assert reached(exc=httpx.PoolTimeout("pool timed out")) is False
+
+
+def test_connect_error_on_all_urls_does_not_start_cooldown(tmp_path):
+    """Pre-send failures never consumed the grant; retry immediately after the outage."""
+    store = _store(tmp_path)
+    posts: list[str] = []
+
+    def fake_post(url, data=None, timeout=None):
+        posts.append(url)
+        raise httpx.ConnectError("connection refused")
+
+    with patch("backend.services.ctrader_tokens._ctrader_token_urls", return_value=(PRIMARY, FALLBACK)), patch(
+        "backend.services.ctrader_tokens.httpx.post", side_effect=fake_post
+    ):
+        assert store.refresh_if_needed(force=True) == "acc_old"
+        assert store.refresh_if_needed(force=True) == "acc_old"
+    assert posts == [PRIMARY, FALLBACK, PRIMARY, FALLBACK]
+
+
+def test_ambiguous_timeout_starts_cooldown_and_skips_retry(tmp_path):
+    """Read timeout may have rotated the grant; do not POST again for 600s."""
+    store = _store(tmp_path)
+    posts: list[str] = []
+
+    def fake_post(url, data=None, timeout=None):
+        posts.append(url)
+        raise httpx.ReadTimeout("read timed out")
+
+    with patch("backend.services.ctrader_tokens._ctrader_token_urls", return_value=(PRIMARY, FALLBACK)), patch(
+        "backend.services.ctrader_tokens.httpx.post", side_effect=fake_post
+    ):
+        assert store.refresh_if_needed(force=True) == "acc_old"
+        assert store.refresh_if_needed(force=True) == "acc_old"
+    assert posts == [PRIMARY]
+
+
 def test_concurrent_force_refresh_is_single_flight(tmp_path):
     store = _store(tmp_path)
     posts: list[str] = []

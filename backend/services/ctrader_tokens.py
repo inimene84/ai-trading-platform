@@ -102,10 +102,11 @@ class CTraderTokenStore:
         Check if token needs refresh (less than 5 days remaining or forced).
         Returns active access_token or None.
 
-        Refresh POSTs are serialized on ``_refresh_lock`` (single-flight) and
-        rate-limited by ``REFRESH_COOLDOWN_SEC`` after any attempt, including
-        timeouts, so concurrent connect/has_credentials callers cannot reuse a
-        single-use Spotware refresh token.
+        Refresh POSTs are serialized on ``_refresh_lock`` (single-flight).
+        The 600s cooldown starts only when a request may have reached Spotware
+        (an HTTP response, or a read/write timeout). Confirmed pre-send
+        failures such as ``ConnectError`` do not start the cooldown, so a
+        brief outage does not block re-auth for ten minutes.
         """
         tokens = self.get_tokens()
         client_id = tokens.get("client_id") or os.getenv("CTRADER_CLIENT_ID", "")
@@ -136,8 +137,28 @@ class CTraderTokenStore:
                     REFRESH_COOLDOWN_SEC,
                 )
                 return tokens.get("access_token")
-            self._last_refresh_attempt_ts = time.time()
             return self._refresh_via_oauth(tokens, client_id, client_secret, refresh_token, now)
+
+    def _arm_refresh_cooldown(self) -> None:
+        self._last_refresh_attempt_ts = time.time()
+
+    @staticmethod
+    def request_may_have_reached_spotware(
+        *,
+        got_response: bool = False,
+        exc: BaseException | None = None,
+    ) -> bool:
+        """True when the single-use refresh grant may already have been consumed.
+
+        An HTTP response reached Spotware. Read/write timeouts are ambiguous.
+        Connect/pool timeouts and other connect errors never delivered the grant.
+        """
+        if got_response:
+            return True
+        # httpx 0.28: ConnectTimeout is a TimeoutException, not a ConnectError.
+        if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+            return False
+        return isinstance(exc, httpx.TimeoutException)
 
     def _refresh_via_oauth(
         self,
@@ -157,6 +178,7 @@ class CTraderTokenStore:
         for token_url in _ctrader_token_urls():
             try:
                 resp = httpx.post(token_url, data=payload, timeout=REFRESH_HTTP_TIMEOUT_SEC)
+                self._arm_refresh_cooldown()
                 data = resp.json()
                 if resp.status_code == 200 and not data.get("errorCode"):
                     new_access = data.get("accessToken") or data.get("access_token")
@@ -178,8 +200,11 @@ class CTraderTokenStore:
                     data.get("description") or resp.text[:200],
                 )
             except httpx.TimeoutException as e:
-                # Ambiguous: Spotware may already have rotated the single-use
-                # refresh token. Do not POST it to a fallback URL.
+                # Do not POST the single-use refresh token to a fallback URL.
+                # Arm cooldown only for read/write timeouts (request may have
+                # reached Spotware). ConnectTimeout never delivered the grant.
+                if self.request_may_have_reached_spotware(exc=e):
+                    self._arm_refresh_cooldown()
                 logger.error(
                     "cTrader token refresh timed out on %s (aborting fallback to avoid single-use token reuse): %s",
                     token_url,
