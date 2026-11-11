@@ -488,7 +488,13 @@ def test_rate_limit_does_not_drop_the_session():
 
 
 def test_get_trendbars_live_window_follows_count():
-    """The protobuf window is the count lookback, not a flat week."""
+    """The protobuf window is the count lookback, not a flat week.
+
+    Freeze wall-clock time: ``trendbar_lookback_ms`` is market-hours aware, so
+    a 2ms drift between send and assert changes the binary-searched span.
+    """
+    wednesday = datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc)
+    now = wednesday.timestamp()
     svc = CTraderService()
     svc._dry_run = False
     svc._connected = True
@@ -516,7 +522,7 @@ def test_get_trendbars_live_window_follows_count():
     twisted_internet = MagicMock()
     twisted_internet.reactor = reactor
     messages_mod = MagicMock()
-    with patch.dict(
+    with patch("backend.services.ctrader_service.time.time", return_value=now), patch.dict(
         "sys.modules",
         {
             "twisted": twisted_mod,
@@ -528,7 +534,10 @@ def test_get_trendbars_live_window_follows_count():
         svc.get_trendbars("EURUSD", "M5", count=40)
 
     span = captured["to"] - captured["from"]
-    assert span == CTraderService.trendbar_lookback_ms(5, 40)
+    expected = CTraderService.trendbar_lookback_ms(
+        5, 40, now_ms=int(now * 1000), symbol="EURUSD"
+    )
+    assert span == expected
     assert span < 7 * 86400 * 1000
 
 
@@ -554,9 +563,10 @@ def test_pick_trader_account_falls_back_to_live_flag():
     assert CTraderService.pick_trader_account_id(rows, 999, False) == 11
 
 
-def test_should_force_token_refresh_on_invalid_or_cant_route():
-    assert CTraderService.should_force_token_refresh("CANT_ROUTE_REQUEST") is True
+def test_should_force_token_refresh_on_invalid_or_expired_not_cant_route():
+    assert CTraderService.should_force_token_refresh("CANT_ROUTE_REQUEST") is False
     assert CTraderService.should_force_token_refresh("CH_ACCESS_TOKEN_INVALID — Invalid access token") is True
+    assert CTraderService.should_force_token_refresh("OA_AUTH_TOKEN_EXPIRED") is True
     assert CTraderService.should_force_token_refresh("authentication timed out") is False
 
 
